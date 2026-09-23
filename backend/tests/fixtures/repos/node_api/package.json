@@ -1,0 +1,12 @@
+{
+  "name": "medha-sample-node",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js --port 8080",
+    "dev": "PORT=8080 node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0"
+  }
+}

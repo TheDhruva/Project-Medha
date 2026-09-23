@@ -1,0 +1,30 @@
+# Controlled MEDHA fixture — lightweight images only.
+# Used for local DockerExecutor validation when MEDHA_DOCKER_EXECUTE=true.
+# Does not represent a production stack.
+
+services:
+  database:
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    networks: [medha_net]
+
+  backend:
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    depends_on: [database]
+    networks: [medha_net]
+
+  frontend:
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    depends_on: [backend]
+    networks: [medha_net]
+
+  analytics:
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    networks: [medha_net]
+
+networks:
+  medha_net:
+    driver: bridge

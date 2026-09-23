@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local runtime / secrets
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+data/
+!data/.gitkeep
+logs/
+tmp/
+.cache/
+backend/.venv/
+backend/**/*.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker (local volumes, not Dockerfiles themselves)
+docker-data/
+
+# Coverage / reports
+coverage/
+evaluation/results/
+docs/evaluation/results/

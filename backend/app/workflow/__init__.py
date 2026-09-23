@@ -1,0 +1,1 @@
+"""Workflow package — real-mode PlanningPipeline (Phases 4–11) and helpers."""
