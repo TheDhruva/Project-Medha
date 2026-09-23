@@ -2,248 +2,200 @@
 
 **Constraint-Negotiating Multi-Agent Architecture for Verifiable DevOps Automation**
 
-A college major-project **prototype** for constraint-aware, verifiable DevOps automation on a local laptop.
+MEDHA is a local-first research prototype for planning, verifying, executing, and explaining multi-agent DevOps workflows. It uses typed constraints, bounded negotiation, deterministic verification, a causal execution graph, and dependency-aware rollback.
 
-> MEDHA is **not** production-ready DevOps, not fully autonomous operations, and not a claim of scientific superiority over existing systems. It is a demonstrable research prototype with measured results on project-defined datasets.
+> MEDHA is an academic prototype, not a production deployment platform. It does not provide cloud, multi-host, Kubernetes, CI/CD, SSH, or arbitrary repository deployment.
 
----
+## Contents
 
-## 1. Overview
+- [Why MEDHA](#why-medha)
+- [How it works](#how-it-works)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Testing](#testing)
+- [Repository layout](#repository-layout)
+- [Documentation](#documentation)
+- [Scope and limitations](#scope-and-limitations)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
-MEDHA accepts a repository URL and operator intent, analyzes deployment manifests, lets specialist logical agents publish **typed constraints**, negotiates conflicts via the **Constraint Negotiation Protocol (CNP)**, **verifies** the plan before any host mutation, executes locally (simulator by default; optional Docker), records actions in a **Causal Execution Graph (CEG)**, and on failure performs **scoped rollback** that preserves independent successful services. **Demo Mode** provides deterministic offline demos; **Real Mode** runs the same pipeline shape against local analysis/execution.
+## Why MEDHA
 
----
+Infrastructure agents can produce conflicting decisions about ports, mounts, security, environment variables, and execution order. MEDHA makes those decisions observable and verifiable before execution:
 
-## 2. Problem statement
+1. Analyze a local repository and deployment intent.
+2. Collect typed constraints from specialist agents.
+3. Resolve conflicts with the Constraint Negotiation Protocol (CNP).
+4. Verify and critique the plan before any host mutation.
+5. Execute with a simulator by default, or opt into local Docker.
+6. Record actions in a Causal Execution Graph (CEG).
+7. Roll back only failed downstream dependents while preserving independent successes.
 
-Multi-agent and LLM-assisted DevOps tools often:
+Change Intelligence (CIG) can additionally inspect local Git revisions and produce evidence-backed impact, risk, and verification requirements without executing repository code.
 
-- collide on ports, environment, mounts, and security without an explicit negotiation protocol;
-- execute opaque plans without a hard verification gate;
-- roll back too broadly (or not at all) when one service fails;
-- depend on cloud-heavy stacks that are hard to demo or evaluate on a low-end laptop.
-
----
-
-## 3. Motivation
-
-Infrastructure decisions (ports, privileges, dependency order) must be **reproducible and explainable**. MEDHA keeps research-critical mechanisms **deterministic** and treats optional LLM mediation as a bounded escape hatch—not the default brain for every decision.
-
----
-
-## 4. Core contributions
-
-### Constraint Negotiation Protocol (CNP)
-
-Specialist agents publish typed constraints (`PORT_CLAIM`, `ENV_VAR`, `VOLUME_MOUNT`, `NETWORK_POLICY`, `SECURITY_POLICY`, `EXEC_ORDER`). Conflicts are detected by resource key and resolved by priority:
-
-`SECURITY > RESOURCE > DEPENDENCY > PREFERENCE`
-
-Then: alternatives → deterministic tiebreak (LLM optional for same-priority ambiguity). Max **3** rounds.
-
-### Causal Execution Graph (CEG)
-
-Each meaningful action is a node with parents/dependents and status. On failure, MEDHA rolls back **downstream dependents** in reverse dependency order and **preserves** ancestors and independent branches.
-
-### Change Impact Graph (CIG)
-
-Phase 12/2 — before executing anything, MEDHA runs deterministic **change intelligence** over local git revisions (`base → target`): a ChangeSet becomes file/symbol diffs, dependency edges with concrete `file:line` evidence and confidence, an impact traversal, a composite **risk**, and **verification requirements** mapped to the existing verifier. Unresolved or deleted imports are reported as evidence — never invented. No LLM is used. **CIG ≠ CEG**: CIG is repository dependency impact; CEG is runtime execution causality.
-
----
-
-## 5. System architecture
+## How it works
 
 ```mermaid
-flowchart TD
-  User[User] --> UI[Next.js Bright Mode UI]
-  UI -->|REST + SSE| API[FastAPI]
-  API --> WF[Deployment workflow]
-  WF --> PF[Preflight]
-  WF --> AN[Repository analyzer]
-  WF --> CI[Change Intelligence - CIG]
-  WF --> AG[Specialist agents]
-  WF --> CNP[CNP]
-  WF --> VC[Verification + Critic]
-  WF --> EP[Execution planner]
-  WF --> CEG[CEG]
-  WF --> EX[Executor simulator / Docker]
-  EX --> RB[Scoped rollback]
-  WF --> EV[Evaluation artifacts]
-  API --> DB[(SQLite)]
-  API --> SSE[SSE event bus]
+flowchart LR
+    UI[Next.js console] --> API[FastAPI API]
+    API --> WF[Workflow]
+    WF --> CIG[Change Intelligence]
+    WF --> AG[Specialist agents]
+    AG --> CNP[Constraint negotiation]
+    CNP --> V[Verification and critic]
+    V --> E[Simulator or local Docker]
+    E --> CEG[Causal execution graph]
+    CEG --> RB[Scoped rollback]
+    API --> DB[(SQLite)]
 ```
 
-Logical agents are **in-process** Python callables (not microservices). Persistence is **SQLite**. Events are **SSE**.
+The backend is one FastAPI process. Logical agents are in-process Python components; MEDHA does not require Redis, PostgreSQL, Kubernetes, or a fleet of worker services.
 
----
+## Features
 
-## 6. Main workflow
+- Deterministic CNP with typed constraints, priority resolution, alternatives, and a maximum of three rounds.
+- Verification and critic gates that block unverified execution.
+- Simulator-first execution with opt-in local Docker mutation.
+- CEG action history and dependency-aware rollback.
+- CIG analysis for local Git repositories with file and symbol evidence.
+- Demo Mode with deterministic offline scenarios labelled `DEMO/MOCK`.
+- FastAPI REST endpoints and Server-Sent Events for observable workflow state.
+- SQLite persistence with no mandatory cloud services or API keys.
+- Offline evaluation runners for CNP and CEG comparisons.
 
-```
-Repository → Preflight → Analysis → Change Intelligence (CIG) → Specialist Agents → CNP
-  → Verification → Critic → Replan (≤3) → Execution Plan → CEG
-  → Execution → Failure? → Scoped Rollback → Result → Evaluation
-```
+## Requirements
 
-**Principle:** never execute an unverified plan.
+- Python 3.11 or newer
+- Node.js 18 or newer and npm
+- Git
+- Docker Desktop, only for optional Docker execution and E2E tests
 
----
+## Quick start
 
-## 7. Technology stack
-
-| Layer | Choice |
-|-------|--------|
-| Frontend | Next.js, React, TypeScript, Tailwind, `@xyflow/react` |
-| Backend | Python, FastAPI, Uvicorn, Pydantic v2, PyYAML, pytest |
-| Data | SQLite |
-| Events | REST + SSE |
-| Execution | Simulator (default) / local Docker CLI (opt-in) |
-
-**₹0 mandatory cost** — no paid cloud/LLM required for Demo Mode or core research paths.
-
----
-
-## 8. Demo Mode vs Real Mode
-
-| | **Demo Mode** | **Real Mode** |
-|--|---------------|---------------|
-| Needs | None (offline fixtures) | Local path or git; Docker only if mutate enabled |
-| Label | `DEMO/MOCK` / DEMO MODE | REAL DEPLOYMENT |
-| Execution | Deterministic scenario runner | Planning pipeline + simulator or DockerExecutor |
-
-Never mix demo and real results in the UI narrative.
-
----
-
-## 9–12. Verification, Critic, Scoped rollback, Evaluation
-
-- **Verification** — schema, YAML/compose, security rules, consistency; blocks execution on failure (`VERIFICATION_SPEC.md`).
-- **Critic** — deterministic 0–100 scores; `PASS` / `REPLAN` / `ESCALATE` (prototype scores, not scientific metrics).
-- **Scoped rollback** — CEG downstream only; independent successes preserved (`CEG_SPEC.md`).
-- **Evaluation** — project-defined CNP/CEG runners + `GLOBAL_ROLLBACK` baseline (`EVALUATION.md`, `/evaluation`).
-
----
-
-## 13. Implemented / Measured / Not supported
-
-### Implemented
-Deterministic CNP · shallow repo analysis · specialist agents · verification + critic · bounded replan · CEG · simulator execution · opt-in local Docker mutate · scoped rollback · Demo Mode (5 scenarios) · evaluation runners · Bright Mode UI + SSE · **Change Intelligence (CIG)**: local-git diff → evidence-labelled impact graph, risk, verification requirements (Phase 12/2)
-
-### Measured (from actual runners — re-run to refresh)
-See `EVALUATION.md` and `backend/data/evaluation/*_latest.json`. Typical recent local run: CNP **8/8**, CEG **5/5**, pytest **75 passed / 2 skipped** (Docker), frontend **28 tests** + `tsc`/`lint`/`build` green.
-
-### Not supported
-Kubernetes · cloud · SSH · multi-host · DNS · CI/CD · Terraform · Redis · PostgreSQL · Kafka · Celery · arbitrary auto-deploy of any GitHub app · **remote-git change intelligence** (Phase 12/2 is local git only)
-
----
-
-## 14. Known limitations
-
-- Real Docker mutation is **opt-in** (`MEDHA_DOCKER_EXECUTE=false` by default).
-- Docker E2E may be **skipped** when Docker is unavailable — do not claim it passed without running it.
-- Prefer controlled fixtures / manifests; unsupported repos fail closed (`DEPLOYMENT_UNSUPPORTED`).
-- One real deployment at a time (`DEPLOYMENT_BUSY`).
-- LLM is optional; deterministic fallback always available.
-- Demo Mode is simulated (labelled).
-- Evaluation metrics are **project-defined** prototype measures.
-- No multi-host or cloud deployment.
-- Change Intelligence analyses **local git repositories only** (remote URLs
-  → `NOT_LOCAL_REPOSITORY`); static analysis, repo code never executed.
-
----
-
-## 15. Installation & run
-
-**Prerequisites:** Python 3.11+, Node.js 18+, Git. Docker optional.
+From the repository root:
 
 ```powershell
-# Backend
+Copy-Item .env.example .env
+
 cd backend
 python -m venv .venv
-.\.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy ..\.env.example ..\.env   # optional
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-# Frontend (new terminal)
+In a second terminal:
+
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` → select **Demo Mode** → scenario → **Start Deployment**.
+Open [http://localhost:3000](http://localhost:3000), choose **Demo Mode**, select a scenario, and start a deployment. The API is available at [http://127.0.0.1:8000](http://127.0.0.1:8000); its health endpoint is `/health`.
 
-### Tests & evaluation
+## Configuration
+
+`.env.example` is the canonical template. Copy it to `.env`; do not commit local environment files. The default configuration is intentionally safe for demonstrations:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEDHA_DATABASE_PATH` | `./data/medha.db` | SQLite database location |
+| `MEDHA_EXECUTOR_MODE` | `auto` | `auto`, `simulator`, or `docker` |
+| `MEDHA_DOCKER_EXECUTE` | `false` | Allow local Docker mutation |
+| `MEDHA_DOCKER_CLEANUP` | `true` | Clean up Docker resources |
+| `MEDHA_MAX_VERIFY_ROUNDS` | `3` | Maximum verification/replan rounds |
+| `MEDHA_CORS_ORIGINS` | `http://localhost:3000` | Allowed frontend origin |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:8000` | Frontend API URL |
+| `NEXT_PUBLIC_DEMO_MODE_DEFAULT` | `true` | Initial frontend mode |
+
+Optional LLM mediation is disabled by default and is not required for the core workflow. Never put real keys in `.env.example`, source files, issues, logs, or prompts.
+
+## Testing
+
+Backend tests:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest tests -q
-.\.venv\Scripts\python.exe -m app.evaluation.run_all
+\.venv\Scripts\python.exe -m pytest -q
+```
 
-cd ..\frontend
-npx tsc --noEmit
+Frontend checks:
+
+```powershell
+cd frontend
+npm test
 npm run lint
 npm run build
 ```
 
-Optional Docker E2E:
+Evaluation runners can be started from `backend`:
 
 ```powershell
-$env:MEDHA_DOCKER_EXECUTE="true"
-.\.venv\Scripts\python.exe -m pytest tests/test_docker_e2e.py -m docker
+\.venv\Scripts\python.exe -m app.evaluation.run_all
 ```
 
----
+Docker tests are optional and require a running Docker daemon:
 
-## 16. Project structure
-
-```
-Medha/
-├── README.md, AGENTS.md, ARCHITECTURE.md, PROJECT_SCOPE.md
-├── CNP_SPEC.md, CEG_SPEC.md, CIG_SPEC.md, VERIFICATION_SPEC.md, EVALUATION.md
-├── DEMO_MODE.md, API_CONTRACT.md, DATA_MODEL.md, DECISIONS.md
-├── docs/
-│   ├── VIVA_GUIDE.md          # viva Q&A
-│   ├── DEMO_SCRIPT.md         # 5–10 min demo
-│   └── evaluation/
-├── backend/app/               # FastAPI, agents, CNP, execution, evaluation
-├── frontend/                  # Bright Mode UI
-├── tests/                     # shared notes
-└── .env.example
+```powershell
+$env:MEDHA_DOCKER_EXECUTE = "true"
+\.venv\Scripts\python.exe -m pytest tests/test_docker_e2e.py -m docker -q
 ```
 
----
+## Repository layout
 
-## 17. Documentation index
+```text
+backend/        FastAPI service, agents, workflow, persistence, and tests
+frontend/       Next.js dashboard and UI tests
+docs/           Demo, validation, evaluation, and viva material
+*.md            Architecture, protocol, data, API, and scope specifications
+.env.example    Safe local configuration template
+```
 
-| Doc | Purpose |
-|-----|---------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System shape + diagrams |
+## Documentation
+
+| Document | Description |
+| --- | --- |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture and boundaries |
 | [CNP_SPEC.md](CNP_SPEC.md) | Constraint Negotiation Protocol |
-| [CEG_SPEC.md](CEG_SPEC.md) | Causal Execution Graph + rollback |
-| [CIG_SPEC.md](CIG_SPEC.md) | Change Intelligence (Phase 2): CIG, risk, requirements |
-| [VERIFICATION_SPEC.md](VERIFICATION_SPEC.md) | Verification + critic gate |
-| [EVALUATION.md](EVALUATION.md) | Experiments + measured results |
-| [DEMO_MODE.md](DEMO_MODE.md) | Offline scenarios |
-| [docs/VIVA_GUIDE.md](docs/VIVA_GUIDE.md) | Viva answers |
-| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Presentation script |
-| [docs/VALIDATION_CHECKLIST.md](docs/VALIDATION_CHECKLIST.md) | Pre-viva checklist |
-| [DECISIONS.md](DECISIONS.md) | ADRs |
+| [CEG_SPEC.md](CEG_SPEC.md) | Causal graph and rollback semantics |
+| [CIG_SPEC.md](CIG_SPEC.md) | Change Intelligence design |
+| [VERIFICATION_SPEC.md](VERIFICATION_SPEC.md) | Verification and critic rules |
+| [API_CONTRACT.md](API_CONTRACT.md) | REST and SSE contracts |
+| [DATA_MODEL.md](DATA_MODEL.md) | Persisted data model |
+| [EVALUATION.md](EVALUATION.md) | Evaluation methodology and results |
+| [DEMO_MODE.md](DEMO_MODE.md) | Offline demo scenarios |
+| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Demonstration walkthrough |
+| [docs/VIVA_GUIDE.md](docs/VIVA_GUIDE.md) | Project presentation guide |
+| [DECISIONS.md](DECISIONS.md) | Architecture decision records |
 
----
+## Scope and limitations
 
-## 18. Academic disclaimer
+MEDHA supports local targets and one real deployment at a time. Docker mutation is opt-in. Demo results are simulated and labelled. CIG accepts local Git repositories only; remote URLs are rejected. The project intentionally excludes cloud deployment, multi-host orchestration, Kubernetes, DNS automation, CI/CD automation, SSH, Redis, PostgreSQL, Kafka, Celery, and Terraform.
 
-MEDHA is a **prototype architecture** for constraint-aware, verifiable DevOps automation. Evaluation results apply to the **seeded datasets and fixtures tested**. They do not prove universal optimality, production readiness, or superiority over commercial platforms.
+Evaluation values are project-defined prototype measurements on seeded fixtures. They are not evidence of universal optimality, production readiness, or superiority over existing platforms.
 
----
+## Contributing
 
-## Phase status
+Contributions should preserve the project principles in [AGENTS.md](AGENTS.md): working over clever, deterministic over unnecessary LLM calls, local over cloud, and demonstrable over theoretically complete.
 
-| Phase | Status |
-|------:|--------|
-| 0–11 | **TESTED** / IMPLEMENTED as documented |
-| 12 | **TESTED** — polish, docs, viva packaging |
-| 12/2 | **TESTED** — Change Intelligence (CIG) + fixtures + API + UI + report |
+Before opening a pull request:
 
-**Current:** Phases 0–12 + Phase 12/2 complete for the V1 college prototype scope.
+1. Keep changes within the documented project scope.
+2. Add or update focused tests for behavioral changes.
+3. Run the relevant backend and frontend checks.
+4. Update the affected specification or documentation.
+5. Do not include `.env`, database files, credentials, or generated runtime data.
+
+For larger changes, explain the design and tradeoffs in an issue or architecture decision record first.
+
+## Security
+
+Do not commit secrets. If a credential is exposed, revoke and rotate it immediately, then remove it from the working tree and history as appropriate. Security reports should not be posted publicly with exploit details; contact the repository maintainer privately and include reproduction steps, affected versions, and impact.
+
+## License
+
+No license has been selected for this repository yet. Until a license is added, the code should be treated as **all rights reserved** and should not be redistributed or used as an open-source dependency.
