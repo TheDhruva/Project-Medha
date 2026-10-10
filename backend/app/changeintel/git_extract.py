@@ -20,6 +20,34 @@ logger = get_logger(__name__)
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
+# Allowed git revision charset: branches, tags, SHAs, HEAD, reflog selectors,
+# range suffixes (^, ~, :). Anything else (flags, shell metachars, whitespace)
+# is rejected before the value reaches the git argv.
+_REVISION_RE = re.compile(r"^[A-Za-z0-9._/+\-:@{}^~]+$")
+_MAX_REVISION_LENGTH = 256
+
+
+def _validate_revision(revision: str) -> str:
+    """Reject flag-like or metachar values so revisions never parse as git flags."""
+    if not isinstance(revision, str) or not revision.strip():
+        raise ChangeIntelError(
+            "REVISION_INVALID", "Revision must not be empty", revision=revision
+        )
+    value = revision.strip()
+    if (
+        len(value) > _MAX_REVISION_LENGTH
+        or value.startswith("-")
+        or not _REVISION_RE.match(value)
+    ):
+        raise ChangeIntelError(
+            "REVISION_INVALID",
+            f"Revision '{revision}' contains characters outside the allowed git "
+            "revision syntax.",
+            revision=revision,
+        )
+    return value
+
+
 # git name-status letters handled as change types
 _STATUS_MAP = {
     "A": ChangeType.ADDED,
@@ -60,26 +88,31 @@ def _run_git(repo_path: Path, *args: str) -> str:
 
 
 def is_git_repository(repo_path: Path) -> bool:
+    # A plain `rev-parse --git-dir` discovers PARENT repositories, so a normal
+    # directory inside a git worktree would be misdetected. Confine the check
+    # to git metadata owned by this path.
     try:
-        _run_git(repo_path, "rev-parse", "--git-dir")
-        return True
+        if (repo_path / ".git").exists():
+            return True
+        git_dir = _run_git(repo_path, "rev-parse", "--absolute-git-dir").strip()
     except ChangeIntelError:
+        return False
+    try:
+        return Path(git_dir).resolve() == (repo_path.resolve() / ".git").resolve()
+    except OSError:
         return False
 
 
 def resolve_revision(repo_path: Path, revision: str) -> str:
     """Resolve a revision to a full commit sha, with explicit errors."""
-    if not revision or not revision.strip():
-        raise ChangeIntelError(
-            "REVISION_INVALID", "Revision must not be empty", revision=revision
-        )
+    value = _validate_revision(revision)
     if not is_git_repository(repo_path):
         raise ChangeIntelError(
             "NOT_A_GIT_REPOSITORY",
             "Workspace is not a git repository; change analysis requires git history.",
         )
     try:
-        sha = _run_git(repo_path, "rev-parse", "--verify", f"{revision}^{{commit}}")
+        sha = _run_git(repo_path, "rev-parse", "--verify", f"{value}^{{commit}}")
     except ChangeIntelError as exc:
         raise ChangeIntelError(
             "REVISION_NOT_FOUND",
@@ -92,7 +125,13 @@ def resolve_revision(repo_path: Path, revision: str) -> str:
 def read_blob(repo_path: Path, revision: str, path: str) -> str | None:
     """Read a file at a revision (used for deleted/renamed base side)."""
     try:
-        return _run_git(repo_path, "show", f"{revision}:{path}")
+        value = _validate_revision(revision)
+    except ChangeIntelError:
+        return None
+    if not path or path.startswith("-") or "\x00" in path:
+        return None
+    try:
+        return _run_git(repo_path, "show", f"{value}:{path}")
     except ChangeIntelError:
         return None
 

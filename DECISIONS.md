@@ -174,3 +174,66 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
   lets a deployment carry its analysis for the GET endpoint and reconciling UI.
 - **Consequences:** Schema v1 databases auto-upgrade on startup; tests cover the
   migration path when run on a fresh DB.
+
+## ADR-020 — Repository URL validation at the API boundary (V1 completion)
+
+- **Decision:** Validate `repository_url` in `DeploymentRequest` and
+  `ChangeImpactRequest` via `app/core/repo_url.py`: scheme allowlist
+  (`https/http/git/ssh/git+https/git+ssh`, scp-like `user@host:path`),
+  rejection of embedded credentials on http(s), and blocking of
+  metadata/internal hostnames plus non-public literal IPs. Local paths and
+  `file://` URIs remain accepted for the single-operator workflow.
+- **Why:** The URL reaches server-side `git clone`; baseline SSRF protection
+  without an overengineered framework.
+- **Consequences / limitation:** Hostname checks are static (no DNS
+  resolution), so DNS-rebinding is not detected — documented in the module.
+  Acceptable for a 127.0.0.1 single-operator prototype; a beyond-loopback
+  deployment must pin resolved IPs.
+
+## ADR-021 — Git revision validation (V1 completion)
+
+- **Decision:** `git_extract._validate_revision` allowlists revision charset
+  and rejects leading-`-` values before they reach git argv.
+- **Why:** Eliminates flag-injection via `base_revision`/`target_revision`.
+- **Consequences:** Exotic-but-valid rev syntax outside the charset is rejected
+  with `REVISION_INVALID`; normal branches/tags/SHAs/HEAD/reflogs pass.
+
+## ADR-022 — Canonical research-graph expansion is labelled, not silent
+
+- **Decision:** Keep expanding thin profiles to the canonical
+  `network/database/backend/frontend/analytics` graph (needed for CEG demo
+  quality), but record `expanded_to_canonical` + `synthetic_services` in the
+  `ceg.created` event metadata and the persisted result message.
+- **Why:** A one-file repository must never appear to have contained five
+  services. The detected profile itself is unchanged (notes record the
+  expansion).
+- **Consequences:** UI/viva can quote the synthetic list directly from events.
+
+## ADR-023 — Docker CLI (not SDK) is the V1 Docker interface
+
+- **Decision:** Remove the unused `docker>=7` PyPI dependency; the runtime
+  uses allowlisted Docker CLI verbs via `docker_ops.py` only.
+- **Why:** AGENTS.md rule 17 (every dependency needs a V1 reason); the SDK was
+  never imported.
+- **Consequences:** `PROJECT_SCOPE.md` corrected from "SDK" to "CLI".
+
+## ADR-024 — Advisory HTTP readiness + CIG→verification link (V1 completion)
+
+- **Decision:** (a) `docker_ops.probe_http_readiness` performs a bounded (3s)
+  loopback HTTP probe for host-mapped service ports; results are recorded in
+  node metadata and never fail the deployment (busybox/simulator record
+  `skipped`). (b) `run_verifier` gains an advisory, never-blocking
+  `change_impact` check summarising CIG risk + requirement counts so the gate
+  states "these changes require verification of these properties".
+- **Why:** Strengthens "verifiable" without cloud infra or scope creep.
+- **Consequences:** One extra WARN-level check on deployments carrying
+  change-intel; zero behavior change for deployments without it.
+
+## ADR-025 — `is_git_repository` confined to owned git metadata
+
+- **Decision:** Check `<path>/.git` first, else require
+  `rev-parse --absolute-git-dir` to equal `<path>/.git` — parent worktree
+  discovery no longer counts.
+- **Why:** A plain directory inside the MEDHA worktree was misdetected as a
+  git repository (pre-existing `test_error_non_git_repo` failure on a clean
+  tree).

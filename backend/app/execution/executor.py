@@ -114,6 +114,7 @@ class SimulatorExecutor(Executor):
 
             node.status = NodeStatus.SUCCESS.value
             node.timestamp = utc_now_iso()
+            node.metadata["readiness"] = {"status": "skipped", "reason": "simulator"}
             successful.append(node.service)
             await emit(
                 "execution.node.completed",
@@ -307,6 +308,12 @@ class DockerExecutor(Executor):
                                 f"Health check failed for {node.service}",
                                 code="HEALTH_FAILED",
                             )
+                        # Bounded HTTP readiness probe (advisory only — never
+                        # fails the node; busybox sleep services expose no
+                        # HTTP and record skipped/unreachable honestly).
+                        node.metadata["readiness"] = await asyncio.to_thread(
+                            _probe_service_readiness, ports
+                        )
                 except docker_ops.DockerOpsError as exc:
                     node.status = NodeStatus.FAILED.value
                     node.reason = str(exc)
@@ -510,6 +517,16 @@ async def _finalize_failure(
         errors=list(errors or []),
     )
     return out_graph, result, scope
+
+
+def _probe_service_readiness(ports: list[str] | None) -> dict[str, Any]:
+    """Advisory readiness: probe the first host-mapped port, else record skipped."""
+    if not ports:
+        return {"status": "skipped", "reason": "no_declared_ports"}
+    host_port = docker_ops.host_port_of(ports[0])
+    if host_port is None:
+        return {"status": "skipped", "reason": "invalid_port_mapping"}
+    return docker_ops.probe_http_readiness(host_port)
 
 
 def _resolve_runtime_spec(

@@ -80,6 +80,40 @@ def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
+def probe_http_readiness(port: int, *, host: str = "127.0.0.1", timeout: float = 3.0) -> dict[str, Any]:
+    """Bounded HTTP readiness probe against a host-mapped service port.
+
+    Non-blocking by contract: returns a status dict (passed/unreachable) and
+    never raises. Only loopback targets are probed in V1.
+    """
+    import urllib.request
+
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return {"status": "skipped", "reason": "non_loopback_target"}
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        return {"status": "skipped", "reason": "invalid_port"}
+    if not 1 <= port_int <= 65535:
+        return {"status": "skipped", "reason": "invalid_port"}
+    url = f"http://{host}:{port_int}/"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            code = getattr(resp, "status", 200)
+        return {"status": "passed" if code < 500 else "unreachable", "http_status": code}
+    except Exception as exc:  # noqa: BLE001 - probe is advisory only
+        return {"status": "unreachable", "reason": str(exc)[:200]}
+
+
+def host_port_of(mapping: str) -> int | None:
+    """Extract the host side of a validated 'host:container' or 'port' mapping."""
+    parts = mapping.split(":")
+    try:
+        return int(parts[0]) if parts else None
+    except ValueError:
+        return None
+
+
 def create_network(deployment_id: str) -> str:
     name = network_name(deployment_id)
     # Remove leftover MEDHA network with same name only if MEDHA-owned

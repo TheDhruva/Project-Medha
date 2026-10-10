@@ -110,7 +110,7 @@ class PlanningPipeline:
                 intent=record.intent,
             )
             await self._agent_events(deployment_id, "analyzer", analysis.summary, delay)
-            await self._run_change_intel(
+            change_intel = await self._run_change_intel(
                 deployment_id, record, settings, delay
             )
             await self._emit(
@@ -374,6 +374,7 @@ class PlanningPipeline:
                 constraints_resolved=len(negotiation.decisions),
                 delay=delay,
                 intent=record.intent,
+                change_intel=change_intel,
             )
             logger.info(
                 "Planning+execution pipeline completed deployment_id=%s duration=%.2fs",
@@ -395,7 +396,7 @@ class PlanningPipeline:
             if not get_settings().medha_debug:
                 cleanup_workspace(deployment_id)
 
-    async def _run_change_intel(self, deployment_id: str, record, settings, delay: float) -> None:
+    async def _run_change_intel(self, deployment_id: str, record, settings, delay: float):
         """Phase 2: deterministic change-impact analysis against the original
         local git repository (base_revision → target_revision).
 
@@ -403,9 +404,11 @@ class PlanningPipeline:
         clone, so analysis runs against the local repo path. Remote URLs and
         missing revisions are skipped honestly — the deployment continues with
         change_intel absent rather than faking evidence.
+
+        Returns the analysis (for the verification gate) or None when skipped.
         """
         if not record.base_revision or not record.target_revision:
-            return
+            return None
         if resolve_local_repo_path(record.repository_url) is None:
             await self._emit(
                 deployment_id,
@@ -417,7 +420,7 @@ class PlanningPipeline:
                     "technical": "phase2=local-git-only · change_intel=not_computed",
                 },
             )
-            return
+            return None
         try:
             from app.changeintel.engine import analyze_change_impact
             from app.changeintel.git_extract import ChangeIntelError
@@ -440,7 +443,7 @@ class PlanningPipeline:
                     "technical": f"phase2=skipped · code={exc.code}",
                 },
             )
-            return
+            return None
         risk_value = info.risk.level.value
         stored = info.model_dump(mode="json")
         stored["deployment_id"] = deployment_id
@@ -469,6 +472,7 @@ class PlanningPipeline:
         )
         if delay:
             await asyncio.sleep(delay * 0.5)
+        return info
 
     async def _run_verify_execute(
         self,
@@ -482,6 +486,7 @@ class PlanningPipeline:
         constraints_resolved: int,
         delay: float,
         intent: str | None,
+        change_intel=None,
     ) -> None:
         settings = get_settings()
         max_rounds = settings.max_verify_rounds
@@ -489,6 +494,17 @@ class PlanningPipeline:
         replan_count = 0
         verification = None
         critic = None
+        # CIG → verification: surface change-impact requirements in the gate.
+        change_requirements: list[dict] | None = None
+        change_risk: str | None = None
+        if change_intel is not None:
+            try:
+                dumped = change_intel.model_dump(mode="json")
+                change_requirements = dumped.get("requirements")
+                risk = dumped.get("risk") or {}
+                change_risk = risk.get("level")
+            except Exception:  # noqa: BLE001 - advisory only, never block pipeline
+                change_requirements, change_risk = None, None
 
         intent_l = (intent or "").lower()
         force_fail_env = "force verification failure" in intent_l or "missing env" in intent_l
@@ -525,6 +541,8 @@ class PlanningPipeline:
                 replan_count=replan_count,
                 force_fail_env=force_fail_env and replan_count == 0,
                 is_demo=False,
+                change_requirements=change_requirements,
+                change_risk=change_risk,
             )
             ui_verification = verification.to_ui()
             self.repo.save_artifacts(
@@ -751,10 +769,15 @@ class PlanningPipeline:
             fail_service=fail_service,
             is_demo=False,
         )
-        # Ensure controlled research graph services exist for CEG demo quality
+        # Canonical research-graph expansion for CEG demo quality. The
+        # repository's detected services are preserved in the profile; the
+        # added services are SYNTHETIC demonstration scaffolding and are
+        # labelled as such in events/results — never presented as detected.
         services = {a.service for a in exec_plan.actions}
         required = {"network", "database", "backend", "frontend", "analytics"}
-        if not required.issubset(services):
+        synthetic_services: list[str] = sorted(required - services)
+        expanded_to_canonical = bool(synthetic_services)
+        if expanded_to_canonical:
             from app.models.domain import InferredStack, ServiceHint
 
             profile.inferred_stack = InferredStack(
@@ -820,9 +843,27 @@ class PlanningPipeline:
             "Causal execution graph created from ExecutionPlan.",
             stage=StageId.EXECUTE.value,
             metadata={
-                "simple": "MEDHA built the causal execution graph before running actions.",
-                "technical": f"nodes={len(ceg.nodes)} · edges={len(ceg.edges)}",
+                "simple": (
+                    "MEDHA built the causal execution graph before running actions."
+                    + (
+                        f" Demonstration scaffolding added synthetic services: "
+                        f"{', '.join(synthetic_services)}."
+                        if expanded_to_canonical
+                        else ""
+                    )
+                ),
+                "technical": (
+                    f"nodes={len(ceg.nodes)} · edges={len(ceg.edges)}"
+                    + (
+                        f" · expanded_to_canonical=true "
+                        f"synthetic_services={synthetic_services}"
+                        if expanded_to_canonical
+                        else " · expanded_to_canonical=false"
+                    )
+                ),
                 "graph": ceg.to_ui(),
+                "synthetic_services": synthetic_services,
+                "expanded_to_canonical": expanded_to_canonical,
             },
         )
         self.repo.save_artifacts(deployment_id, graph=ceg.to_ui(), updated_at=utc_now_iso())
@@ -1035,6 +1076,14 @@ class PlanningPipeline:
             message=message,
         )
         result["phase"] = PHASE_LABEL
+        result["synthetic_services"] = synthetic_services
+        result["expanded_to_canonical"] = expanded_to_canonical
+        if expanded_to_canonical:
+            result["message"] = (
+                f"{message} Demonstration scaffolding added synthetic services "
+                f"({', '.join(synthetic_services)}); detected repository services "
+                "are unchanged in the stored profile."
+            )
         self.repo.save_artifacts(
             deployment_id,
             graph=graph.to_ui(),

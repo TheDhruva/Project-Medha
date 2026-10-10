@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 
 from app.core.config import PROJECT_ROOT
@@ -15,6 +16,16 @@ def workspaces_root() -> Path:
 
 
 def deployment_workspace(deployment_id: str) -> Path:
+    # Deployment ids are server-generated (dep_<hex>); never trust a raw
+    # user-supplied path segment here. Reject separators/traversal outright.
+    if (
+        not deployment_id
+        or deployment_id.strip() != deployment_id
+        or any(sep in deployment_id for sep in ("/", "\\", "\x00"))
+        or deployment_id in {".", ".."}
+        or ".." in Path(deployment_id).parts
+    ):
+        raise ValueError(f"Invalid deployment_id for workspace: {deployment_id!r}")
     path = workspaces_root() / deployment_id
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -22,8 +33,38 @@ def deployment_workspace(deployment_id: str) -> Path:
 
 def cleanup_workspace(deployment_id: str) -> None:
     path = workspaces_root() / deployment_id
-    if path.exists():
+    # Resolve and confine: never delete outside the workspaces root
+    # (protects against symlink escape).
+    try:
+        resolved = path.resolve()
+        root = workspaces_root().resolve()
+    except OSError:
+        return
+    if resolved == root or root not in resolved.parents:
+        return
+    if path.exists() or path.is_symlink():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def prune_stale_workspaces(*, max_age_hours: float = 24) -> int:
+    """Remove deployment workspaces older than the TTL. Returns count removed."""
+    root = workspaces_root()
+    now = time.time()
+    removed = 0
+    for child in root.iterdir():
+        if not child.is_dir() and not child.is_symlink():
+            continue
+        try:
+            age_hours = (now - child.stat().st_mtime) / 3600
+        except OSError:
+            continue
+        if age_hours >= max_age_hours:
+            try:
+                cleanup_workspace(child.name)
+                removed += 1
+            except ValueError:
+                continue
+    return removed
 
 
 def resolve_local_repo_path(repository_url: str) -> Path | None:

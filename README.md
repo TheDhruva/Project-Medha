@@ -4,7 +4,7 @@
 
 MEDHA is a local-first research prototype for planning, verifying, executing, and explaining multi-agent DevOps workflows. It uses typed constraints, bounded negotiation, deterministic verification, a causal execution graph, and dependency-aware rollback.
 
-> MEDHA is an academic prototype, not a production deployment platform. It does not provide cloud, multi-host, Kubernetes, CI/CD, SSH, or arbitrary repository deployment.
+> MEDHA validates and executes a constraint-aware local deployment workflow using simulator or controlled Docker execution. It is an academic prototype, not a production deployment platform. It does not build arbitrary repository Dockerfiles, does not deploy arbitrary GitHub applications, and does not provide cloud, multi-host, Kubernetes, CI/CD, SSH, or DNS automation.
 
 ## Contents
 
@@ -59,7 +59,11 @@ The backend is one FastAPI process. Logical agents are in-process Python compone
 - Deterministic CNP with typed constraints, priority resolution, alternatives, and a maximum of three rounds.
 - Verification and critic gates that block unverified execution.
 - Simulator-first execution with opt-in local Docker mutation.
+- Controlled Docker execution uses pinned `busybox:1.36` images (ADR-015): it validates ordering, labels, health, and rollback — it never runs `docker build` on repository Dockerfiles or executes untrusted repo code.
+- Thin repository profiles may be expanded to the canonical `network/database/backend/frontend/analytics` research graph for CEG demonstration; expanded services are labelled synthetic in CEG events and results, never presented as detected.
 - CEG action history and dependency-aware rollback.
+- Change Intelligence (CIG) for local Git revisions, wired into verification as an advisory `change_impact` check: *"these changes require verification of these deployment properties."*
+- HTTP readiness probes for host-mapped service ports (bounded, advisory; falls back to the container-running check, and records `skipped` for simulator/busybox services).
 - CIG analysis for local Git repositories with file and symbol evidence.
 - Demo Mode with deterministic offline scenarios labelled `DEMO/MOCK`.
 - FastAPI REST endpoints and Server-Sent Events for observable workflow state.
@@ -174,7 +178,7 @@ docs/           Demo, validation, evaluation, and viva material
 
 ## Scope and limitations
 
-MEDHA supports local targets and one real deployment at a time. Docker mutation is opt-in. Demo results are simulated and labelled. CIG accepts local Git repositories only; remote URLs are rejected. The project intentionally excludes cloud deployment, multi-host orchestration, Kubernetes, DNS automation, CI/CD automation, SSH, Redis, PostgreSQL, Kafka, Celery, and Terraform.
+MEDHA supports local targets and one real deployment at a time. Docker mutation is opt-in. Demo results are simulated and labelled. CIG accepts local Git repositories only; remote URLs are rejected on the change-impact path (`NOT_LOCAL_REPOSITORY`), while `/api/deploy` may shallow-clone remotes for manifest analysis. Repository URLs are validated at the API boundary (scheme allowlist, no embedded credentials on http(s), blocked metadata/private-network literal IPs; hostname checks are static — no DNS resolution — which is documented in `backend/app/core/repo_url.py`). The project intentionally excludes cloud deployment, multi-host orchestration, Kubernetes, DNS automation, CI/CD automation, SSH, Redis, PostgreSQL, Kafka, Celery, and Terraform.
 
 Evaluation values are project-defined prototype measurements on seeded fixtures. They are not evidence of universal optimality, production readiness, or superiority over existing platforms.
 

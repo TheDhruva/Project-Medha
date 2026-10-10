@@ -87,7 +87,14 @@ faked as already-verified.
 ## 6. Scope (Phase 12/2)
 
 - **Supported:** local git repositories only (`file://` or a local path).
-  Remote URLs are rejected with `NOT_LOCAL_REPOSITORY` (analysed in Phase 3).
+  Remote URLs are rejected with `NOT_LOCAL_REPOSITORY` **on the
+  change-impact path** (`POST /api/change-impact/analyze`, see `API_CONTRACT.md`).
+- **Deployment vs change-impact paths differ by design:** `POST /api/deploy`
+  (real mode) *can* acquire remote repositories via shallow clone
+  (`backend/app/services/git_service.py`) for manifest analysis and the
+  simulator/controlled-Docker workflow; the change-impact pipeline cannot,
+  because it needs full local git history (shallow clones strip it) and runs
+  `git diff` against the original local path.
 - **Languages:** Python (AST, structural), JS/TS (regex, heuristic), YAML/JSON
   (config references). Everything else is `unsupported` and reported.
 - Static analysis only. Repository code is never executed.

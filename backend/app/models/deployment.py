@@ -5,6 +5,7 @@ from typing import Any, Self
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.enums import DeployMode, DeploymentStatus, ScenarioId
+from app.core.repo_url import RepositoryUrlError, validate_repository_url
 
 
 class TargetRef(BaseModel):
@@ -28,6 +29,14 @@ class DeploymentRequest(BaseModel):
     intent: str | None = None
     base_revision: str | None = None
     target_revision: str | None = None
+
+    @field_validator("repository_url")
+    @classmethod
+    def repository_url_must_be_safe(cls, value: str) -> str:
+        try:
+            return validate_repository_url(value)
+        except RepositoryUrlError as exc:
+            raise ValueError(f"{exc.code}: {exc.message}") from exc
 
     @field_validator("scenario", mode="before")
     @classmethod

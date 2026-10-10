@@ -29,6 +29,8 @@ def run_verifier(
     replan_count: int = 0,
     force_fail_env: bool = False,
     is_demo: bool = False,
+    change_requirements: list[dict[str, Any]] | None = None,
+    change_risk: str | None = None,
 ) -> VerificationResult:
     checks: list[VerificationCheck] = []
 
@@ -40,6 +42,11 @@ def run_verifier(
     checks.append(_exec_order_acyclic(constraints))
     checks.append(_env_required_check(constraints, config_fragments, force_fail_env=force_fail_env))
     checks.append(_target_local_check(profile))
+    checks.append(
+        _change_impact_advisory(
+            change_requirements=change_requirements, change_risk=change_risk
+        )
+    )
 
     blocking = [
         c.message
@@ -389,3 +396,47 @@ def _target_local_check(profile: ApplicationProfile) -> VerificationCheck:
             severity=CheckSeverity.CRITICAL,
         )
     return _ok("target", "Target", "preflight", "TARGET-001", "Target host is local")
+
+
+def _change_impact_advisory(
+    *,
+    change_requirements: list[dict[str, Any]] | None,
+    change_risk: str | None,
+) -> VerificationCheck:
+    """Advisory (never blocking): surface CIG verification requirements.
+
+    Connects Change Intelligence to the verification gate: when a deployment
+    carries change-impact analysis, the requirements it produced are listed
+    here so reviewers know *what must be re-verified*. Only config-category
+    requirements are executable by this verifier today; the rest are advisory.
+    """
+    if not change_requirements:
+        return VerificationCheck(
+            id="change_impact",
+            name="Change impact",
+            category="preflight",
+            rule="CIG-001",
+            status=CheckStatus.PASS,
+            severity=CheckSeverity.LOW,
+            message="No change-impact requirements for this deployment",
+        )
+    executable = [r for r in change_requirements if r.get("executable") is True]
+    risk = (change_risk or "unknown").upper()
+    return VerificationCheck(
+        id="change_impact",
+        name="Change impact",
+        category="preflight",
+        rule="CIG-001",
+        status=CheckStatus.WARN,
+        severity=CheckSeverity.LOW,
+        message=(
+            f"CIG {risk} risk: {len(change_requirements)} verification "
+            f"requirement(s), {len(executable)} executable by this gate — "
+            "review them in the Change Impact panel"
+        ),
+        metadata={
+            "risk": change_risk,
+            "requirements_total": len(change_requirements),
+            "requirements_executable": len(executable),
+        },
+    )

@@ -29,7 +29,7 @@ Ship a demonstrable, laptop-friendly prototype that proves:
 | Constraint Negotiation Protocol | Max 3 rounds |
 | Verification | Hard gate before execute |
 | Critic | Quality score + structured findings |
-| Docker execution | Local Docker SDK |
+| Docker execution | Local Docker **CLI** (allowlisted verbs, MEDHA-labelled resources; the `docker` PyPI SDK is not used) |
 | Causal Execution Graph | Nodes + dependency edges |
 | Scoped rollback | Dependency-aware; preserve independents |
 | SQLite persistence | Single-file DB |

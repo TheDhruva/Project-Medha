@@ -24,11 +24,19 @@ async def lifespan(_app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
     init_db(settings.database_path)
+    try:
+        from app.services.workspace import prune_stale_workspaces
+
+        pruned = prune_stale_workspaces(max_age_hours=24)
+    except Exception:  # noqa: BLE001 - cleanup must never block startup
+        logger.exception("Workspace prune failed at startup")
+        pruned = 0
     logger.info(
-        "MEDHA backend starting env=%s db=%s cors=%s",
+        "MEDHA backend starting env=%s db=%s cors=%s pruned_workspaces=%s",
         settings.medha_env,
         settings.database_path,
         settings.cors_origins,
+        pruned,
     )
     yield
     logger.info("MEDHA backend shutting down")

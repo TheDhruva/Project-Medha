@@ -81,7 +81,7 @@ Verified from latest JSON on the development machine (refresh if you re-run):
 | conflict_resolution_rate | 1.0 |
 | average_rounds | 1.0 |
 
-**Interpretation:** The implemented CNP correctly handled these seeded cases (detection + resolution within round limits). Not a claim about all real-world conflicts.
+**Interpretation:** The implemented CNP correctly handled these seeded cases (detection + resolution within round limits). Resolution methods used: alternative 3, priority 2, deterministic_tiebreak 2. Not a claim about all real-world conflicts.
 
 ### CEG (`ceg_latest.json`)
 
@@ -99,7 +99,14 @@ Verified from latest JSON on the development machine (refresh if you re-run):
 
 ### Backend pytest (last full suite)
 
-Report from Phase 12 validation run — see final report for exact counts. Docker-marked tests skip when the daemon is missing.
+V1 completion run (Windows, no Docker daemon):
+
+- **110 passed, 3 skipped** (`cd backend && python -m pytest tests -q`).
+- Skips are environment-dependent, not failures: 2 Docker E2E tests
+  (`test_docker_labeled_cleanup_only_medha`, `test_docker_executor_topo_order`)
+  skip when the Docker CLI/daemon is unavailable, plus 1 Windows symlink test.
+- Frontend: **62 passed** (`cd frontend && npm test -- --run`), plus
+  `npx tsc --noEmit`, `npm run lint` (clean), and `npm run build` (success).
 
 ### Docker E2E
 

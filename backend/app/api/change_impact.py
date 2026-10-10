@@ -11,12 +11,13 @@ from typing import List, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.changeintel.engine import analyze_change_impact
 from app.changeintel.git_extract import ChangeIntelError
 from app.core.events import utc_now_iso
 from app.core.logging import get_logger
+from app.core.repo_url import RepositoryUrlError, validate_repository_url
 from app.database.repositories import DeploymentRepository
 from app.demo.fixtures import change_intel_demo
 
@@ -30,6 +31,14 @@ class ChangeImpactRequest(BaseModel):
     base_revision: str
     target_revision: str
     deployment_id: Optional[str] = None
+
+    @field_validator("repository_url")
+    @classmethod
+    def repository_url_must_be_safe(cls, value: str) -> str:
+        try:
+            return validate_repository_url(value)
+        except RepositoryUrlError as exc:
+            raise ValueError(f"{exc.code}: {exc.message}") from exc
 
 
 def _error(status_code: int, code: str, message: str, details: dict | None = None) -> JSONResponse:

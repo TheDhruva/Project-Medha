@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.logging import get_logger
+from app.core.repo_url import RepositoryUrlError, validate_repository_url
 from app.services.workspace import deployment_workspace, resolve_local_repo_path
 
 logger = get_logger(__name__)
@@ -38,6 +39,11 @@ def acquire_repository(deployment_id: str, repository_url: str) -> RepoAcquisiti
     dest = deployment_workspace(deployment_id) / "repo"
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
+
+    try:
+        repository_url = validate_repository_url(repository_url)
+    except RepositoryUrlError as exc:
+        raise GitAcquireError(exc.code, exc.message) from exc
 
     local = resolve_local_repo_path(repository_url)
     if local is not None:
