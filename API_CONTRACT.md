@@ -32,18 +32,21 @@ Content type: `application/json` unless noted (SSE is `text/event-stream`).
 | HTTP | When |
 |------|------|
 | 400 | Invalid validation / unsupported scenario |
+| 401 | Mutating route without a valid `X-Medha-Token` (when a token is configured) |
 | 404 | Unknown `deployment_id` |
 | 409 | Illegal state transition (e.g., already terminal) |
 | 422 | Pydantic validation failure |
 | 500 | Unexpected server error |
 | 501 | Endpoint scaffolded but behavior not implemented yet |
-| 503 | Real mode requested but required dependency unavailable (Docker/git) |
+| 503 | Real mode requested but required dependency unavailable (Docker/git); or production mutating route with no API token configured |
 
 ### 1.3 Status values (deployment)
 
-`queued` · `started` · `preflight` · `analyzing` · `negotiating` · `verifying` · `executing` · `rolling_back` · `succeeded` · `failed` · `cancelled`
+`queued` · `started` · `running` · `completed` · `failed` · `partial_recovery` · `cancelled`
 
-Exact subset may grow; clients should treat unknown strings as non-terminal unless documented otherwise.
+These are the `DeploymentStatus` enum values (`backend/app/core/enums.py`).
+Terminal statuses are `completed`, `failed`, `partial_recovery`, `cancelled`.
+Clients should treat unknown strings as non-terminal unless documented otherwise.
 
 ---
 
@@ -164,9 +167,9 @@ Each SSE `data:` line is JSON:
 
 ### Behavior
 
-- Stream starts from connection time; optional `?after=event_id` for resume (Phase 2+/3).
-- Heartbeats as SSE comments (`: ping`) every N seconds.
-- Terminal deployment may send a final `deployment.terminal` event then close.
+- Stream replays persisted events first, then live events (no `?after=` resume).
+- Heartbeats as SSE comments (`: ping`) after 15s without events.
+- Terminal `deployment.completed` / `deployment.failed` event ends the stream.
 
 ### Errors
 
@@ -259,13 +262,12 @@ Return aggregated structured log lines (not raw Docker multiplex blobs by defaul
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/health` | Liveness |
+| GET | `/health` | Liveness (includes DB reachability) |
 | GET | `/api/demo/scenarios` | List demo scenarios |
 | GET | `/api/evaluation` | Latest measured evaluation artifacts (null if not run) |
-| POST | `/api/evaluation/run/cnp` | Execute CNP evaluation runner |
-| POST | `/api/evaluation/run/ceg` | Execute CEG evaluation runner |
+| POST | `/api/evaluation/run/cnp` | Execute CNP evaluation runner (token-guarded) |
+| POST | `/api/evaluation/run/ceg` | Execute CEG evaluation runner (token-guarded) |
 | GET | `/api/evaluation/latest/{kind}` | Fetch one artifact (`cnp`/`ceg`/`combined`) |
-| POST | `/api/deploy/{id}/cancel` | Best-effort cancel (V1 best-effort only) |
 
 Real mode may return `409 DEPLOYMENT_BUSY` when another real deployment is running.
 Unsupported repositories may fail with `DEPLOYMENT_UNSUPPORTED` / `PLAN_REQUIRES_REVIEW`.

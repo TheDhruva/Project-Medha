@@ -5,9 +5,10 @@ import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.core.api_token import require_mutation_token
 from app.core.enums import (
     TERMINAL_EVENT_TYPES,
     DeployMode,
@@ -117,7 +118,12 @@ async def list_deployments(
     )
 
 
-@router.post("/deploy", status_code=202, response_model=DeploymentResponse)
+@router.post(
+    "/deploy",
+    status_code=202,
+    response_model=DeploymentResponse,
+    dependencies=[Depends(require_mutation_token)],
+)
 async def create_deployment(payload: DeploymentRequest):
     if payload.mode == DeployMode.DEMO and payload.scenario is None:
         return _error(

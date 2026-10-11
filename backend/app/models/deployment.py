@@ -26,7 +26,7 @@ class DeploymentRequest(BaseModel):
     mode: DeployMode
     scenario: ScenarioId | None = None
     target: TargetRef
-    intent: str | None = None
+    intent: str | None = Field(default=None, max_length=2000)
     base_revision: str | None = None
     target_revision: str | None = None
 

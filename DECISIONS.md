@@ -237,3 +237,63 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
 - **Why:** A plain directory inside the MEDHA worktree was misdetected as a
   git repository (pre-existing `test_error_non_git_repo` failure on a clean
   tree).
+
+## ADR-026 — Single Render Web Service (Next.js + FastAPI, one origin)
+
+- **Decision:** Host V1 as one Web Service from a root `Dockerfile`
+  (`runtime: docker`, see `render.yaml`). The image runs uvicorn on loopback
+  `:8000` and `next start` on `$PORT` under stdlib-only
+  `scripts/run_service.py`; Next.js `rewrites()` proxy `/api/*` and `/health`
+  to FastAPI so the browser uses a single public origin with same-origin
+  relative URLs (`frontend/src/lib/api/client.ts` falls back to `""`).
+- **Why:** One service preserves the V1 shape (one FastAPI process + one
+  Next.js app, AGENTS.md rule 18) with no new runtime, queue, or database.
+  Rewrites need no extra proxy dependency (rule 17); the supervisor is stdlib
+  and unit-tested (`scripts/test_run_service.py`).
+- **Consequences:**
+  - SSE streams through the rewrite unbuffered (backend already sends
+    `X-Accel-Buffering: no`); verify with `curl --no-buffer` after deploy.
+  - Rewrite destinations are baked at `next build` time (verified: a
+    runtime-only backend URL is ignored), so the internal backend port is
+    fixed at `127.0.0.1:8000` in `next.config.js`, `run_service.py`, and the
+    `Dockerfile` — keep the three in sync. Only `NEXT_PUBLIC_*` would need a
+    rebuild per environment, and none is required now that URLs are relative.
+  - Either child exiting terminates the other and exits non-zero, so Render
+    restarts instead of serving half a system.
+  - Free tier has no persistent disk: SQLite at `/var/medha-data/medha.db`
+    is ephemeral (fresh DB per redeploy). Paid disk at the same mount path
+    persists history with no config change.
+
+## ADR-027 — Server-side API token for mutating routes (hosting)
+
+- **Decision:** `POST /api/deploy`, `POST /api/change-impact/analyze`, and
+  `POST /api/evaluation/run/*` require `X-Medha-Token`
+  (`backend/app/core/api_token.py`, `MEDHA_API_TOKEN`). Next.js
+  `middleware.ts` injects it server-side from process env on mutating
+  `/api/*` calls, so browsers carry nothing and the bundle holds no secret.
+  Missing/wrong token → 401; production without any token → 503 fail-closed;
+  local non-production without a token → allowed (unchanged laptop DX).
+- **Why:** Public exposure of unauthenticated clone/pipeline/compute
+  endpoints is an abuse magnet (bandwidth/CPU burn, server-path probing via
+  change-impact). Loopback-binding alone does not help once a public proxy
+  forwards to the backend.
+- **Consequences:** `render.yaml` generates the token (`generateValue`).
+  GETs and `/health` stay open (read-only demo data). Token rotation =
+  Render env change + restart; no rebuild needed.
+
+## ADR-028 — Frontend and test fixtures tracked as regular directories
+
+- **Decision:** Remove the 12 bare gitlinks (`frontend/` + 11
+  `backend/tests/fixtures/change_intel/*/` repos, which had no `.gitmodules`
+  entries and, for `frontend/`, no remote at all) and track their working
+  files as normal directories. Fixture `.git` histories are regenerable via
+  `backend/tests/fixtures/change_intel/_build.py` (tests skip cleanly when
+  absent); the nested frontend history (2 local commits, no remote) is
+  superseded by the monorepo history.
+- **Why:** A fresh clone (and therefore any Render build) received empty
+  `frontend/` and fixture directories — the service could not build. A
+  submodule without a URL cannot be initialized by anyone but the original
+  author.
+- **Consequences:** Slightly larger monorepo; fixture `.git` dirs stay
+  untracked build outputs (regenerate with `_build.py`). If a separate
+  frontend history is ever needed, extract with `git subtree split`.

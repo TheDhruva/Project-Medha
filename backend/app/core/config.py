@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     docker_cleanup: bool = Field(default=True, alias="MEDHA_DOCKER_CLEANUP")
     max_verify_rounds: int = Field(default=3, alias="MEDHA_MAX_VERIFY_ROUNDS")
     executor_mode: str = Field(default="auto", alias="MEDHA_EXECUTOR_MODE")
+    api_token: str = Field(default="", alias="MEDHA_API_TOKEN")
 
     @property
     def cors_origins(self) -> list[str]:

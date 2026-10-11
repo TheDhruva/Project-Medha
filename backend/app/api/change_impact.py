@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 from app.changeintel.engine import analyze_change_impact
 from app.changeintel.git_extract import ChangeIntelError
+from app.core.api_token import require_mutation_token
 from app.core.events import utc_now_iso
 from app.core.logging import get_logger
 from app.core.repo_url import RepositoryUrlError, validate_repository_url
@@ -61,7 +62,11 @@ _ERROR_MAP = {
 }
 
 
-@router.post("/change-impact/analyze", response_model=None)
+@router.post(
+    "/change-impact/analyze",
+    response_model=None,
+    dependencies=[Depends(require_mutation_token)],
+)
 async def change_impact_analyze(payload: ChangeImpactRequest):
     try:
         analysis = analyze_change_impact(

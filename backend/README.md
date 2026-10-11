@@ -27,7 +27,7 @@ Health: http://127.0.0.1:8000/health
 
 Configuration is read from env vars (see `app/core/config.py`, e.g.
 `MEDHA_DATABASE_PATH`, `MEDHA_DOCKER_EXECUTE`). SQLite data lives at
-`data/medha.db` by default and is initialized/upgraded automatically on startup
+`backend/data/medha.db` by default and is initialized/upgraded automatically on startup
 (`init_db`; schema versioning via `PRAGMA user_version`). No API keys required.
 
 ## API surface

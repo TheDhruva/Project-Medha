@@ -174,7 +174,7 @@ DeploymentRequest
 
 `ConflictRecord`: `{ conflict_id, constraint_ids[], reason, priority_span }`  
 `DecisionRecord`: `{ conflict_id, method, winner_ids[], loser_ids[], rationale }`  
-`method`: `priority` | `alternative` | `llm_mediation` | `deterministic_tiebreak`
+`method`: `priority` | `alternative` | `deterministic_tiebreak` (V1 has no LLM-mediation path)
 
 **Lifecycle:** Updated each CNP round; terminal when resolved/failed/exhausted.
 

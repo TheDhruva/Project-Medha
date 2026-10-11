@@ -1,0 +1,122 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Bright Mode design tokens */
+  --medha-bg: #f4f5f7;
+  --medha-bg-warm: #f7f6f3;
+  --medha-surface: #ffffff;
+  --medha-surface-muted: #f0f2f5;
+  --medha-text: #141820;
+  --medha-text-secondary: #5a6573;
+  --medha-text-tertiary: #8791a0;
+  --medha-border: #e2e5eb;
+  --medha-border-strong: #c9ced8;
+  --medha-accent: #d2042d;
+  --medha-accent-hover: #a80325;
+  --medha-accent-soft: #fdecef;
+  --medha-accent-ink: #7a031b;
+  --medha-success: #1b7a4a;
+  --medha-success-soft: #e6f5ed;
+  --medha-warning: #a56a12;
+  --medha-warning-soft: #f8efd9;
+  --medha-danger: #b42318;
+  --medha-danger-soft: #fdeceb;
+  --medha-info: #d2042d;
+  --medha-shadow: 0 1px 2px rgba(20, 24, 32, 0.04),
+    0 8px 24px rgba(20, 24, 32, 0.04);
+  --medha-radius: 12px;
+  --medha-radius-sm: 8px;
+  --medha-font-display: "Space Grotesk", system-ui, sans-serif;
+  --medha-font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --medha-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  margin: 0;
+  color: var(--medha-text);
+  background:
+    radial-gradient(900px 380px at 8% -8%, #fbfbfc 0%, transparent 60%),
+    var(--medha-bg);
+  font-family: var(--medha-font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--medha-accent-soft);
+  color: var(--medha-accent-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--medha-accent);
+  outline-offset: 2px;
+}
+
+@layer components {
+  .medha-panel {
+    @apply bg-medha-surface border border-medha-border rounded-medha shadow-medha;
+  }
+
+  .medha-label {
+    @apply text-[11px] font-medium uppercase tracking-[0.08em] text-medha-secondary;
+  }
+
+  .medha-mono {
+    font-family: var(--medha-font-mono);
+  }
+
+  .status-dot {
+    @apply inline-block h-2 w-2 rounded-full shrink-0;
+  }
+
+  .field-input {
+    @apply w-full rounded-medha-sm border border-medha-border bg-white px-3 py-2.5 text-sm text-medha-text shadow-sm transition placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent-soft disabled:cursor-not-allowed disabled:bg-medha-muted disabled:text-medha-secondary;
+  }
+}
+
+@keyframes medha-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes medha-pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.animate-medha-in {
+  animation: medha-fade-up 0.35s ease-out both;
+}
+
+.animate-medha-pulse {
+  animation: medha-pulse-soft 1.4s ease-in-out infinite;
+}
+
+/* React Flow overrides for bright canvas */
+.react-flow__attribution {
+  display: none !important;
+}

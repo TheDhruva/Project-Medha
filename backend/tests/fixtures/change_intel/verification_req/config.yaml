@@ -1,0 +1,3 @@
+service: svc
+port: 9090
+mode: strict

@@ -402,6 +402,11 @@ def choose_executor(*, is_demo: bool, prefer_docker: bool = True) -> Executor:
     from app.core.config import get_settings
 
     settings = get_settings()
+    # Hosted services are simulator-only by construction: even a misconfigured
+    # MEDHA_DOCKER_EXECUTE / MEDHA_EXECUTOR_MODE must not enable Docker
+    # mutation outside the operator's own machine (no daemon exists there).
+    if (settings.medha_env or "").strip().lower() == "production":
+        return SimulatorExecutor(name="simulator")
     mode = (settings.executor_mode or "auto").lower()
     if mode == "simulator" or not prefer_docker:
         return SimulatorExecutor(name="simulator")

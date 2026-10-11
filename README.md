@@ -114,7 +114,6 @@ Open [http://localhost:3000](http://localhost:3000), choose **Demo Mode**, selec
 | `MEDHA_MAX_VERIFY_ROUNDS` | `3` | Maximum verification/replan rounds |
 | `MEDHA_CORS_ORIGINS` | `http://localhost:3000` | Allowed frontend origin |
 | `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:8000` | Frontend API URL |
-| `NEXT_PUBLIC_DEMO_MODE_DEFAULT` | `true` | Initial frontend mode |
 
 Optional LLM mediation is disabled by default and is not required for the core workflow. Never put real keys in `.env.example`, source files, issues, logs, or prompts.
 
@@ -195,6 +194,70 @@ Before opening a pull request:
 5. Do not include `.env`, database files, credentials, or generated runtime data.
 
 For larger changes, explain the design and tradeoffs in an issue or architecture decision record first.
+
+## Deploying (single Render Web Service)
+
+One service hosts both apps from the root `Dockerfile` (see `render.yaml` and
+`DECISIONS.md` ADR-026/027/028):
+
+- `scripts/run_service.py` supervises uvicorn (loopback `:8000`) and
+  `next start` (`$PORT`). If either process exits, the other is stopped and
+  the service exits non-zero so Render restarts it.
+- The browser uses same-origin relative URLs; Next.js `rewrites()` proxy
+  `/api/*` and `/health` to FastAPI, and `src/middleware.ts` attaches the
+  server-side `MEDHA_API_TOKEN` to mutating API calls (never in the bundle).
+- Hosted execution is simulator-only (`MEDHA_EXECUTOR_MODE=simulator`,
+  `MEDHA_DOCKER_EXECUTE=false`, plus a production code pin): Docker mutation
+  stays a local-machine activity.
+- Render health check: `/health` (rewritten to FastAPI).
+- SQLite on the free tier is ephemeral (fresh DB per redeploy); attach a paid
+  disk at `/var/medha-data` to persist run history with no config change.
+- The container runs as non-root `appuser`; no Docker daemon, cloud
+  credentials, SSH keys, or DNS controls exist inside the image.
+
+### Post-deploy smoke tests (public URL)
+
+1. Open `/` and confirm the homepage renders (HTTP 200 + hardening headers).
+2. Open `/runs`, `/evaluation`, `/settings` (health shows OK).
+3. `GET /health` returns `{"status":"ok",...}` (proves FastAPI, not just Next).
+4. Start a Demo Mode deployment; confirm CNP/verification/CEG panels render.
+5. Confirm the result is labeled `DEMO/MOCK` (`partial_recovery` for the
+   partial-failure scenario).
+6. `POST /api/deploy` without a token → 401; normal UI deployment works
+   (server-side token injection).
+7. Open an SSE stream (`/api/deploy/{id}/events`) and confirm live `data:`
+   events arrive unbuffered.
+8. Redeploy and confirm clean startup with a fresh database (free tier), or
+   preserved history (paid disk at `/var/medha-data`).
+9. Check Render logs for `[run_service]` errors, repeated crashes, or 401s.
+
+### Public demo limitations
+
+The hosted service is a shared research demonstration, not a multi-tenant
+product: all visitors share one SQLite database, so run listings and
+deployment history are visible to everyone (no user accounts by design).
+Mutating API routes require the server-side `MEDHA_API_TOKEN` (injected by
+the Next.js proxy; browsers carry nothing), but do not submit private
+repository URLs or secrets through the public demo — use Demo Mode or a
+local run for anything sensitive.
+
+### Diagnosing build/startup failures
+
+- Render build log fails at `npm ci`: `package-lock.json` drifted from
+  `package.json` — sync locally (`npm install`), verify `npm run build`,
+  and push the updated lockfile.
+- Service restarts repeatedly: read runtime logs for `[run_service]` lines —
+  they name which child exited and with what code. A failing `/health`
+  means FastAPI is down (the check is rewritten to it, so a green check
+  proves both processes serve).
+- Mutating calls return 401/503: 401 means the proxy token and
+  `MEDHA_API_TOKEN` disagree (rotate via the Render dashboard, restart —
+  no rebuild needed); 503 `API_TOKEN_NOT_CONFIGURED` means production is
+  running without a token configured.
+- `npm audit` reports high/critical findings in `vitest`/`tinypool`/`sharp`
+  chains: these are dev/test-only paths (`next/image` is unused); no
+  production runtime dependency is affected. Do not major-upgrade to silence
+  the scanner without re-running the full verification battery.
 
 ## Security
 

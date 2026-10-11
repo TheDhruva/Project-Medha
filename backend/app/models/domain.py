@@ -154,7 +154,7 @@ class ConflictRecord(BaseModel):
 
 class DecisionRecord(BaseModel):
     conflict_id: str
-    method: str  # priority | alternative | llm_mediation | deterministic_tiebreak
+    method: str  # priority | alternative | deterministic_tiebreak
     winner_ids: list[str] = Field(default_factory=list)
     loser_ids: list[str] = Field(default_factory=list)
     rationale: str

@@ -25,12 +25,7 @@ from app.services.workspace import resolve_local_repo_path
 
 logger = get_logger(__name__)
 
-__all__ = ["ChangeIntelError", "analyze_change_impact", "is_local_repository"]
-
-
-def is_local_repository(repository_url: str) -> bool:
-    """Phase 2 supports local git repositories (offline, deterministic)."""
-    return resolve_local_repo_path(repository_url) is not None
+__all__ = ["ChangeIntelError", "analyze_change_impact"]
 
 
 def _error_for_missing(url: str) -> str:

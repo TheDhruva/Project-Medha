@@ -47,7 +47,7 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="MEDHA Backend",
         version="0.10.0",
-        description="Phases 10–11 — real local Docker execution + evaluation instrumentation",
+        description="Phases 0–12 — local pipeline (analyze → CNP → verify → execute) + evaluation instrumentation",
         lifespan=lifespan,
     )
 

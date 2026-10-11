@@ -84,7 +84,6 @@ class CriticRecommendation(str, Enum):
     REPLAN = "REPLAN"
     ESCALATE = "ESCALATE"
     WARN = "WARN"
-    BLOCK = "BLOCK"  # alias for escalate/block gate
 
 
 class CriticResult(BaseModel):
@@ -128,7 +127,6 @@ class NodeStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
-    SUCCEEDED = "success"  # alias
     FAILED = "failed"
     ROLLED_BACK = "rolled_back"
     SKIPPED = "skipped"

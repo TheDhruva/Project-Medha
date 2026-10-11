@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
+from app.core.api_token import require_mutation_token
 from app.evaluation.run_ceg import run_ceg_evaluation
 from app.evaluation.run_cnp import run_cnp_evaluation
 from app.evaluation.storage import list_runs, load_latest
@@ -33,13 +34,13 @@ async def evaluation_summary():
     )
 
 
-@router.post("/run/cnp")
+@router.post("/run/cnp", dependencies=[Depends(require_mutation_token)])
 async def run_cnp():
     report = run_cnp_evaluation()
     return JSONResponse(report)
 
 
-@router.post("/run/ceg")
+@router.post("/run/ceg", dependencies=[Depends(require_mutation_token)])
 async def run_ceg():
     report = run_ceg_evaluation()
     return JSONResponse(report)

@@ -1,0 +1,42 @@
+# MEDHA single-service deployment (one Render Web Service).
+#
+# Architecture: the Docker image (Dockerfile) runs uvicorn on loopback :8000
+# plus `next start` on $PORT under scripts/run_service.py. Next.js rewrites
+# proxy /api/* and /health to FastAPI, so the browser uses one public origin.
+# SSE streams through unbuffered (backend sends X-Accel-Buffering: no).
+#
+# State: SQLite only (AGENTS.md rule 20). The free plan has no persistent
+# disk, so MEDHA_DATABASE_PATH below is ephemeral: deployments restart with a
+# FRESH database and run history is lost on redeploy/restart. To persist
+# history, upgrade to a paid instance, attach a disk mounted at
+# /var/medha-data, and keep MEDHA_DATABASE_PATH as set here.
+services:
+  - type: web
+    name: medha
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MEDHA_ENV
+        value: production
+      - key: MEDHA_DEBUG
+        value: "false"
+      - key: MEDHA_EXECUTOR_MODE
+        value: simulator
+      - key: MEDHA_DOCKER_EXECUTE
+        value: "false"
+      - key: MEDHA_DATABASE_PATH
+        value: /var/medha-data/medha.db
+      - key: MEDHA_LOG_LEVEL
+        value: INFO
+      # Same-origin deployment: the browser never contacts the backend
+      # directly. Update this to the service's public URL after creation;
+      # it is only a fallback and is not on the request path.
+      - key: MEDHA_CORS_ORIGINS
+        value: https://medha.onrender.com
+      # Shared secret for mutating API routes. Generated once by Render,
+      # injected server-side by Next.js middleware, never in the bundle.
+      # The backend fails closed (503) in production if this is missing.
+      - key: MEDHA_API_TOKEN
+        generateValue: true

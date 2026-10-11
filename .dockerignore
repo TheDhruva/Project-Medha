@@ -1,0 +1,19 @@
+# Keep the deploy image free of local history, caches, and runtime state.
+.git
+**/.git/
+backend/.venv/
+backend/**/__pycache__/
+backend/data/
+data/*.db
+frontend/node_modules/
+frontend/.next/
+node_modules/
+__pycache__/
+*.db
+*.sqlite
+*.sqlite3
+.pytest_cache/
+.env
+.env.*
+*.pem
+*.key

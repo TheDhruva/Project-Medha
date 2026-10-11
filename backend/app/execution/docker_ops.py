@@ -6,7 +6,6 @@ import json
 import shutil
 import socket
 import subprocess
-from pathlib import Path
 from typing import Any
 
 from app.core.logging import get_logger
@@ -257,67 +256,6 @@ def cleanup_deployment(deployment_id: str) -> dict[str, Any]:
         _run(["network", "rm", net], timeout=20, check=False)
         removed.append(net)
     return {"removed": removed, "deployment_id": deployment_id}
-
-
-def write_compose_file(path: Path, compose: dict[str, Any]) -> Path:
-    import yaml
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(compose, sort_keys=False), encoding="utf-8")
-    return path
-
-
-def build_labeled_compose(
-    *,
-    deployment_id: str,
-    services: dict[str, dict[str, Any]],
-    network: str,
-) -> dict[str, Any]:
-    """Build a compose dict with MEDHA labels; images from verified plan only."""
-    labeled_services: dict[str, Any] = {}
-    for name, spec in services.items():
-        image = spec.get("image") or f"busybox:1.36"
-        if not _safe_image(str(image)):
-            raise DockerOpsError(f"Unsafe image in plan: {image}", code="IMAGE_REJECTED")
-        entry: dict[str, Any] = {
-            "image": image,
-            "container_name": resource_name(deployment_id, name),
-            "labels": {
-                LABEL_DEPLOYMENT: deployment_id,
-                LABEL_SERVICE: name,
-                LABEL_MANAGED: LABEL_VALUE_MANAGED,
-            },
-            "networks": [network],
-        }
-        if "command" in spec:
-            entry["command"] = spec["command"]
-        if "depends_on" in spec:
-            entry["depends_on"] = spec["depends_on"]
-        if "ports" in spec:
-            entry["ports"] = [
-                p for p in spec["ports"] if isinstance(p, str) and _safe_port_mapping(p)
-            ]
-        if "environment" in spec and isinstance(spec["environment"], dict):
-            entry["environment"] = {
-                k: v
-                for k, v in spec["environment"].items()
-                if _safe_env_key(str(k)) and isinstance(v, str) and "\n" not in v
-            }
-        labeled_services[name] = entry
-
-    return {
-        "services": labeled_services,
-        "networks": {
-            network: {
-                "name": network,
-                "labels": {
-                    LABEL_DEPLOYMENT: deployment_id,
-                    LABEL_MANAGED: LABEL_VALUE_MANAGED,
-                    LABEL_SERVICE: "network",
-                },
-            }
-        },
-    }
 
 
 def _is_medha_owned(container_name: str, deployment_id: str) -> bool:
