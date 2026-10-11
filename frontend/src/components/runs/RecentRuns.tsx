@@ -28,7 +28,7 @@ function outcomeFor(run: RunSummary): { icon: React.ReactNode; label: string } {
   }
   if (run.status === "running" || run.status === "started" || run.status === "queued") {
     return {
-      icon: <Loader2 className="h-4 w-4 animate-spin text-medha-accent" aria-hidden />,
+      icon: <Loader2 className="h-4 w-4 animate-spin text-medha-run" aria-hidden />,
       label: "Running",
     };
   }
@@ -81,14 +81,14 @@ export function RecentRuns({ limit = 3 }: { limit?: number }) {
 
   return (
     <section aria-label="Recent runs">
-      <ul className="divide-y divide-medha-border overflow-hidden rounded-xl border border-medha-border bg-white">
+      <ul className="divide-y divide-medha-border overflow-hidden rounded-md border border-medha-border bg-medha-surface">
         {runs.map((run) => {
           const outcome = outcomeFor(run);
           return (
             <li key={run.deployment_id}>
               <Link
                 href={`/runs/${run.deployment_id}`}
-                className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-medha-muted/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-medha-surface-muted/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
               >
                 {outcome.icon}
                 <span className="min-w-0 flex-1">

@@ -73,4 +73,10 @@ a full chain (git → diff → symbols → edges → risk → requirements → s
 - Deterministic-first: CNP/verifier/critic are rule-based; no LLM calls.
 - Phase 2 Change Intelligence analyses **local git repositories only**
   (remote URLs → `NOT_LOCAL_REPOSITORY`); static analysis, repo code never runs.
-- No Postgres/Redis/Kubernetes in V1.
+- Push-triggered remote analysis (Phase 2b) uses verified push-payload file
+  lists confirmed against the exact-SHA checkout (`source_method=webhook_push`).
+- PostgreSQL (Supabase) is the persistent backend when `MEDHA_DATABASE_URL`
+  is configured (schema `app/database/schema_pg.sql`, idempotent `init_db`;
+  use the pooled 6543 host on hosted services). SQLite remains the
+  zero-config fallback. No Redis/Kubernetes in V1.
+- Private GitHub repositories are unsupported pending a GitHub App (ADR-036).

@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useState, useTransition } from "react";
-import { Header } from "@/components/layout/Header";
+import { AppShell } from "@/components/layout/AppShell";
 import {
   fetchEvaluationSummary,
   runEvaluation,
@@ -51,9 +51,8 @@ export default function EvaluationPage() {
   const ceg = data?.ceg as Record<string, unknown> | null | undefined;
 
   return (
-    <div className="min-h-screen bg-medha-bg">
-      <Header />
-      <main className="mx-auto max-w-3xl space-y-6 px-4 py-8 sm:px-6">
+    <AppShell>
+      <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-medha-text">Evaluation</h1>
           <p className="mt-1 max-w-2xl text-sm leading-relaxed text-medha-secondary">
@@ -229,8 +228,8 @@ export default function EvaluationPage() {
           </pre>
         ) : null}
         </section>
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }
 

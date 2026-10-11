@@ -1,0 +1,3 @@
+   Γû▓ Next.js 15.5.7
+   - Environments: .env.local
+

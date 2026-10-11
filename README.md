@@ -99,7 +99,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), choose **Demo Mode**, select a scenario, and start a deployment. The API is available at [http://127.0.0.1:8000](http://127.0.0.1:8000); its health endpoint is `/health`.
+Open [http://localhost:3000](http://localhost:3000): visitors land on a public page with **Try Demo** (registration-free simulated runs at `/demo`, always labelled `DEMO/MOCK`) and **Sign In** (Clerk; authenticated users get a backend-backed project hub at `/`, with projects grouped by repository). The API is available at [http://127.0.0.1:8000](http://127.0.0.1:8000); its health endpoint is `/health`.
 
 ## Configuration
 
@@ -107,15 +107,27 @@ Open [http://localhost:3000](http://localhost:3000), choose **Demo Mode**, selec
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MEDHA_DATABASE_PATH` | `./data/medha.db` | SQLite database location |
+| `MEDHA_DATABASE_PATH` | `./data/medha.db` | SQLite database location (used when `MEDHA_DATABASE_URL` is unset) |
+| `MEDHA_DATABASE_URL` | *(unset)* | Main backend database (Supabase Postgres, ADR-029). When set, takes precedence over SQLite; `sslmode=require` auto-added for Supabase TLS |
 | `MEDHA_EXECUTOR_MODE` | `auto` | `auto`, `simulator`, or `docker` |
 | `MEDHA_DOCKER_EXECUTE` | `false` | Allow local Docker mutation |
 | `MEDHA_DOCKER_CLEANUP` | `true` | Clean up Docker resources |
 | `MEDHA_MAX_VERIFY_ROUNDS` | `3` | Maximum verification/replan rounds |
 | `MEDHA_CORS_ORIGINS` | `http://localhost:3000` | Allowed frontend origin |
 | `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:8000` | Frontend API URL |
+| `MEDHA_AI_ENABLED` | `false` | AI advisories (Groq primary, Gemini fallback). Deterministic pipeline always works when off |
+| `GROQ_API_KEY` / `GROQ_MODEL` | *(unset)* / `openai/gpt-oss-20b` | Primary provider key (server-only) + model |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | *(unset)* / `gemini-3.8-flash` | Fallback provider key (server-only) + model |
+| `MEDHA_AI_MAX_CALLS_PER_RUN` | `6` | Budget cap for AI calls per run |
+| `MEDHA_AUTH_MODE` | `off` | `off` (single-operator) or `clerk` (verified sessions + ownership) |
+| `CLERK_DOMAIN` | *(unset)* | Clerk frontend API domain for backend JWT verification |
+| `GITHUB_WEBHOOK_SECRET` | *(unset)* | Server-only webhook secret; unset fails the receiver closed (503) |
+| `MEDHA_WEBHOOK_ALLOWED_REPOS` | *(unset)* | Comma-separated `owner/repo` allowlist (fails closed in production) |
+| `MEDHA_WEBHOOK_BRANCHES` | `main` | Watched branches for push events |
 
-Optional LLM mediation is disabled by default and is not required for the core workflow. Never put real keys in `.env.example`, source files, issues, logs, or prompts.
+Optional LLM mediation is disabled by default and is not required for the core workflow. With `MEDHA_AI_ENABLED=true` and provider keys set, runs gain schema-validated advisory notes (change summary, repo interpretation, plan suggestions, agent explanations, critic assist, review brief) recorded in run history as `ai_assisted`/`degraded`; without keys or on provider failure the pipeline continues deterministically (`rule_based`/`unavailable`). Never put real keys in `.env.example`, source files, issues, logs, or prompts. Provider keys are server-only: they never appear in frontend variables, API responses, or the UI (Settings → AI assistance shows safe status only).
+
+Push-triggered approval flow: connect a repository as an owner-scoped project (`POST /api/projects` or Project Hub → Connect GitHub repo, then Verify), then configure the GitHub webhook (`POST /api/webhooks/github`, push events, JSON) after deployment. Verified pushes check out the exact pushed SHA, analyze without executing, and persist a `ready` proposal; `POST /api/proposals/{id}/approve` revalidates project linkage, SHA, and the exact plan hash before execution. See the Proposals page. Private repositories are unsupported until a GitHub App exists (ADR-036). Clerk `clerk` mode scopes projects, runs, and proposals to the verified session user.
 
 ## Testing
 
@@ -177,7 +189,7 @@ docs/           Demo, validation, evaluation, and viva material
 
 ## Scope and limitations
 
-MEDHA supports local targets and one real deployment at a time. Docker mutation is opt-in. Demo results are simulated and labelled. CIG accepts local Git repositories only; remote URLs are rejected on the change-impact path (`NOT_LOCAL_REPOSITORY`), while `/api/deploy` may shallow-clone remotes for manifest analysis. Repository URLs are validated at the API boundary (scheme allowlist, no embedded credentials on http(s), blocked metadata/private-network literal IPs; hostname checks are static — no DNS resolution — which is documented in `backend/app/core/repo_url.py`). The project intentionally excludes cloud deployment, multi-host orchestration, Kubernetes, DNS automation, CI/CD automation, SSH, Redis, PostgreSQL, Kafka, Celery, and Terraform.
+MEDHA supports local targets and one real deployment at a time. Docker mutation is opt-in. Demo results are simulated and labelled. Local-git CIG accepts local repositories; remote pushes use payload-derived change intelligence verified against the exact-SHA checkout (`source_method=webhook_push`), while `/api/deploy` may shallow-clone remotes for manifest analysis. Repository URLs are validated at the API boundary (scheme allowlist, no embedded credentials on http(s), blocked metadata/private-network literal IPs; hostname checks are static — no DNS resolution — which is documented in `backend/app/core/repo_url.py`). Private GitHub repositories are unsupported pending a GitHub App (ADR-036). The project intentionally excludes cloud deployment, multi-host orchestration, Kubernetes, DNS automation, CI/CD automation, SSH, Redis, Kafka, Celery, and Terraform. PostgreSQL (Supabase) is the configured persistent backend when `MEDHA_DATABASE_URL` is set (ADR-029).
 
 Evaluation values are project-defined prototype measurements on seeded fixtures. They are not evidence of universal optimality, production readiness, or superiority over existing platforms.
 
@@ -210,8 +222,9 @@ One service hosts both apps from the root `Dockerfile` (see `render.yaml` and
   `MEDHA_DOCKER_EXECUTE=false`, plus a production code pin): Docker mutation
   stays a local-machine activity.
 - Render health check: `/health` (rewritten to FastAPI).
-- SQLite on the free tier is ephemeral (fresh DB per redeploy); attach a paid
-  disk at `/var/medha-data` to persist run history with no config change.
+- SQLite on the free tier is ephemeral (fresh DB per redeploy); set
+  `MEDHA_DATABASE_URL` (Supabase, ADR-029) to persist run history with no
+  disk, or attach a paid disk at `/var/medha-data` for the SQLite fallback.
 - The container runs as non-root `appuser`; no Docker daemon, cloud
   credentials, SSH keys, or DNS controls exist inside the image.
 
@@ -233,13 +246,16 @@ One service hosts both apps from the root `Dockerfile` (see `render.yaml` and
 
 ### Public demo limitations
 
-The hosted service is a shared research demonstration, not a multi-tenant
-product: all visitors share one SQLite database, so run listings and
-deployment history are visible to everyone (no user accounts by design).
-Mutating API routes require the server-side `MEDHA_API_TOKEN` (injected by
-the Next.js proxy; browsers carry nothing), but do not submit private
-repository URLs or secrets through the public demo — use Demo Mode or a
-local run for anything sensitive.
+The hosted service is a shared research demonstration. Guest visitors can run
+registration-free simulated demos at `/demo` (labelled `DEMO/MOCK`, no
+infrastructure touched); signing in (Clerk) gives a per-user project hub, and
+with `MEDHA_AUTH_MODE=clerk` the backend verifies session JWTs and scopes
+runs/proposals to the verified user. In default `off` mode all visitors share
+one database, so run listings are visible to everyone. Mutating API routes
+require the server-side `MEDHA_API_TOKEN` (injected by the Next.js proxy;
+browsers carry nothing), but do not submit private repository URLs or secrets
+through the public demo — use Demo Mode or a local run for anything
+sensitive.
 
 ### Diagnosing build/startup failures
 

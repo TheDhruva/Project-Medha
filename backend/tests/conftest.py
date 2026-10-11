@@ -20,6 +20,10 @@ def _clear_deploy_lock():
 def client(tmp_path, monkeypatch):
     db_path = tmp_path / "test_medha.db"
     monkeypatch.setenv("MEDHA_DATABASE_PATH", str(db_path))
+    # Keep the suite offline-deterministic: an empty URL overrides both the
+    # shell env and any local backend/.env secret (env beats dotenv file).
+    # Live PG coverage is isolated in test_database_postgres.py.
+    monkeypatch.setenv("MEDHA_DATABASE_URL", "")
     monkeypatch.setenv("MEDHA_CORS_ORIGINS", "http://localhost:3000")
     monkeypatch.setenv("MEDHA_WORKFLOW_STEP_DELAY_SECONDS", "0")
     get_settings.cache_clear()

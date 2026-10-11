@@ -110,3 +110,31 @@ Avoid dumping all 16 panels into the first viewport with equal weight — progre
 - Fake terminal matrix aesthetics
 - Heavy dashboard card grids with vanity metrics
 - Auth screens in V1
+
+---
+
+## 10. Product surfaces (UX redesign)
+
+Entry: `/` renders the public landing for signed-out visitors (Try Demo →
+`/demo`, Sign In via Clerk) and the project hub for signed-in users.
+
+- `/demo` — guest demo engine only (`mode=demo` fixtures, labelled
+  DEMO/MOCK, no auth, no infrastructure mutation, isolated from user data).
+- `/` (signed in) — project hub: projects derived from `GET /api/deploys`
+  grouped by exact `repository_url`. All counts/statuses/attention come from
+  the backend; search + status filters; empty/loading/error/disconnected
+  states. Creating a project starts a real first run (demo or real pipeline).
+- `/projects/[repo]` — project dashboard: status, latest/selected run,
+  verification, conflicts, pending approvals, pipeline stepper, observed
+  agent states, attention items, recent activity; drill-downs to
+  orchestration / changes / runs / verification / graphs / evaluations /
+  recovery / settings, all hydrated from stored run artifacts.
+- Global `/runs`, `/runs/[id]`, `/proposals`, `/verify`, `/evaluation`,
+  `/settings` keep their backend-backed behavior inside one shared AppShell
+  (single sidebar navigation; Header carries brand + environment + identity
+  only).
+
+Color semantics: MEDHA red accent (`--medha-accent`) for brand/primary
+actions and genuine attention; blue (`--medha-run`) for running/info;
+green confirmed success; red danger critical failure; neutral informational.
+DEMO labels are neutral, LIVE labels blue — neither implies success.

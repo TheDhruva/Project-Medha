@@ -42,10 +42,13 @@ Content type: `application/json` unless noted (SSE is `text/event-stream`).
 
 ### 1.3 Status values (deployment)
 
-`queued` · `started` · `running` · `completed` · `failed` · `partial_recovery` · `cancelled`
+`queued` · `started` · `running` · `completed` · `failed` · `partial_recovery` · `cancelled` · `awaiting_approval`
 
 These are the `DeploymentStatus` enum values (`backend/app/core/enums.py`).
-Terminal statuses are `completed`, `failed`, `partial_recovery`, `cancelled`.
+Terminal statuses are `completed`, `failed`, `partial_recovery`, `cancelled`,
+`awaiting_approval` (plan-only analysis is done; a human decision is pending —
+see §12). Terminal SSE event types are `deployment.completed`,
+`deployment.failed`, and `proposal.ready`.
 Clients should treat unknown strings as non-terminal unless documented otherwise.
 
 ---
@@ -268,6 +271,24 @@ Return aggregated structured log lines (not raw Docker multiplex blobs by defaul
 | POST | `/api/evaluation/run/cnp` | Execute CNP evaluation runner (token-guarded) |
 | POST | `/api/evaluation/run/ceg` | Execute CEG evaluation runner (token-guarded) |
 | GET | `/api/evaluation/latest/{kind}` | Fetch one artifact (`cnp`/`ceg`/`combined`) |
+| GET | `/api/deploys` | List runs (`status`, `mode`, `repository`, `limit`, `offset`) |
+| GET | `/api/deploy/{id}/verification` | Stored verification + critic artifacts |
+| GET | `/api/deploy/{id}/rollback` | Stored rollback scope |
+| GET | `/api/deploy/{id}/execution` | Stored result + graph + rollback |
+| GET | `/api/ai/status` | Safe AI provider status (no secrets; §11) |
+| POST | `/api/webhooks/github` | GitHub push receiver (HMAC-SHA256; §12) |
+| GET | `/api/proposals` | List approval proposals (§12) |
+| GET | `/api/proposals/{id}` | One proposal with plan + hash |
+| POST | `/api/proposals/{id}/approve` | Approve + revalidated execution (token-guarded; §12) |
+| POST | `/api/proposals/{id}/reject` | Reject a ready proposal (token-guarded; §12) |
+| POST | `/api/projects` | Connect a GitHub repo as an owner-scoped project (§13) |
+| GET | `/api/projects` | List the caller's projects (§13) |
+| GET | `/api/projects/{id}` | One project (owner only; §13) |
+| PATCH | `/api/projects/{id}` | Rename / change watched branch (§13) |
+| POST | `/api/projects/{id}/verify` | Prove readability via `git ls-remote` (§13) |
+| POST | `/api/projects/{id}/disconnect` | Stop routing webhooks/runs (§13) |
+| DELETE | `/api/projects/{id}` | Remove the mapping; history preserved (§13) |
+| POST | `/api/projects/{id}/runs` | Start a project-bound real analysis (§13) |
 
 Real mode may return `409 DEPLOYMENT_BUSY` when another real deployment is running.
 Unsupported repositories may fail with `DEPLOYMENT_UNSUPPORTED` / `PLAN_REQUIRES_REVIEW`.
@@ -339,6 +360,115 @@ absent) — the UI never sees fabricated evidence.
 
 ---
 
+## 11. AI provider status
+
+`GET /api/ai/status` returns safe configuration + health metadata only:
+
+```json
+{
+  "enabled": false,
+  "primary_provider": "groq",
+  "fallback_provider": "gemini",
+  "primary_model": "openai/gpt-oss-20b",
+  "fallback_model": "gemini-3.8-flash",
+  "max_calls_per_run": 6,
+  "health": {
+    "enabled": false,
+    "providers": {
+      "groq": {"configured": false, "model": null, "reachable": false,
+               "latency_s": 0.0, "failure_category": "not_configured"},
+      "gemini": {"configured": false, "model": null, "reachable": false,
+                 "latency_s": 0.0, "failure_category": "not_configured"}
+    }
+  }
+}
+```
+
+Never includes keys, tokens, request bodies, or upstream error text.
+Per-run AI metadata (`outcome`, `provider`, `model`, `fallback_used`,
+`duration_s`, `failure_category`, `schema_valid`) is stored on the deployment
+record (`ai`) and summarized in `GET /api/deploys` as `ai_outcome`/`ai_provider`.
+
+---
+
+## 12. Webhook + approval proposals
+
+Authenticated by the GitHub webhook secret (`GITHUB_WEBHOOK_SECRET`,
+HMAC-SHA256 over the raw body, constant-time compare) — independent of Clerk
+sessions. Unset secret → `503 WEBHOOK_NOT_CONFIGURED`. Only `push` events to
+watched branches (`MEDHA_WEBHOOK_BRANCHES`, default `main`) are processed.
+Branch deletions (null SHA) and non-push events are recorded and ignored.
+Duplicate `X-GitHub-Delivery` IDs return
+`{"status": "duplicate"}` without side effects.
+
+**Project routing (§13):** a signed push must resolve to at least one
+*connected* project watching the pushed branch. Once any project exists, pushes
+for unmapped/disconnected repositories are ignored (`no connected project`) —
+an unauthenticated endpoint must not analyze arbitrary repositories. With zero
+projects configured, the legacy server allowlist applies
+(`MEDHA_WEBHOOK_ALLOWED_REPOS`; empty fails closed in production).
+
+**Exact-commit binding:** the verified `after` SHA is checked out in an
+isolated workspace (`git fetch` + detached checkout) and `HEAD` is asserted
+equal before analysis; mismatch fails closed (`SHA_MISMATCH`/`GIT_CLONE_FAILED`
+→ proposal `failed`). The payload's `commits[]` file lists become
+payload-derived change intelligence (`source_method=webhook_push`), verified
+file-by-file against the checkout.
+
+`POST /api/webhooks/github` → `202 {"status": "analyzing", "proposal_id",
+"deployment_id"}` (or `"proposals": [...]` when several connected projects
+watch the same repository). Analysis runs plan-only: on success the deployment
+reaches `awaiting_approval` and the proposal `ready` with `plan_hash` (SHA-256
+over the canonical plan) plus the stored `push` summary. `proposal.ready` is a
+terminal SSE event for that stream.
+
+`POST /api/proposals/{id}/approve` (token-guarded; Clerk subject in `clerk`
+mode) requires `ready` status, project-owner match for project-bound proposals
+(foreign-owner → `403`), a still-`connected` project watching the same
+repository/branch/URL, an `awaiting_approval` deployment, and an exact
+`target_sha` + recomputed-plan-hash match — otherwise `409 STALE_PROPOSAL`
+and the proposal is marked `stale`. Approval re-runs the deterministic
+pipeline with `expected_plan_hash`; any drift fails closed (`STALE_PLAN`)
+before execution. Replayed approvals return the current state
+(`duplicate: true`) without executing twice.
+`POST /api/proposals/{id}/reject` closes a ready proposal without execution.
+
+`GET /api/proposals` accepts `project_id` (owner-checked) and never leaks
+another owner's project-bound proposals; `GET /api/deploys` accepts
+`project_id` likewise. Startup recovery fails orphaned `queued/started/running`
+deployments and pre-`ready` proposals closed (`failed` + terminal event);
+`ready` proposals and their plans survive restarts unchanged.
+
+---
+
+## 13. Project-scoped repository connections
+
+Any signed-in owner can connect their own eligible GitHub repositories —
+no founder-edited global allowlist per project. All endpoints require the
+Clerk subject (or the legacy single-operator subject); all rows carry
+`owner_sub` and cross-owner access returns `404` (no existence oracle).
+
+- `POST /api/projects` `{name, repository, branch?}` — `repository` accepts
+  `owner/name` or a `github.com` URL (anything else → `400
+  NON_GITHUB_REPOSITORY` / `INVALID_REPOSITORY_REF`). Stores configuration
+  only (`pending`/`unverified`) — never credentials, never proof of access.
+  Duplicate `(owner, repository)` → `409 PROJECT_EXISTS`. → `201` project.
+- `GET /api/projects` — caller's projects only. `GET /api/projects/{id}` —
+  one project. `PATCH /api/projects/{id}` — rename / change branch.
+- `POST /api/projects/{id}/verify` — bounded `git ls-remote HEAD`:
+  reachable → `connected`/`public` (+ `head_sha`); otherwise `failed`/
+  `unverified` with an honest reason. Private repositories are reported as
+  unsupported (GitHub App required — not implemented) and stay unconnected.
+- `POST /api/projects/{id}/disconnect` — stops webhook routing and project
+  runs (`disconnected`). `DELETE /api/projects/{id}` — removes the mapping;
+  run/proposal history is preserved but no longer routable.
+- `POST /api/projects/{id}/runs` `{intent?, target_revision? (40-hex),
+  target_host?, target_port?}` — starts a real-mode analysis bound to the
+  project (`connected` required, else `409 PROJECT_NOT_CONNECTED`).
+  `target_revision`, when given, is checked out exactly (see §12).
+
+---
+
 ## 10. Demo labelling rule
 
 Whenever `mode=demo` or synthetic data is used:
@@ -354,4 +484,6 @@ Whenever `mode=demo` or synthetic data is used:
 - **Demo Mode:** deterministic Phase 3 scenarios via `DemoRunner` (DEMO/MOCK labelled).
 - **Real Mode:** analyze → specialists → CNP → verify → critic → bounded replan → execute (simulator by default) → CEG → scoped rollback on failure.
 - Do **not** claim real Docker mutation unless `MEDHA_DOCKER_EXECUTE=true` and a verified plan ran against the local Docker host.
-- No Redis, PostgreSQL, Kubernetes, remote deploy, or mandatory paid LLM.
+- No Redis, Kubernetes, remote deploy, or mandatory paid LLM. PostgreSQL
+  (Supabase) is the configured persistent backend when `MEDHA_DATABASE_URL`
+  is set; SQLite remains the zero-config fallback.

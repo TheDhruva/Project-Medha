@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { cn } from "@/lib/ui/cn";
 import {
   Background,
   Controls,
@@ -22,15 +23,15 @@ function nodeColors(status: NodeStatus): { border: string; bg: string; text: str
   switch (status) {
     case "success":
     case "preserved":
-      return { border: "#1b7a4a", bg: "#e6f5ed", text: "#145c38" };
+      return { border: "#1b7a4a", bg: "#164e3d", text: "#a8d5c2" };
     case "failed":
-      return { border: "#b42318", bg: "#fdeceb", text: "#8a1a12" };
+      return { border: "#b42318", bg: "#3f232a", text: "#ffa3a5" };
     case "rolled_back":
-      return { border: "#a56a12", bg: "#f8efd9", text: "#7a4e0c" };
+      return { border: "#a56a12", bg: "#3a2a1a", text: "#d4c5a8" };
     case "running":
-      return { border: "#1a4f9c", bg: "#e8f0fb", text: "#0f2f5c" };
+      return { border: "#1a4f9c", bg: "#0e2d5a", text: "#a3c4e7" };
     default:
-      return { border: "#c9ced8", bg: "#ffffff", text: "#5a6573" };
+      return { border: "#465368", bg: "#1f2d3d", text: "#6b7a8c" };
   }
 }
 
@@ -39,16 +40,16 @@ function CegServiceNode({ data, selected }: NodeProps<CegFlowNode>) {
   const colors = nodeColors(node.status);
   return (
     <div
-      className={`min-w-[140px] rounded-lg border-2 px-3 py-2 shadow-sm ${selected ? "ring-2 ring-medha-accent ring-offset-2" : ""}`}
+      className={`min-w-[140px] rounded-md px-3 py-2 shadow-sm ${selected ? "ring-2 ring-medha-accent ring-offset-2" : ""}`}
       style={{ borderColor: colors.border, background: colors.bg, color: colors.text }}
     >
-      <Handle type="target" position={Position.Top} className="!bg-medha-strong !h-2 !w-2" />
-      <p className="text-[11px] font-semibold tracking-wide">{node.service}</p>
-      <p className="mt-0.5 text-[10px] opacity-80">
+      <Handle type="target" position={Position.Top} className="!bg-medha-accent !h-2 !w-2" />
+      <p className="text-[10px] font-semibold tracking-wide">{node.service}</p>
+      <p className="mt-0.5 text-xs opacity-80">
         <span aria-hidden>{statusGlyph(node.status)} </span>
         {labelStatus(node.status)}
       </p>
-      <Handle type="source" position={Position.Bottom} className="!bg-medha-strong !h-2 !w-2" />
+      <Handle type="source" position={Position.Bottom} className="!bg-medha-accent !h-2 !w-2" />
     </div>
   );
 }
@@ -82,8 +83,8 @@ export function CausalExecutionGraph() {
         id: e.id,
         source: e.source,
         target: e.target,
-        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#8791a0" },
-        style: { stroke: "#8791a0", strokeWidth: 1.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#465368" },
+        style: { stroke: "#465368", strokeWidth: 1.5 },
       })),
     [snapshot.graph.edges],
   );
@@ -99,11 +100,11 @@ export function CausalExecutionGraph() {
             Dependency-aware recovery — research contribution #2
           </p>
         </div>
-        <span className="text-[11px] text-medha-tertiary">Click a node for details</span>
+        <span className="text-[10px] text-medha-tertiary">Click a node for details</span>
       </div>
 
       <div className="grid lg:grid-cols-[1fr_280px]">
-        <div className="h-[360px] border-b border-medha-border bg-[#fafbfc] lg:border-b-0 lg:border-r">
+        <div className="h-[360px] border-b border-medha-border bg-medha-surface lg:border-b-0 lg:border-r">
           {snapshot.graph.nodes.length === 0 ? (
             <div className="flex h-full items-center justify-center px-6 text-center text-sm text-medha-secondary">
               Deployment recovery data is not available for this run.
@@ -128,7 +129,7 @@ export function CausalExecutionGraph() {
               nodesConnectable={false}
               elementsSelectable
             >
-              <Background gap={18} size={1} color="#e2e5eb" />
+              <Background gap={18} size={1} color="#1f2d3d" />
               <Controls showInteractive={false} />
             </ReactFlow>
           )}
@@ -150,14 +151,8 @@ export function CausalExecutionGraph() {
               <Row label="Action" value={selected.action} />
               <Row label="Timestamp" value={selected.timestamp} />
               {selected.reason ? <Row label="Reason" value={selected.reason} /> : null}
-              <Row
-                label="Dependents"
-                value={(selected.dependents ?? []).join(", ") || "None"}
-              />
-              <Row
-                label="Rollback"
-                value={selected.rollbackRequired ? "Required" : "Not required"}
-              />
+              <Row label="Dependents" value={(selected.dependents ?? []).join(", ") || "None"} />
+              <Row label="Rollback" value={selected.rollbackRequired ? "Required" : "Not required"} />
               <Row label="Preserved" value={selected.preserved ? "Yes" : "No"} />
               {viewMode === "technical" ? (
                 <>
@@ -178,8 +173,8 @@ export function CausalExecutionGraph() {
 
           {snapshot.rollback ? (
             <div className="mt-5 space-y-3">
-              <div className="rounded-medha-sm border border-medha-danger/25 bg-medha-danger-soft/50 p-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wide text-medha-danger">
+              <div className="rounded-md border border-medha-danger/25 bg-medha-danger-soft/50 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-medha-danger">
                   Failure detected
                 </p>
                 <p className="mt-1 text-sm text-medha-text">
@@ -188,7 +183,7 @@ export function CausalExecutionGraph() {
                     : `failed_nodes=[${snapshot.rollback.scopeNodeIds.length ? "see scope" : "—"}] · see details`}
                 </p>
               </div>
-              <div className="rounded-medha-sm border border-medha-warning/30 bg-medha-warning-soft/60 p-3">
+              <div className="rounded-md border border-medha-warning/30 bg-medha-warning-soft/60 p-3">
                 <p className="text-xs font-semibold uppercase tracking-wide text-medha-warning">
                   {snapshot.rollback.headline}
                 </p>
@@ -230,7 +225,7 @@ export function CausalExecutionGraph() {
                         </span>
                       </span>
                       {viewMode === "technical" && d.note ? (
-                        <span className="medha-mono text-[10px] text-medha-tertiary">{d.note}</span>
+                        <span className="medha-mono text-[9px] text-medha-tertiary">{d.note}</span>
                       ) : null}
                     </li>
                   ))}
@@ -256,7 +251,7 @@ function Row({
   return (
     <div>
       <p className="medha-label">{label}</p>
-      <p className={`mt-0.5 text-sm text-medha-text ${mono ? "medha-mono text-xs" : ""}`}>
+      <p className={cn("mt-0.5 text-sm text-medha-text", mono ? "medha-mono text-xs" : "")}>
         {value}
       </p>
     </div>

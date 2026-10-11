@@ -26,6 +26,7 @@ class DeploymentStatus(str, Enum):
     FAILED = "failed"
     PARTIAL_RECOVERY = "partial_recovery"
     CANCELLED = "cancelled"
+    AWAITING_APPROVAL = "awaiting_approval"
 
 
 class StageId(str, Enum):
@@ -71,8 +72,24 @@ class EventType(str, Enum):
     ROLLBACK_NODE = "rollback.node"
     ROLLBACK_COMPLETED = "rollback.completed"
     SYSTEM_MESSAGE = "system.message"
+    PROPOSAL_READY = "proposal.ready"
     DEPLOYMENT_COMPLETED = "deployment.completed"
     DEPLOYMENT_FAILED = "deployment.failed"
+
+
+class ProposalStatus(str, Enum):
+    """Approval-proposal lifecycle (webhook → analysis → human decision)."""
+
+    PENDING = "pending"
+    ANALYZING = "analyzing"
+    READY = "ready"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"
+    STALE = "stale"
+    EXECUTING = "executing"
+    EXECUTED = "executed"
+    FAILED = "failed"
 
 
 # Event types that terminate an SSE stream (persisted and replayed first).
@@ -80,6 +97,7 @@ TERMINAL_EVENT_TYPES = frozenset(
     {
         EventType.DEPLOYMENT_COMPLETED.value,
         EventType.DEPLOYMENT_FAILED.value,
+        EventType.PROPOSAL_READY.value,
     }
 )
 
@@ -90,5 +108,6 @@ TERMINAL_STATUSES = frozenset(
         DeploymentStatus.FAILED.value,
         DeploymentStatus.PARTIAL_RECOVERY.value,
         DeploymentStatus.CANCELLED.value,
+        DeploymentStatus.AWAITING_APPROVAL.value,
     }
 )

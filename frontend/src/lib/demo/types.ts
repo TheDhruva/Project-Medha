@@ -82,11 +82,12 @@ export type NodeStatus =
 export type DeploymentRunStatus =
   | "idle"
   | "running"
+  | "awaiting_approval"
   | "succeeded"
   | "failed"
   | "partial_recovery";
 
-export type ResultKind = "success" | "partial_recovery" | "failed";
+export type ResultKind = "success" | "partial_recovery" | "failed" | "plan_awaiting_approval";
 
 export interface ScenarioMeta {
   id: ScenarioId;
@@ -180,12 +181,16 @@ export interface CegNode {
   rollbackRequired?: boolean;
   preserved?: boolean;
   position: { x: number; y: number };
+  node_id?: string;
+  parent_nodes?: string[];
+  is_demo?: boolean;
 }
 
 export interface CegEdge {
   id: string;
   source: string;
   target: string;
+  relation?: string;
 }
 
 export interface CegGraph {

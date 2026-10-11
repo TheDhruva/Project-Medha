@@ -83,6 +83,9 @@ class DeploymentRecord(BaseModel):
     graph: dict[str, Any] | None = None
     rollback: dict[str, Any] | None = None
     change_intel: dict[str, Any] | None = None
+    ai: dict[str, Any] | None = None
+    owner_sub: str | None = None
+    project_id: str | None = None
     created_at: str
     updated_at: str
     is_demo: bool = True
@@ -109,5 +112,88 @@ class DeploymentRecord(BaseModel):
             "result": self.result,
             "error_summary": self.error_summary,
             "change_intel": self.change_intel,
+            "ai": self.ai,
+            "owner_sub": self.owner_sub,
+            "project_id": self.project_id,
             "label": "DEMO/MOCK" if self.is_demo else None,
+        }
+
+
+class ProjectRecord(BaseModel):
+    """One owner's connection to one GitHub repository + branch.
+
+    No credentials are stored: readability is proven by `git ls-remote`
+    (verify) and by exact-SHA checkout at analysis time. Visibility stays
+    `unverified` until a check proves otherwise; `private_unsupported`
+    labels repositories MEDHA cannot access without a GitHub App.
+    """
+
+    project_id: str
+    owner_sub: str
+    name: str
+    provider: str = "github"
+    repo_owner: str
+    repo_name: str
+    repository: str  # lowercased "owner/name"
+    canonical_url: str
+    branch: str = "main"
+    visibility: str = "unverified"
+    connection_status: str = "pending"
+    created_at: str
+    updated_at: str
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "name": self.name,
+            "provider": self.provider,
+            "repo_owner": self.repo_owner,
+            "repo_name": self.repo_name,
+            "repository": self.repository,
+            "canonical_url": self.canonical_url,
+            "branch": self.branch,
+            "visibility": self.visibility,
+            "connection_status": self.connection_status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+class ProposalRecord(BaseModel):
+    proposal_id: str
+    repository: str
+    branch: str
+    base_sha: str | None = None
+    target_sha: str
+    deployment_id: str | None = None
+    plan_hash: str | None = None
+    plan: dict[str, Any] | None = None
+    push: dict[str, Any] | None = None
+    project_id: str | None = None
+    status: str = "pending"
+    created_by: str | None = None
+    created_at: str
+    decided_by: str | None = None
+    decided_at: str | None = None
+    execution_id: str | None = None
+    idempotency_key: str
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "proposal_id": self.proposal_id,
+            "repository": self.repository,
+            "branch": self.branch,
+            "base_sha": self.base_sha,
+            "target_sha": self.target_sha,
+            "deployment_id": self.deployment_id,
+            "plan_hash": self.plan_hash,
+            "plan": self.plan,
+            "push": self.push,
+            "project_id": self.project_id,
+            "status": self.status,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+            "decided_by": self.decided_by,
+            "decided_at": self.decided_at,
+            "execution_id": self.execution_id,
         }

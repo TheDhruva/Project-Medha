@@ -37,6 +37,7 @@ function toneForEvent(type: string, level: string): TraceEvent["tone"] {
     type.includes("completed") ||
     type.includes("passed") ||
     type.includes("resolved") ||
+    type.includes("ready") ||
     type.includes("success")
   ) {
     return "success";
@@ -306,6 +307,36 @@ export function applyBackendEvent(
     };
   }
 
+  if (event.type === "proposal.ready") {
+    runStatus = "awaiting_approval";
+    if (!data.pipeline) {
+      pipeline = setStages(pipeline, {
+        COMPLETE: { status: "success", detail: "Plan ready — awaiting approval" },
+      });
+    }
+    explain = {
+      currentStage: "COMPLETE",
+      round: negotiationRound(data, negotiation),
+      statusLabel: "Waiting for approval",
+      simpleText:
+        simpleFromEvent ||
+        "Verified plan ready. Nothing will execute until a human approves it.",
+      technicalText:
+        technicalFromEvent ||
+        `event=proposal.ready · status=${event.status} · is_demo=${event.is_demo}`,
+    };
+    result = (data.result as DeploymentResultView) || {
+      kind: "plan_awaiting_approval",
+      title: "AWAITING APPROVAL",
+      message: event.message,
+      durationLabel: "analysis",
+      servicesLabel: "see plan",
+      verificationScore: null,
+      constraintsResolved: 0,
+      rollbackScope: null,
+    };
+  }
+
   return {
     ...snapshot,
     pipeline,
@@ -343,6 +374,7 @@ const TERMINAL_RUN_STATUS: Record<string, DeploymentSnapshot["runStatus"]> = {
   partial_recovery: "partial_recovery",
   failed: "failed",
   cancelled: "failed",
+  awaiting_approval: "awaiting_approval",
 };
 
 /** True when a backend deployment status means the run cannot progress further. */
@@ -370,7 +402,9 @@ export function reconcileTerminalState(
       ? "Complete"
       : runStatus === "partial_recovery"
         ? "Recovered"
-        : "Failed";
+        : runStatus === "awaiting_approval"
+          ? "Waiting for approval"
+          : "Failed";
   return {
     ...snapshot,
     runStatus,
@@ -441,7 +475,9 @@ export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSn
         ? "Failed"
         : runStatus === "partial_recovery"
           ? "Recovered"
-          : "Complete";
+          : runStatus === "awaiting_approval"
+            ? "Waiting for approval"
+            : "Complete";
 
   return {
     deploymentId: api.deployment_id,
@@ -460,7 +496,9 @@ export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSn
             ? "Run did not complete. See the result and verification panels for details."
             : runStatus === "partial_recovery"
               ? "Run recovered after a dependency-aware scoped rollback."
-              : "Run completed."),
+              : runStatus === "awaiting_approval"
+                ? "Verified plan ready. Nothing executes until a human approves it."
+                : "Run completed."),
       technicalText:
         api.explain?.technical || `state=hydrated · status=${api.status} · is_demo=${isDemo}`,
     },

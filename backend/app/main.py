@@ -12,9 +12,12 @@ from app.api.change_impact import router as change_intel_router
 from app.api.deploy import router as deploy_router
 from app.api.evaluation import router as evaluation_router
 from app.api.health import router as health_router
+from app.api.ai import router as ai_router
+from app.api.projects import router as projects_router
+from app.api.webhooks import router as webhooks_router
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
-from app.database.connection import init_db
+from app.database.connection import describe_db, init_db
 
 logger = get_logger(__name__)
 
@@ -23,7 +26,14 @@ logger = get_logger(__name__)
 async def lifespan(_app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
-    init_db(settings.database_path)
+    init_db()
+    try:
+        from app.services.recovery import reconcile_interrupted, recovery_summary
+
+        recovered = reconcile_interrupted()
+    except Exception:  # noqa: BLE001 - recovery must never block startup
+        logger.exception("Startup recovery failed")
+        recovered = {}
     try:
         from app.services.workspace import prune_stale_workspaces
 
@@ -32,11 +42,12 @@ async def lifespan(_app: FastAPI):
         logger.exception("Workspace prune failed at startup")
         pruned = 0
     logger.info(
-        "MEDHA backend starting env=%s db=%s cors=%s pruned_workspaces=%s",
+        "MEDHA backend starting env=%s db=%s cors=%s pruned_workspaces=%s recovery=%s",
         settings.medha_env,
-        settings.database_path,
+        describe_db(),
         settings.cors_origins,
         pruned,
+        recovery_summary(recovered) if recovered else "none",
     )
     yield
     logger.info("MEDHA backend shutting down")
@@ -90,6 +101,9 @@ def create_app() -> FastAPI:
     application.include_router(deploy_router)
     application.include_router(evaluation_router)
     application.include_router(change_intel_router)
+    application.include_router(ai_router)
+    application.include_router(projects_router)
+    application.include_router(webhooks_router)
     return application
 
 

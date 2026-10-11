@@ -13,10 +13,11 @@ import {
 import {
   ApiError,
   createDeployment,
-  eventsUrl,
   fetchDeployment,
   fetchRunHydration,
+  subscribeDeploymentEvents,
   type BackendSystemEvent,
+  type EventSubscription,
 } from "@/lib/api/client";
 import {
   applyBackendEvent,
@@ -73,7 +74,7 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<DeploymentSnapshot>(createIdleSnapshot);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [hydrating, setHydrating] = useState(false);
-  const sourceRef = useRef<EventSource | null>(null);
+  const sourceRef = useRef<EventSubscription | null>(null);
   const seenEventsRef = useRef<Set<string>>(new Set());
 
   const closeStream = useCallback(() => {
@@ -104,42 +105,31 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
     (deploymentId: string) => {
       closeStream();
       seenEventsRef.current = new Set();
-      const source = new EventSource(eventsUrl(deploymentId));
-      sourceRef.current = source;
-
-      source.onmessage = (message) => {
-        try {
-          const event = JSON.parse(message.data) as BackendSystemEvent;
+      const subscription = subscribeDeploymentEvents(deploymentId, {
+        onEvent: (event: BackendSystemEvent) => {
           if (seenEventsRef.current.has(event.event_id)) return;
           seenEventsRef.current.add(event.event_id);
           setSnapshot((prev) => applyBackendEvent(prev, event));
-          if (
-            event.type === "deployment.completed" ||
-            event.type === "deployment.failed"
-          ) {
-            closeStream();
-          }
-        } catch {
-          setConnectionError("Failed to parse backend event.");
-        }
-      };
-
-      source.onerror = () => {
-        // EventSource retries automatically; surface a soft warning. If the
-        // backend actually finished the deployment while the stream was down,
-        // reconcile to the terminal state so the UI never stays "running".
-        setConnectionError(
-          "Lost connection to MEDHA backend event stream. Is the API running on :8000?",
-        );
-        fetchDeployment(deploymentId)
-          .then((api) => {
-            setSnapshot((prev) => reconcileTerminalState(prev, api));
-            if (isTerminalDeploymentStatus(api.status)) closeStream();
-          })
-          .catch(() => {
-            /* backend unreachable — EventSource keeps retrying */
-          });
-      };
+        },
+        onTerminal: () => {
+          closeStream();
+        },
+        onError: (message: string) => {
+          // Surface a soft warning. If the backend actually finished the
+          // deployment while the stream was down, reconcile to the terminal
+          // state so the UI never stays "running".
+          setConnectionError(`${message} Is the API running on :8000?`);
+          fetchDeployment(deploymentId)
+            .then((api) => {
+              setSnapshot((prev) => reconcileTerminalState(prev, api));
+              if (isTerminalDeploymentStatus(api.status)) closeStream();
+            })
+            .catch(() => {
+              /* backend unreachable — message already shown */
+            });
+        },
+      });
+      sourceRef.current = subscription;
     },
     [closeStream],
   );
@@ -247,7 +237,6 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
       closeStream();
       seenEventsRef.current = new Set();
       setConnectionError(null);
-      setHydrating(true);
       setSnapshot({
         ...createIdleSnapshot(),
         deploymentId,
@@ -261,24 +250,75 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
         },
       });
       try {
-        const [api, hydration] = await Promise.all([
+        const [apiResult, hydrationResult] = await Promise.allSettled([
           fetchDeployment(deploymentId),
           fetchRunHydration(deploymentId),
         ]);
-        const { verification, critic } = mapVerificationArtifact(hydration.verification);
+
+        const apiFetchSuccessful = apiResult.status === "fulfilled";
+        const hydrationFetchSuccessful = hydrationResult.status === "fulfilled";
+
+        if (!apiFetchSuccessful || !hydrationFetchSuccessful) {
+          const apiMessage =
+            !apiFetchSuccessful &&
+            apiResult.reason instanceof ApiError
+              ? apiResult.reason.message
+              : !apiFetchSuccessful
+                ? "Cannot reach MEDHA backend for run deployment data."
+                : null;
+          const hydMessage =
+            !hydrationFetchSuccessful &&
+            hydrationResult.reason
+              ? hydrationResult.reason instanceof ApiError
+                ? hydrationResult.reason.message
+                : "Cannot fetch run hydration data."
+              : null;
+          const combinedMessage = [
+            apiMessage,
+            hydMessage,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          setConnectionError(combinedMessage || "Failed to load run data.");
+          setSnapshot({
+            ...createIdleSnapshot(),
+            deploymentId,
+            runStatus: "failed",
+            explain: {
+              currentStage: null,
+              round: null,
+              statusLabel: "Failed to load",
+              simpleText: combinedMessage || "Failed to load run data.",
+              technicalText: `source=rest · deployment_id=${deploymentId}`,
+            },
+          });
+          return;
+        }
+
+        const api = apiResult.value;
+        const hydrate = hydrationResult.value;
+
+        const { verification, critic } = mapVerificationArtifact(hydrate.verification);
+        const constraints = hydrate.constraints?.constraints ?? null;
+        const negotiation = hydrate.constraints?.negotiation ?? null;
+        const graph = hydrate.graph?.graph ?? null;
+        const rollback = hydrate.graph?.rollback ?? null;
+        const changeIntel = hydrate.changeImpact?.analysis ?? null;
+
         setSnapshot(
           buildBackendSnapshot({
             api,
-            logs: hydration.logs,
-            constraints: hydration.constraints?.constraints ?? null,
-            negotiation: hydration.constraints?.negotiation ?? null,
+            logs: hydrate.logs,
+            constraints,
+            negotiation,
             verification,
             critic,
-            graph: hydration.graph?.graph ?? null,
-            rollback: hydration.graph?.rollback ?? null,
-            changeIntel: hydration.changeImpact?.analysis ?? null,
+            graph,
+            rollback,
+            changeIntel,
           }),
         );
+
         subscribe(deploymentId);
       } catch (error) {
         const message =
@@ -298,8 +338,6 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
             technicalText: `source=rest · deployment_id=${deploymentId}`,
           },
         });
-      } finally {
-        setHydrating(false);
       }
     },
     [closeStream, subscribe],

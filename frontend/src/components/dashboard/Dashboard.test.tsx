@@ -36,7 +36,9 @@ describe("Overview", () => {
     for (const step of ["Analyze", "Resolve", "Verify", "Deploy"]) {
       expect(screen.getAllByText(step).length).toBeGreaterThan(0);
     }
-    expect(screen.getByRole("link", { name: "Verify" })).toHaveAttribute(
+    // Global navigation (Verify, Runs, …) lives in AppShell's sidebar, not in
+    // this legacy panel — the primary entry point stays on the /verify route.
+    expect(screen.getByRole("link", { name: /Start verification/ })).toHaveAttribute(
       "href",
       "/verify",
     );

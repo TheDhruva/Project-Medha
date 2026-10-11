@@ -7,7 +7,7 @@ const toneClass = {
   success: "text-medha-success",
   warning: "text-medha-warning",
   error: "text-medha-danger",
-  info: "text-medha-accent",
+  info: "text-medha-run",
   neutral: "text-medha-secondary",
 } as const;
 

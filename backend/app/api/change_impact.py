@@ -16,6 +16,7 @@ from pydantic import BaseModel, field_validator
 from app.changeintel.engine import analyze_change_impact
 from app.changeintel.git_extract import ChangeIntelError
 from app.core.api_token import require_mutation_token
+from app.core.clerk_auth import LOCAL_SUBJECT, RequireSubject
 from app.core.events import utc_now_iso
 from app.core.logging import get_logger
 from app.core.repo_url import RepositoryUrlError, validate_repository_url
@@ -107,9 +108,10 @@ async def change_impact_analyze(payload: ChangeImpactRequest):
 
 
 @router.get("/deploy/{deployment_id}/change-impact", response_model=None)
-async def get_change_impact(deployment_id: str):
+async def get_change_impact(deployment_id: str, subject: str = RequireSubject):
     record = repo.get(deployment_id)
-    if record is None:
+    owner = subject if subject != LOCAL_SUBJECT else None
+    if record is None or (owner is not None and record.owner_sub != owner):
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     change_intel = record.change_intel
     if change_intel is None:

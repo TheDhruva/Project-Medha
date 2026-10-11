@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from app.agents.analyzer import analyze_repository
 from app.agents.critic import run_critic
@@ -34,19 +36,96 @@ logger = get_logger(__name__)
 PHASE_LABEL = "10-11"
 
 
+def _canonical_plan(exec_plan: Any) -> dict[str, Any]:
+    """Stable, serializable plan snapshot for hashing and proposals."""
+    try:
+        data = exec_plan.model_dump(mode="json")
+    except Exception:  # noqa: BLE001 - hash must never break execution
+        data = {}
+    return {
+        "deployment_id": getattr(exec_plan, "deployment_id", None),
+        "services": data.get("services", []),
+        "actions": data.get("actions", []),
+        "dependencies": data.get("dependencies", {}),
+        "networks": data.get("networks", []),
+        "volumes": data.get("volumes", []),
+        "compose": data.get("compose", {}),
+    }
+
+
+def _plan_hash(canonical: dict[str, Any]) -> str:
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _exact_sha_or_none(value: str | None) -> str | None:
+    """Return the SHA when it is an exact 40-hex commit, else None.
+
+    Non-SHA revisions (branch names, short hashes, None) keep the legacy
+    behavior: workspace copy / branch-tip clone without commit binding.
+    """
+    if not value:
+        return None
+    candidate = value.strip().lower()
+    if len(candidate) == 40 and all(ch in "0123456789abcdef" for ch in candidate):
+        return candidate
+    return None
+
+
+def _ai_context(record: Any, settings: Any) -> dict[str, Any]:
+    """Per-run AI state: shared service, call budget, notes, owner binding."""
+    from app.ai.service import AIBudget, AIService
+
+    return {
+        "service": AIService(settings),
+        "budget": AIBudget(max_calls=max(0, settings.ai_max_calls_per_run)),
+        "notes": {},
+        "owner": (record.owner_sub if record is not None else None) or "local",
+        "warned_unavailable": False,
+    }
+
+
+def _ai_rollup(notes: dict[str, Any]) -> dict[str, Any] | None:
+    """Compact overall AI status for run records and the UI."""
+    if not notes:
+        return None
+    from app.ai.service import PROMPT_VERSION
+
+    rank = {"ai_assisted": 0, "degraded": 1, "unavailable": 2, "rule_based": 3}
+    metas = [note["meta"] for note in notes.values()]
+    best = min(metas, key=lambda m: rank.get(m.get("outcome", "rule_based"), 3))
+    return {
+        "outcome": best.get("outcome"),
+        "provider": best.get("provider"),
+        "model": best.get("model"),
+        "fallback_used": any(m.get("fallback_used") for m in metas),
+        "failure_category": best.get("failure_category"),
+        "prompt_version": PROMPT_VERSION,
+        "notes": notes,
+    }
+
+
 class PlanningPipeline:
     """Phases 4–11 real path (local only; Docker mutate opt-in)."""
 
     def __init__(self, repo: DeploymentRepository | None = None) -> None:
         self.repo = repo or DeploymentRepository()
 
-    async def run(self, deployment_id: str) -> None:
+    async def run(
+        self,
+        deployment_id: str,
+        *,
+        plan_only: bool = False,
+        expected_plan_hash: str | None = None,
+        proposal_id: str | None = None,
+    ) -> None:
         settings = get_settings()
         delay = settings.workflow_step_delay_seconds
         record = self.repo.get(deployment_id)
         if record is None:
             logger.error("PlanningPipeline missing deployment_id=%s", deployment_id)
             return
+        ai_ctx = _ai_context(record, settings)
 
         try:
             try_acquire_real_deploy(deployment_id)
@@ -100,7 +179,15 @@ class PlanningPipeline:
                 "workflow=planning · stage=ANALYZE",
             )
             await self._stage(deployment_id, StageId.ANALYZE, "started", 0)
-            acquisition = acquire_repository(deployment_id, record.repository_url)
+            ref_sha = _exact_sha_or_none(record.target_revision)
+            acquisition = acquire_repository(
+                deployment_id, record.repository_url, ref_sha=ref_sha
+            )
+            if ref_sha and acquisition.checked_sha != ref_sha:
+                # Defense in depth: acquire_repository already asserts this.
+                raise RuntimeError(
+                    "SHA_MISMATCH: checked-out commit does not match the requested SHA."
+                )
             profile, analysis = analyze_repository(
                 deployment_id=deployment_id,
                 repository_url=record.repository_url,
@@ -113,6 +200,20 @@ class PlanningPipeline:
             change_intel = await self._run_change_intel(
                 deployment_id, record, settings, delay
             )
+            await self._ai_assist(
+                deployment_id,
+                "change_summary",
+                {"change": self._fresh_change_intel(deployment_id)},
+                ai_ctx,
+                stage=StageId.ANALYZE.value,
+            )
+            await self._ai_assist(
+                deployment_id,
+                "repo_interpretation",
+                {"profile": self._dump_profile(profile)},
+                ai_ctx,
+                stage=StageId.ANALYZE.value,
+            )
             await self._emit(
                 deployment_id,
                 EventType.SYSTEM_MESSAGE,
@@ -124,6 +225,11 @@ class PlanningPipeline:
                         f"method={acquisition.method} · language={profile.inferred_stack.language_runtime} "
                         f"· confidence={profile.inferred_stack.confidence} · "
                         f"manifests={profile.inferred_stack.manifests_examined}"
+                        + (
+                            f" · checked_sha={acquisition.checked_sha[:12]}"
+                            if acquisition.checked_sha
+                            else ""
+                        )
                     ),
                     "profile": {
                         "language_runtime": profile.inferred_stack.language_runtime,
@@ -218,6 +324,17 @@ class PlanningPipeline:
                 deployment_id,
                 constraints=[c.to_ui() for c in all_constraints],
                 updated_at=utc_now_iso(),
+            )
+            await self._ai_assist(
+                deployment_id,
+                "agent_explanation",
+                {
+                    "agent": "docker",
+                    "summary": docker_res.summary,
+                    "constraints": [c.to_ui() for c in docker_res.constraints[:4]],
+                },
+                ai_ctx,
+                stage=StageId.AGENTS.value,
             )
             await self._stage(deployment_id, StageId.AGENTS, "completed", delay)
 
@@ -350,6 +467,17 @@ class PlanningPipeline:
 
             await self._stage(deployment_id, StageId.NEGOTIATE, "completed", delay)
 
+            await self._ai_assist(
+                deployment_id,
+                "plan_suggestion",
+                {
+                    "decisions": ui_negotiation,
+                    "constraints": ui_constraints[:8],
+                },
+                ai_ctx,
+                stage=StageId.NEGOTIATE.value,
+            )
+
             plan = NegotiatedPlan(
                 deployment_id=deployment_id,
                 profile=profile,
@@ -375,6 +503,10 @@ class PlanningPipeline:
                 delay=delay,
                 intent=record.intent,
                 change_intel=change_intel,
+                plan_only=plan_only,
+                expected_plan_hash=expected_plan_hash,
+                proposal_id=proposal_id,
+                ai_ctx=ai_ctx,
             )
             logger.info(
                 "Planning+execution pipeline completed deployment_id=%s duration=%.2fs",
@@ -396,30 +528,98 @@ class PlanningPipeline:
             if not get_settings().medha_debug:
                 cleanup_workspace(deployment_id)
 
-    async def _run_change_intel(self, deployment_id: str, record, settings, delay: float):
-        """Phase 2: deterministic change-impact analysis against the original
-        local git repository (base_revision → target_revision).
+    def _fresh_change_intel(self, deployment_id: str) -> dict[str, Any] | None:
+        try:
+            fresh = self.repo.get(deployment_id)
+        except Exception:  # noqa: BLE001 - advisory only
+            return None
+        return fresh.change_intel if fresh is not None else None
 
-        The acquired workspace copy has git history stripped by the shallow
-        clone, so analysis runs against the local repo path. Remote URLs and
-        missing revisions are skipped honestly — the deployment continues with
-        change_intel absent rather than faking evidence.
+    @staticmethod
+    def _dump_profile(profile: Any) -> dict[str, Any]:
+        try:
+            return profile.model_dump(mode="json")
+        except Exception:  # noqa: BLE001 - advisory only
+            return {"summary": str(profile)[:500]}
+
+    async def _ai_assist(
+        self,
+        deployment_id: str,
+        kind: str,
+        payload: dict[str, Any],
+        ai_ctx: dict[str, Any] | None,
+        *,
+        stage: str | None = None,
+    ) -> None:
+        """Run one advisory AI assist; never alters control flow on failure."""
+        if not ai_ctx:
+            return
+        from app.ai.assist import system_prompt_for
+
+        service = ai_ctx["service"]
+        try:
+            data, meta = await service.generate_structured(
+                kind=kind,
+                payload=payload,
+                system=system_prompt_for(kind),
+                owner_ctx=ai_ctx.get("owner") or "local",
+                budget=ai_ctx["budget"],
+            )
+        except Exception:  # noqa: BLE001 - AI must never break the pipeline
+            logger.exception("AI assist failed kind=%s", kind)
+            return
+        ai_ctx["notes"][kind] = {"data": data, "meta": meta.to_dict()}
+        if data is None and meta.outcome == "rule_based":
+            return  # disabled/keyless/budget: stay silent and deterministic
+        if data is None and ai_ctx.get("warned_unavailable"):
+            return  # one honest warning per run, not one per stage
+        if data is None:
+            ai_ctx["warned_unavailable"] = True
+        await self._emit(
+            deployment_id,
+            EventType.SYSTEM_MESSAGE,
+            (
+                f"AI {kind} ready (provider={meta.provider})."
+                if data is not None
+                else "AI unavailable — continuing with deterministic analysis."
+            ),
+            stage=stage,
+            level="info" if data is not None else "warning",
+            metadata={
+                "simple": (
+                    "An AI advisory note is attached to this run."
+                    if data is not None
+                    else "AI providers unreachable; deterministic pipeline continues."
+                ),
+                "technical": f"ai.kind={kind} · outcome={meta.outcome}",
+                "ai": meta.to_dict(),
+                "ai_data": data,
+            },
+        )
+
+    def _persist_ai(self, deployment_id: str, ai_ctx: dict[str, Any] | None) -> None:
+        if not ai_ctx or not ai_ctx.get("notes"):
+            return
+        summary = _ai_rollup(ai_ctx["notes"])
+        if summary is not None:
+            self.repo.save_artifacts(
+                deployment_id, ai=summary, updated_at=utc_now_iso()
+            )
+
+    async def _run_change_intel(self, deployment_id: str, record, settings, delay: float):
+        """Phase 2/2b: deterministic change-impact analysis.
+
+        Local git repositories use the full base → target diff pipeline.
+        Remote repositories use the push-payload evidence (verified commit
+        lists) verified against the exact-SHA checkout. Anything else is
+        skipped honestly — the deployment continues with change_intel
+        absent rather than faking evidence.
 
         Returns the analysis (for the verification gate) or None when skipped.
         """
-        if not record.base_revision or not record.target_revision:
-            return None
         if resolve_local_repo_path(record.repository_url) is None:
-            await self._emit(
-                deployment_id,
-                EventType.SYSTEM_MESSAGE,
-                "Change-intelligence analysis skipped: remote URL not supported in Phase 2.",
-                stage=StageId.ANALYZE.value,
-                metadata={
-                    "simple": "Change-intelligence analysis skipped (remote repository).",
-                    "technical": "phase2=local-git-only · change_intel=not_computed",
-                },
-            )
+            return await self._run_push_change_intel(deployment_id, record, delay)
+        if not record.base_revision or not record.target_revision:
             return None
         try:
             from app.changeintel.engine import analyze_change_impact
@@ -474,6 +674,108 @@ class PlanningPipeline:
             await asyncio.sleep(delay * 0.5)
         return info
 
+    async def _run_push_change_intel(self, deployment_id: str, record, delay: float):
+        """Phase 2b: push-evidence analysis for remote repositories.
+
+        Uses the verified push payload's file lists, confirmed against the
+        exact-SHA checkout. Skips honestly when there is no push evidence
+        or no exact commit to bind it to.
+        """
+        from app.changeintel.push_intel import analyze_push_checkout
+        from app.database.repositories import ProposalRepository
+        from app.services.workspace import deployment_workspace
+
+        target_sha = _exact_sha_or_none(record.target_revision)
+        if not target_sha:
+            await self._emit(
+                deployment_id,
+                EventType.SYSTEM_MESSAGE,
+                "Change-intelligence analysis skipped: no exact commit to bind.",
+                stage=StageId.ANALYZE.value,
+                metadata={
+                    "simple": "Change-intelligence analysis skipped (no exact commit).",
+                    "technical": "phase2b=skipped · reason=no_exact_sha",
+                },
+            )
+            return None
+        try:
+            proposal = ProposalRepository(db_path=self.repo.db_path).get_by_deployment(
+                deployment_id
+            )
+        except Exception:  # noqa: BLE001 - advisory only
+            proposal = None
+        push = (proposal.push if proposal is not None else None) or {}
+        files = push.get("files") if isinstance(push.get("files"), list) else []
+        if not files:
+            await self._emit(
+                deployment_id,
+                EventType.SYSTEM_MESSAGE,
+                "Change-intelligence analysis skipped: push event carried no file list.",
+                stage=StageId.ANALYZE.value,
+                metadata={
+                    "simple": "Change-intelligence analysis skipped (empty push).",
+                    "technical": "phase2b=skipped · reason=no_push_files",
+                },
+            )
+            return None
+        checkout = deployment_workspace(deployment_id) / "repo"
+        if not checkout.is_dir():
+            await self._emit(
+                deployment_id,
+                EventType.SYSTEM_MESSAGE,
+                "Change-intelligence analysis skipped: checkout missing.",
+                stage=StageId.ANALYZE.value,
+                level="warning",
+                metadata={
+                    "simple": "Change-intelligence analysis could not run.",
+                    "technical": "phase2b=skipped · reason=checkout_missing",
+                },
+            )
+            return None
+        try:
+            info = analyze_push_checkout(
+                repository_url=record.repository_url,
+                base_sha=record.base_revision,
+                target_sha=target_sha,
+                files=files,
+                checkout_path=checkout,
+                deployment_id=deployment_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - advisory only, never block pipeline
+            logger.warning("Push change intel failed: %s", type(exc).__name__)
+            return None
+        risk_value = info.risk.level.value
+        stored = info.model_dump(mode="json")
+        stored["deployment_id"] = deployment_id
+        self.repo.save_artifacts(
+            deployment_id, change_intel=stored, updated_at=utc_now_iso()
+        )
+        await self._emit(
+            deployment_id,
+            EventType.SYSTEM_MESSAGE,
+            f"Change intelligence: {len(info.changeset.files)} file(s) from push "
+            f"{target_sha[:8]}, {info.risk.level.value.upper()} risk, "
+            f"{len(info.requirements)} requirement(s).",
+            stage=StageId.ANALYZE.value,
+            metadata={
+                "simple": (
+                    "MEDHA verified the pushed files against the exact commit "
+                    f"(risk={risk_value})."
+                ),
+                "technical": (
+                    f"phase2b=push_intel · target={target_sha[:8]} · "
+                    f"files={len(info.changeset.files)} · "
+                    f"unverified={len(info.changeset.unsupported_files)} · "
+                    f"nodes={len(info.graph.nodes)} · edges={len(info.graph.edges)} · "
+                    f"risk={risk_value} · requirements={len(info.requirements)}"
+                ),
+                "change_intel": info.to_ui(),
+            },
+        )
+        if delay:
+            await asyncio.sleep(delay * 0.5)
+        return info
+
     async def _run_verify_execute(
         self,
         *,
@@ -487,6 +789,10 @@ class PlanningPipeline:
         delay: float,
         intent: str | None,
         change_intel=None,
+        plan_only: bool = False,
+        expected_plan_hash: str | None = None,
+        proposal_id: str | None = None,
+        ai_ctx: dict | None = None,
     ) -> None:
         settings = get_settings()
         max_rounds = settings.max_verify_rounds
@@ -697,6 +1003,13 @@ class PlanningPipeline:
             self.repo.save_artifacts(
                 deployment_id, critic=ui_critic, verification=ui_verification, updated_at=utc_now_iso()
             )
+            await self._ai_assist(
+                deployment_id,
+                "critic_assist",
+                {"verification": ui_verification, "critic": ui_critic},
+                ai_ctx,
+                stage=StageId.VERIFY.value,
+            )
             await self._emit(
                 deployment_id,
                 EventType.CRITIC_COMPLETED,
@@ -758,6 +1071,18 @@ class PlanningPipeline:
                 )
                 continue
 
+            await self._ai_assist(
+                deployment_id,
+                "review_brief",
+                {
+                    "verification": ui_verification,
+                    "critic": critic.to_ui() if critic else None,
+                    "negotiation": ui_negotiation,
+                    "risk": change_risk,
+                },
+                ai_ctx,
+                stage=StageId.VERIFY.value,
+            )
             break
 
         # EXECUTE
@@ -868,6 +1193,21 @@ class PlanningPipeline:
         )
         self.repo.save_artifacts(deployment_id, graph=ceg.to_ui(), updated_at=utc_now_iso())
 
+        canonical_plan = _canonical_plan(exec_plan)
+        plan_digest = _plan_hash(canonical_plan)
+        if expected_plan_hash and expected_plan_hash != plan_digest:
+            await self._fail(
+                deployment_id,
+                "Refusing to execute: the recomputed plan no longer matches the approved proposal.",
+                technical="STALE_PLAN",
+            )
+            return
+        if plan_only:
+            await self._pause_for_approval(
+                deployment_id, canonical_plan, plan_digest, proposal_id, ai_ctx
+            )
+            return
+
         self._status(
             deployment_id,
             DeploymentStatus.RUNNING,
@@ -937,6 +1277,7 @@ class PlanningPipeline:
                 result=result,
                 verification=verification.to_ui() if verification else None,
                 critic=critic.to_ui() if critic else None,
+                ai=_ai_rollup(ai_ctx["notes"]) if ai_ctx and ai_ctx.get("notes") else None,
                 updated_at=utc_now_iso(),
             )
             await self._fail(
@@ -1018,6 +1359,7 @@ class PlanningPipeline:
                 verification=verification.to_ui() if verification else None,
                 critic=critic.to_ui() if critic else None,
                 result=result,
+                ai=_ai_rollup(ai_ctx["notes"]) if ai_ctx and ai_ctx.get("notes") else None,
                 updated_at=utc_now_iso(),
             )
             final_status = (
@@ -1091,6 +1433,7 @@ class PlanningPipeline:
             verification=verification.to_ui() if verification else None,
             critic=critic.to_ui() if critic else None,
             result=result,
+            ai=_ai_rollup(ai_ctx["notes"]) if ai_ctx and ai_ctx.get("notes") else None,
             updated_at=utc_now_iso(),
         )
         self._status(
@@ -1121,6 +1464,65 @@ class PlanningPipeline:
                 },
             },
         )
+
+    async def _pause_for_approval(
+        self,
+        deployment_id: str,
+        canonical_plan: dict[str, Any],
+        plan_digest: str,
+        proposal_id: str | None,
+        ai_ctx: dict | None,
+    ) -> None:
+        """End a plan-only run: persist the plan, notify, wait for a human."""
+        self._persist_ai(deployment_id, ai_ctx)
+        result = {
+            "kind": "plan_awaiting_approval",
+            "title": "AWAITING APPROVAL",
+            "final_status": DeploymentStatus.AWAITING_APPROVAL.value,
+            "message": "Verified plan ready — waiting for human approval before execution.",
+            "plan_hash": plan_digest,
+            "plan": canonical_plan,
+            "phase": PHASE_LABEL,
+            "is_demo": False,
+        }
+        self.repo.save_artifacts(
+            deployment_id, result=result, updated_at=utc_now_iso()
+        )
+        self._status(
+            deployment_id,
+            DeploymentStatus.AWAITING_APPROVAL,
+            StageId.COMPLETE,
+            "Verified plan ready — waiting for human approval before execution.",
+            f"plan_hash={plan_digest[:12]} · proposal={proposal_id}",
+        )
+        await self._emit(
+            deployment_id,
+            EventType.PROPOSAL_READY,
+            "Plan ready — waiting for human approval.",
+            stage=StageId.COMPLETE.value,
+            status=DeploymentStatus.AWAITING_APPROVAL.value,
+            metadata={
+                "simple": "The verified plan is ready for human review. Nothing will execute until approved.",
+                "technical": f"plan_hash={plan_digest} · proposal={proposal_id}",
+                "plan_hash": plan_digest,
+                "plan": canonical_plan,
+                "proposal_id": proposal_id,
+                "result": result,
+            },
+        )
+        if proposal_id:
+            try:
+                from app.database.repositories import ProposalRepository
+
+                ProposalRepository(db_path=self.repo.db_path).update(
+                    proposal_id,
+                    status="ready",
+                    deployment_id=deployment_id,
+                    plan_hash=plan_digest,
+                    plan=canonical_plan,
+                )
+            except Exception:  # noqa: BLE001 - proposal link is bookkeeping
+                logger.exception("Proposal ready-update failed proposal=%s", proposal_id)
 
     def _status(
         self,
@@ -1342,6 +1744,16 @@ def schedule_planning_pipeline(
     *,
     create_task: Callable = asyncio.create_task,
     repo: DeploymentRepository | None = None,
+    plan_only: bool = False,
+    expected_plan_hash: str | None = None,
+    proposal_id: str | None = None,
 ):
     pipeline = PlanningPipeline(repo=repo)
-    return create_task(pipeline.run(deployment_id))
+    return create_task(
+        pipeline.run(
+            deployment_id,
+            plan_only=plan_only,
+            expected_plan_hash=expected_plan_hash,
+            proposal_id=proposal_id,
+        )
+    )

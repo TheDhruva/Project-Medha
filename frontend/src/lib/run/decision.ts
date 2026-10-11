@@ -1,6 +1,6 @@
 import type { DeploymentSnapshot } from "@/lib/demo/types";
 
-export type DecisionKind = "approved" | "blocked" | "recovered" | "running" | "unknown";
+export type DecisionKind = "approved" | "blocked" | "recovered" | "running" | "awaiting" | "unknown";
 
 export function getDecision(snapshot: DeploymentSnapshot): {
   kind: DecisionKind;
@@ -76,6 +76,20 @@ export function getDecision(snapshot: DeploymentSnapshot): {
     };
   }
 
+  if (runStatus === "awaiting_approval") {
+    return {
+      kind: "awaiting",
+      title: "Waiting for approval",
+      body:
+        result?.message && result.message !== "Run completed."
+          ? result.message
+          : "The verified plan is ready. Review the evidence, then approve or reject it.",
+      cta: "Review proposal",
+      score,
+      risk,
+    };
+  }
+
   if (runStatus === "succeeded") {
     const conflictNote =
       snapshot.negotiation?.status === "resolved" &&
@@ -138,6 +152,7 @@ export function getJourney(snapshot: DeploymentSnapshot): JourneyStep[] {
   const confirmed =
     snapshot.runStatus === "succeeded" ||
     snapshot.runStatus === "failed" ||
+    snapshot.runStatus === "awaiting_approval" ||
     snapshot.runStatus === "partial_recovery";
 
   const steps: JourneyStep[] = [

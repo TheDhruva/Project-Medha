@@ -9,7 +9,7 @@ import type {
 export function stageTone(status: StageStatus): string {
   switch (status) {
     case "running":
-      return "border-medha-accent bg-medha-accent-soft text-medha-accent-ink";
+      return "border-medha-run/25 bg-medha-run-soft text-medha-run-ink";
     case "success":
       return "border-medha-success/30 bg-medha-success-soft text-medha-success";
     case "warning":

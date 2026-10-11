@@ -316,16 +316,33 @@ DeploymentRequest
 
 ## Persistence Notes (V1)
 
-SQLite tables (later phase) should map closely to:
+SQLite tables (Postgres mirrors in `schema_pg.sql`) map closely to:
 
-- `deployments`
-- `agent_results`
-- `constraints`
-- `negotiation_results`
-- `verification_results`
-- `critic_results`
-- `execution_nodes`
-- `execution_edges`
-- `system_events`
+- `deployments` (+ `owner_sub`, `project_id`, JSON artifact columns)
+- `events` (persisted `system_events`)
+- `users` (`clerk_sub`, audit timestamps)
+- `webhook_deliveries` (delivery-ID idempotency)
+- `proposals` (+ `project_id`, `push_json` push-evidence summary)
+- `projects` (owner-scoped repo connections; see below)
 
 No Redis caches required for correctness.
+
+## Project (repository connection)
+
+**Purpose:** one owner's view of one GitHub repository + watched branch.
+The unit of multi-user isolation; webhook routing key.
+
+| Field | Type | R/O | Notes |
+|-------|------|-----|-------|
+| `project_id` | string | R | `prj_` prefixed |
+| `owner_sub` | string | R | Verified Clerk `sub` (or `local-operator`) |
+| `name` | string | R | Display name |
+| `provider` | string | R | `github` (V1) |
+| `repo_owner` / `repo_name` | string | R | Original case |
+| `repository` | string | R | Lowercased `owner/name` (routing key) |
+| `canonical_url` | string | R | `https://github.com/owner/name.git` |
+| `branch` | string | R | Watched branch (default `main`) |
+| `visibility` | enum | R | `unverified` / `public` / `private_unsupported` |
+| `connection_status` | enum | R | `pending` / `connected` / `failed` / `disconnected` |
+
+UNIQUE(`owner_sub`, `repository`). No credentials stored — ever.

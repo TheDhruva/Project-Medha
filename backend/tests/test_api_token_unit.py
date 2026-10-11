@@ -24,6 +24,8 @@ def authed_client(tmp_path, monkeypatch):
     def _make(**env: str) -> TestClient:
         db_path = tmp_path / "test_token.db"
         monkeypatch.setenv("MEDHA_DATABASE_PATH", str(db_path))
+        # Offline-deterministic: empty URL beats shell env and backend/.env.
+        monkeypatch.setenv("MEDHA_DATABASE_URL", "")
         monkeypatch.setenv("MEDHA_CORS_ORIGINS", "http://localhost:3000")
         monkeypatch.setenv("MEDHA_WORKFLOW_STEP_DELAY_SECONDS", "0")
         for key, value in env.items():

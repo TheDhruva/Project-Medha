@@ -1,97 +1,95 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Settings } from "lucide-react";
+import { Show, UserButton, SignInButton, SignUpButton } from "@clerk/nextjs";
 import { useOptionalDeployment } from "@/context/DeploymentContext";
 import { cn } from "@/lib/ui/cn";
 
-const NAV_ITEMS = [
-  { href: "/", label: "Overview" },
-  { href: "/verify", label: "Verify" },
-  { href: "/runs", label: "Runs" },
-  { href: "/evaluation", label: "Evaluation" },
-];
-
 export function Header() {
   const deployment = useOptionalDeployment();
-  const pathname = usePathname() ?? "";
   const snapshot = deployment?.snapshot;
   const form = deployment?.form;
-  // Compact global environment indicator: DEMO unless we know this is a real run.
   const isDemo = (form?.mode === "demo" || snapshot?.isDemo) ?? true;
   const isRunning = snapshot?.runStatus === "running";
 
+  // Project name: use the deployment form's repository URL context, or fall
+  // back to the demo project name.
+  const projectLabel = isDemo
+    ? "Atlas Commerce"
+    : snapshot?.explain?.technicalText
+      ? `${snapshot.explain.technicalText.slice(0, 30)}…`
+      : "My Project";
+
   return (
-    <header className="border-b border-medha-border bg-white">
-      <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-        <div className="flex min-w-0 items-center gap-6">
+    <header
+      className="min-h-[64px] bg-medha-surface border-b border-medha-flexible flex items-center justify-between px-4 sm:px-6"
+    >
+      <div className="flex items-center gap-2 max-w-7xl w-full mx-auto">
+        <div className="flex items-center gap-2">
           <Link
-            href="/"
-            className="rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+            href={isDemo ? "/" : "/projects"}
+            className="rounded-md px-3 py-1.5 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
           >
-            <span className="text-[17px] font-bold tracking-tight text-medha-text">
+            <span className="text-[15px] font-bold tracking-tight text-medha-text">
               MEDHA
             </span>
           </Link>
-          <nav aria-label="Primary" className="flex items-center gap-1">
-            {NAV_ITEMS.map((item) => {
-              const active =
-                item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(
-                    "rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors",
-                    active
-                      ? "bg-medha-text text-white"
-                      : "text-medha-secondary hover:bg-medha-muted hover:text-medha-text",
-                  )}
-                >
-                  {item.label}
-                </Link>
-              );
-            })}
-            <Link
-              href="/settings"
-              aria-label="Settings"
-              title="Settings"
-              aria-current={pathname.startsWith("/settings") ? "page" : undefined}
-              className={cn(
-                "ml-1 rounded-full p-2 transition-colors",
-                pathname.startsWith("/settings")
-                  ? "bg-medha-text text-white"
-                  : "text-medha-secondary hover:bg-medha-muted hover:text-medha-text",
-              )}
-            >
-              <Settings className="h-4 w-4" aria-hidden />
-            </Link>
-          </nav>
+
+          {isDemo ? (
+            <span className="text-[12px] text-medha-secondary truncate">Atlas Commerce</span>
+          ) : (
+            <span className="text-[12px] text-medha-secondary truncate">{projectLabel}</span>
+          )}
         </div>
 
-        <span
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-            isDemo
-              ? "border-medha-accent/25 bg-medha-accent-soft text-medha-accent-ink"
-              : "border-medha-success/30 bg-medha-success-soft text-medha-success",
-          )}
-          title={
-            deployment
-              ? isDemo
-                ? "Demo Mode uses labelled fixtures"
-                : "Real Mode local pipeline"
-              : "Default environment"
-          }
-        >
+        <div className="flex shrink-0 items-center gap-3">
           <span
-            className={cn("status-dot", isDemo ? "bg-medha-accent" : "bg-medha-success", isRunning && "animate-medha-pulse")}
-            aria-hidden
-          />
-          {isDemo ? "DEMO" : "LIVE"}
-        </span>
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold",
+              isDemo ? "border-medha-border bg-medha-surface-muted text-medha-tertiary" : "border-medha-border bg-medha-surface-soft text-medha-secondary",
+            )}
+            title={
+              deployment
+                ? isDemo
+                  ? "Demo Mode uses labelled fixtures"
+                  : "Real Mode local pipeline"
+                  : "Default environment"
+            }
+          >
+            <span
+              className={cn("status-dot", isDemo ? "bg-medha-tertiary" : "bg-medha-tertiary")}
+              aria-hidden
+            />
+            {isDemo ? "DEMO" : "LIVE"}
+          </span>
+
+          {/* Primary new-run action — only in demo mode when no run is actively open */}
+          {isDemo && !isRunning && (
+            <button
+              type="button"
+              onClick={() => window.location.pathname = "/runs/new"}
+              className="rounded-md px-3 py-1.5 text-[10px] font-medium text-medha-accent hover:bg-medha-accent-soft text-medha-accent-ink transition-colors"
+              title="Start new DEMO run"
+            >
+              New run
+            </button>
+          )}
+
+          {/* Account controls */}
+          <Show when="signed-out">
+            <SignInButton mode="modal">
+              <button
+                type="button"
+                className="rounded-full px-2.5 py-0.5 text-[11px] font-medium text-medha-secondary transition-colors hover:bg-medha-surface-muted hover:text-medha-text"
+              >
+                Sign in
+              </button>
+            </SignInButton>
+          </Show>
+          <Show when="signed-in">
+            <UserButton />
+          </Show>
+        </div>
       </div>
     </header>
   );

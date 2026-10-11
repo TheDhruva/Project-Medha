@@ -5,6 +5,7 @@ const push = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push }),
   usePathname: () => "/verify",
+  useParams: () => ({}),
 }));
 
 const { setFormMock } = vi.hoisted(() => ({ setFormMock: vi.fn() }));

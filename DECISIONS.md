@@ -9,7 +9,7 @@ Status: living document. Initial ADRs recorded in Phase 0.
 - **Decision:** Use SQLite for V1 persistence.
 - **Context:** College prototype on low-end laptops; single operator.
 - **Consequences:** Simple file DB; no DB server. Not for multi-writer production scale.
-- **Status:** Accepted
+- **Status:** Partially superseded by ADR-029 (SQLite remains the default; Postgres/Supabase is the opt-in main backend when `MEDHA_DATABASE_URL` is set).
 
 ## ADR-002 — In-process constraint bus instead of Redis
 
@@ -297,3 +297,146 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
 - **Consequences:** Slightly larger monorepo; fixture `.git` dirs stay
   untracked build outputs (regenerate with `_build.py`). If a separate
   frontend history is ever needed, extract with `git subtree split`.
+
+## ADR-029 - Supabase Postgres as the main backend database (SQLite fallback)
+
+- **Decision:** Support PostgreSQL (Supabase) as the primary MEDHA
+  persistence backend, selected by `MEDHA_DATABASE_URL`. SQLite remains the
+  default when the variable is unset, and an explicit file path argument to
+  `get_connection`/`init_db` always means SQLite (keeps the offline test
+  suite and Demo Mode working with no network).
+- **Context:** The project now uses Supabase (`db.myukgjmhzmlzkxjszsdh.supabase.co`)
+  as its main backend so run history survives redeploys (Render free-tier
+  SQLite is ephemeral). This explicitly overrides the SQLite-only / "No
+  PostgreSQL in V1" scope rules for persistence only.
+- **Why psycopg 3:** stdlib-style DBAPI, binary wheels, `dict_row`
+  cursors that match the existing `row.keys()` repository code. One small
+  driver (`psycopg[binary]`), no ORM, no migration framework.
+- **Compatibility design (repositories untouched):**
+  - All repository SQL keeps `?` placeholders; the Postgres connection
+    wrapper translates `?` to `%s` and `rowid` ordering to a `BIGSERIAL seq`
+    column (`schema_pg.sql`). No `?` appears inside SQL string literals, so
+    the translation is exact.
+  - `is_demo` stays an INTEGER column on both drivers; repositories already
+    pass `1`/`0` and read with `bool(...)`.
+  - Supabase direct connections (port 5432) require TLS: `sslmode=require`
+    is appended when the DSN has no explicit `sslmode`.
+- **Secrets:** `MEDHA_DATABASE_URL` lives in local `.env` / host env only.
+  Logs and health output carry a redacted label (scheme + user + host, never
+  the password). Never paste the URL into issues, prompts, or the client
+  bundle.
+- **Consequences:** One extra dependency (`psycopg[binary]`); Postgres live
+  tests are skip-guarded (`MEDHA_DATABASE_URL` absent = skipped); offline
+  Demo Mode guarantee unchanged. `render.yaml` SQLite disk notes now apply
+  to SQLite mode only.
+- **Status:** Accepted
+
+## ADR-030 — AI provider integration (Groq primary, Gemini fallback)
+
+- **Decision:** Centralized `backend/app/ai/` service (Groq Chat Completions
+  + Gemini generateContent over httpx; no vendor SDKs). Six advisory assists
+  (change summary, repo interpretation, plan suggestion, agent explanation,
+  critic assist, review brief), all schema-validated (Pydantic, extra=forbid),
+  budget-capped (default 6 calls/run), cached per authorization context, with
+  recorded outcomes (`ai_assisted`/`degraded`/`rule_based`/`unavailable`).
+- **Context:** User-directed feature: AI where it adds value, deterministic
+  pipeline untouched. Defaults verified Oct 2026: Groq `openai/gpt-oss-20b`,
+  Gemini `gemini-3.8-flash`.
+- **Rules:** Disabled/keyless → zero network I/O. Retry transient only
+  (bounded, backoff+jitter); auth/config never retried. Fallback on eligible
+  failures. Secrets redacted before prompts/logs/records. No Redis; in-process
+  LRU cache. Model output never authorizes, executes, or bypasses gates.
+- **Consequences:** No new dependencies (httpx already present). Automated
+  tests use mocked transports; live provider behavior unverified without keys.
+- **Status:** Accepted
+
+## ADR-031 — Clerk backend verification + minimal ownership
+
+- **Decision:** `MEDHA_AUTH_MODE=off` (default, legacy single-operator) vs
+  `clerk` (FastAPI verifies RS256 session JWTs via JWKS: signature, issuer,
+  expiry, `sub`; ownership enforced on runs/proposals via `owner_sub`).
+  New deps `PyJWT` + `cryptography` (justified: token verification).
+- **Context:** Frontend middleware never protects FastAPI. Clerk is identity
+  only; no Supabase Auth alongside it. Minimal model (subject column + users
+  audit table), no enterprise RBAC.
+- **Rules:** Production clerk-mode without JWKS config fails closed (503).
+  Cross-user reads return 404 (no oracle); foreign-owner approve/reject 403.
+  Webhook auth stays GitHub-secret based, independent of Clerk.
+- **Consequences:** Legacy rows (`local-operator`) are invisible to Clerk
+  users by design. Old DBs heal via schema v5 migration.
+- **Status:** Accepted
+
+## ADR-032 — GitHub webhook + approval-gated execution
+
+- **Decision:** `POST /api/webhooks/github` (HMAC-SHA256, delivery-ID
+  idempotency, branch/repo allowlists) creates proposals; plan-only analysis
+  persists a canonical plan + SHA-256 hash; `POST /api/proposals/{id}/approve`
+  re-runs the deterministic pipeline and revalidates the exact hash before
+  executing. Stale/superseded/replayed approvals cannot execute.
+- **Context:** Completes the push → review → approve loop without touching
+  the operator-invoked `POST /api/deploy` path (the human pressing deploy
+  remains the approval for manual runs).
+- **Rules:** Webhook secret unset → 503. Empty repo allowlist fails closed in
+  production. Hosted execution stays simulator-pinned. Newer pushes supersede
+  older pending proposals.
+- **Consequences:** Approval e2e covered by tests on the local fixture repo;
+  real-GitHub delivery unverified until a public endpoint exists.
+- **Status:** Accepted
+
+## ADR-033 — Project-scoped, multi-user repository connections
+
+- **Decision:** `projects` table (`owner_sub`, `owner/name`, `branch`,
+  `canonical_url`, `visibility`, `connection_status`) replaces the founder
+  allowlist as the routing source of truth. Runs/proposals carry `project_id`;
+  reads, mutations, approvals, and webhook routing are owner-scoped
+  (cross-owner → 404/403, no existence oracle). The global
+  `MEDHA_WEBHOOK_ALLOWED_REPOS` remains a server-level guard only.
+- **Context:** MEDHA must serve many users × many repositories without manual
+  founder edits per project. A repository string in a form is configuration,
+  never proof of access: readability is proven by `git ls-remote` (verify)
+  and exact-SHA checkout at analysis time.
+- **Rules:** No credentials accepted or stored (PATs in URLs already
+  rejected). Duplicate `(owner, repository)` → 409. Disconnect/delete stops
+  all future routing; history is preserved. Supersede is scoped per project.
+- **Consequences:** Same public repo may be connected by different owners
+  independently; each gets isolated proposals/runs.
+- **Status:** Accepted
+
+## ADR-034 — Exact pushed-SHA checkout + payload-derived change intel
+
+- **Decision:** Webhook/project runs with a full 40-hex `target_revision`
+  fetch + detach-checkout that exact commit and assert `HEAD == SHA` before
+  analysis (`SHA_MISMATCH` fails closed). `commits[]` file lists become
+  `source_method=webhook_push` change intelligence verified against the
+  checkout; unverified files are reported, never trusted. Branch deletions
+  (null SHA) are recorded and ignored.
+- **Context:** Cloning the default-branch tip can analyze a different commit
+  than the push event attests to.
+- **Rules:** Non-SHA revisions keep legacy behavior. Approval revalidates
+  project linkage (connected, same repo/branch/URL) in addition to SHA +
+  plan hash.
+- **Status:** Accepted
+
+## ADR-035 — Startup recovery without new infrastructure
+
+- **Decision:** At boot, `reconcile_interrupted()` fails orphaned
+  `queued/started/running` deployments and pre-`ready`
+  (`pending/analyzing/approved/executing`) proposals closed with an honest
+  reason + terminal event. `ready` proposals and persisted plans survive
+  restarts and stay approvable. Conditional SQL makes recovery idempotent;
+  nothing auto-executes.
+- **Context:** In-process pipeline tasks do not survive restarts; previously
+  orphaned rows never resolved.
+- **Rules:** No Redis/workers. Recovery never invents success and never
+  approves or executes.
+- **Status:** Accepted
+
+## ADR-036 — Private repositories stay unsupported pending a GitHub App
+
+- **Decision:** Private-repository access is explicitly **not implemented**:
+  `verify` reports unreachable/private honestly (`failed`/`unverified`),
+  acquisition fails closed, and no PAT/App-token flow exists. The secure
+  path forward is a GitHub App (installation tokens, per-installation
+  secrets, permission grants) — code + dashboard steps to be added with an
+  explicit founder action, never fabricated credentials.
+- **Status:** Accepted

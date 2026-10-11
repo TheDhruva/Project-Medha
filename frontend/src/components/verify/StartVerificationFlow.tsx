@@ -10,7 +10,7 @@ import {
   ArrowLeft,
   Loader2,
 } from "lucide-react";
-import { Header } from "@/components/layout/Header";
+import { AppShell } from "@/components/layout/AppShell";
 import {
   DeploymentProvider,
   useDeployment,
@@ -68,11 +68,11 @@ function Flow() {
   }
 
   return (
-    <main className="mx-auto max-w-2xl px-4 py-8 sm:px-6">
+    <main className="mx-auto max-w-2xl px-4 py-8 sm:px-6 bg-medha-surface min-h-screen">
       <button
         type="button"
         onClick={() => (choice ? setChoice(null) : router.push("/"))}
-        className="inline-flex items-center gap-1 text-sm text-medha-secondary hover:text-medha-text"
+        className="inline-flex items-center gap-1 text-sm text-medha-secondary hover:text-medha-text mb-4"
       >
         <ArrowLeft className="h-3.5 w-3.5" aria-hidden /> Back
       </button>
@@ -89,26 +89,26 @@ function Flow() {
           <button
             type="button"
             onClick={chooseDemo}
-            className="rounded-xl border border-medha-border bg-white p-5 text-left transition hover:border-medha-accent/40 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+            className="rounded-md border border-medha-border bg-medha-surface p-4 text-left transition hover:border-medha-accent/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
           >
-            <FlaskConical className="h-5 w-5 text-medha-accent" aria-hidden />
-            <span className="mt-3 block text-[15px] font-semibold text-medha-text">
+            <FlaskConical className="h-4 w-4 text-medha-accent" aria-hidden />
+            <span className="mt-2 block text-[14px] font-semibold text-medha-text">
               Demo scenario
             </span>
-            <span className="mt-1 block text-[13px] leading-relaxed text-medha-secondary">
+            <span className="mt-1 block text-[12px] leading-relaxed text-medha-secondary">
               Explore Medha using a deterministic scenario.
             </span>
           </button>
           <button
             type="button"
             onClick={chooseGit}
-            className="rounded-xl border border-medha-border bg-white p-5 text-left transition hover:border-medha-accent/40 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+            className="rounded-md border border-medha-border bg-medha-surface p-5 text-left transition hover:border-medha-accent/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
           >
-            <GitBranch className="h-5 w-5 text-medha-accent" aria-hidden />
-            <span className="mt-3 block text-[15px] font-semibold text-medha-text">
+            <GitBranch className="h-4 w-4 text-medha-accent" aria-hidden />
+            <span className="mt-3 block text-[14px] font-semibold text-medha-text">
               Git change
             </span>
-            <span className="mt-1 block text-[13px] leading-relaxed text-medha-secondary">
+            <span className="mt-1 block text-[12px] leading-relaxed text-medha-secondary">
               Analyze a real repository change.
             </span>
           </button>
@@ -116,8 +116,8 @@ function Flow() {
       ) : null}
 
       {choice === "demo" ? (
-        <section aria-label="Demo scenario" className="mt-6 rounded-xl border border-medha-border bg-white p-5">
-          <h2 className="text-[15px] font-semibold text-medha-text">Choose scenario</h2>
+        <section aria-label="Demo scenario" className="mt-6 rounded-md border border-medha-border bg-medha-surface p-5">
+          <h2 className="text-[14px] font-semibold text-medha-text">Choose scenario</h2>
           <div className="mt-3 space-y-2" role="radiogroup" aria-label="Demo scenario">
             {SCENARIOS.map((s) => {
               const active = form.scenario === s.id;
@@ -130,7 +130,7 @@ function Flow() {
                   onClick={() => setForm({ scenario: s.id as ScenarioId })}
                   disabled={isRunning}
                   className={cn(
-                    "w-full rounded-lg border px-4 py-3 text-left transition",
+                    "w-full rounded-md border px-4 py-3 text-left transition",
                     active
                       ? "border-medha-accent bg-medha-accent-soft/40"
                       : "border-medha-border hover:border-medha-strong",
@@ -151,7 +151,7 @@ function Flow() {
             </p>
           ) : null}
           {connectionError ? (
-            <p role="alert" className="mt-3 rounded-lg border border-medha-danger/30 bg-medha-danger-soft px-3 py-2 text-xs text-medha-danger">
+            <p role="alert" className="mt-3 rounded-md border border-medha-danger/30 bg-medha-danger-soft px-3 py-2 text-xs text-medha-danger">
               {connectionError}
             </p>
           ) : null}
@@ -160,15 +160,15 @@ function Flow() {
               type="button"
               onClick={continueDemo}
               disabled={isRunning}
-              className="inline-flex items-center gap-2 rounded-lg bg-medha-accent px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-medha-accent-hover disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-md bg-medha-accent px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-medha-accent-hover disabled:opacity-60"
             >
               {isRunning ? (
                 <>
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Starting…
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Starting…
                 </>
               ) : (
                 <>
-                  Continue <ArrowRight className="h-4 w-4" aria-hidden />
+                  Continue <ArrowRight className="h-3.5 w-3.5" aria-hidden />
                 </>
               )}
             </button>
@@ -185,7 +185,7 @@ function Flow() {
       ) : null}
 
       {choice === "git" ? (
-        <section aria-label="Git change" className="mt-6 rounded-xl border border-medha-border bg-white p-5">
+        <section aria-label="Git change" className="mt-6 rounded-md border border-medha-border bg-medha-surface p-5">
           <label htmlFor="git-repo" className="medha-label block">
             Repository
           </label>
@@ -193,7 +193,7 @@ function Flow() {
             id="git-repo"
             className="field-input mt-1.5"
             value={form.repositoryUrl}
-            onChange={(e) => setForm({ repositoryUrl: e.target.value })}
+            onChange={(e) => setForm({ repositoryUrl: e.target.value})}
             placeholder="https://github.com/org/repo or local path"
             disabled={isRunning}
           />
@@ -206,7 +206,7 @@ function Flow() {
                 id="git-base"
                 className="field-input mt-1.5"
                 value={form.baseRevision}
-                onChange={(e) => setForm({ baseRevision: e.target.value })}
+                onChange={(e) => setForm({ baseRevision: e.target.value})}
                 placeholder="e.g. main or abc1234"
                 disabled={isRunning}
               />
@@ -219,13 +219,13 @@ function Flow() {
                 id="git-target"
                 className="field-input mt-1.5"
                 value={form.targetRevision}
-                onChange={(e) => setForm({ targetRevision: e.target.value })}
+                onChange={(e) => setForm({ targetRevision: e.target.value})}
                 placeholder="e.g. HEAD"
                 disabled={isRunning}
               />
             </div>
           </div>
-          <p className="mt-2 text-[11px] text-medha-tertiary">
+          <p className="mt-2 text-[10px] text-medha-tertiary">
             Change analysis runs against the repository you provide. For local git
             repositories, revisions scope the change-impact diff; otherwise the
             deployment proceeds without change-intel.
@@ -240,7 +240,7 @@ function Flow() {
             >
               Advanced options
               <ChevronDown
-                className={cn("h-4 w-4 transition-transform", advancedOpen && "rotate-180")}
+                className={cn("h-3.5 w-3.5 transition-transform", advancedOpen && "rotate-180")}
                 aria-hidden
               />
             </button>
@@ -255,7 +255,7 @@ function Flow() {
                       id="adv-host"
                       className="field-input mt-1.5"
                       value={form.targetHost}
-                      onChange={(e) => setForm({ targetHost: e.target.value })}
+                      onChange={(e) => setForm({ targetHost: e.target.value})}
                       disabled={isRunning}
                     />
                   </div>
@@ -268,7 +268,7 @@ function Flow() {
                       className="field-input mt-1.5"
                       inputMode="numeric"
                       value={form.targetPort}
-                      onChange={(e) => setForm({ targetPort: e.target.value })}
+                      onChange={(e) => setForm({ targetPort: e.target.value})}
                       disabled={isRunning}
                     />
                   </div>
@@ -281,7 +281,7 @@ function Flow() {
                     id="adv-intent"
                     className="field-input mt-1.5"
                     value={form.intent}
-                    onChange={(e) => setForm({ intent: e.target.value })}
+                    onChange={(e) => setForm({ intent: e.target.value})}
                     disabled={isRunning}
                   />
                 </div>
@@ -290,7 +290,7 @@ function Flow() {
           </div>
 
           {connectionError ? (
-            <p role="alert" className="mt-3 rounded-lg border border-medha-danger/30 bg-medha-danger-soft px-3 py-2 text-xs text-medha-danger">
+            <p role="alert" className="mt-3 rounded-md border border-medha-danger/30 bg-medha-danger-soft px-3 py-2 text-xs text-medha-danger">
               {connectionError}
             </p>
           ) : null}
@@ -299,15 +299,15 @@ function Flow() {
               type="button"
               onClick={analyzeGit}
               disabled={isRunning}
-              className="inline-flex items-center gap-2 rounded-lg bg-medha-accent px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-medha-accent-hover disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-md bg-medha-accent px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-medha-accent-hover disabled:opacity-60"
             >
               {isRunning ? (
                 <>
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Analyzing…
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Analyzing…
                 </>
               ) : (
                 <>
-                  Analyze change <ArrowRight className="h-4 w-4" aria-hidden />
+                  Analyze change <ArrowRight className="h-3.5 w-3.5" aria-hidden />
                 </>
               )}
             </button>
@@ -329,10 +329,9 @@ function Flow() {
 export function StartVerificationFlow() {
   return (
     <DeploymentProvider>
-      <div className="min-h-screen bg-medha-bg">
-        <Header />
+      <AppShell>
         <Flow />
-      </div>
+      </AppShell>
     </DeploymentProvider>
   );
 }

@@ -39,7 +39,7 @@ export function DecisionCard({
         ? "text-medha-danger"
         : decision.kind === "recovered"
           ? "text-medha-warning"
-          : "animate-spin text-medha-accent";
+          : "animate-spin text-medha-run";
   const panelClass =
     decision.kind === "approved"
       ? "border-medha-success/25"
@@ -121,7 +121,7 @@ export function JourneyCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
                 s.done
                   ? "border-medha-success bg-medha-success"
                   : s.active
-                    ? "animate-medha-pulse border-medha-accent bg-medha-accent"
+                    ? "animate-medha-pulse border-medha-run bg-medha-run"
                     : "border-medha-border bg-white",
               )}
               aria-hidden

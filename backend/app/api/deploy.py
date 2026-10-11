@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.api_token import require_mutation_token
+from app.core.clerk_auth import LOCAL_SUBJECT, RequireSubject
 from app.core.enums import (
     TERMINAL_EVENT_TYPES,
     DeployMode,
@@ -17,7 +18,7 @@ from app.core.enums import (
 )
 from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
-from app.database.repositories import DeploymentRepository
+from app.database.repositories import DeploymentRepository, ProjectRepository
 from app.demo.runner import schedule_demo_runner
 from app.demo.scenarios import list_scenarios
 from app.models.deployment import DeploymentRecord, DeploymentRequest, DeploymentResponse
@@ -35,6 +36,29 @@ def _error(status_code: int, code: str, message: str, details: dict | None = Non
         status_code=status_code,
         content={"error": {"code": code, "message": message, "details": details or {}}},
     )
+
+
+def _owner_scope(subject: str) -> str | None:
+    """Owner filter for queries; None in legacy off mode (unfiltered)."""
+    return subject if subject != LOCAL_SUBJECT else None
+
+
+def _owned_record(deployment_id: str, subject: str) -> DeploymentRecord | None:
+    record = repo.get(deployment_id)
+    if record is None:
+        return None
+    owner = _owner_scope(subject)
+    if owner is not None:
+        if record.owner_sub == owner:
+            return record
+        # Project-bound runs (e.g. webhook analyses) carry the project
+        # owner's subject: visible to whoever owns the linked project.
+        if record.project_id:
+            project = ProjectRepository().get(record.project_id)
+            if project is not None and project.owner_sub == owner:
+                return record
+        return None
+    return record
 
 
 def _parse_ts(value: str) -> datetime | None:
@@ -58,6 +82,7 @@ def _run_summary(record: DeploymentRecord) -> dict:
     if isinstance(change_intel, dict) and isinstance(change_intel.get("risk"), dict):
         risk = change_intel["risk"].get("level")
     result = record.result or {}
+    ai = record.ai if isinstance(record.ai, dict) else {}
     return {
         "deployment_id": record.deployment_id,
         "status": record.status.value,
@@ -76,6 +101,8 @@ def _run_summary(record: DeploymentRecord) -> dict:
         "risk": risk,
         "result_kind": result.get("kind") if isinstance(result, dict) else None,
         "error_summary": record.error_summary,
+        "ai_outcome": ai.get("outcome") if ai else None,
+        "ai_provider": ai.get("provider") if ai else None,
     }
 
 
@@ -99,13 +126,28 @@ async def list_deployments(
     status: str | None = Query(default=None),
     mode: str | None = Query(default=None),
     repository: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    subject: str = RequireSubject,
 ):
     if mode is not None and mode not in {DeployMode.DEMO.value, DeployMode.REAL.value}:
         return _error(400, "INVALID_MODE", f"mode must be 'demo' or 'real', got '{mode}'")
+    if project_id:
+        project = ProjectRepository().get(project_id)
+        if (
+            project is None
+            or (subject != LOCAL_SUBJECT and project.owner_sub != subject)
+        ):
+            return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
     records, total = repo.list(
-        status=status, mode=mode, repository=repository, limit=limit, offset=offset
+        status=status,
+        mode=mode,
+        repository=repository,
+        owner_sub=_owner_scope(subject),
+        project_id=project_id,
+        limit=limit,
+        offset=offset,
     )
     return JSONResponse(
         {
@@ -113,7 +155,8 @@ async def list_deployments(
             "total": total,
             "limit": limit,
             "offset": offset,
-            "filters": {"status": status, "mode": mode, "repository": repository},
+            "filters": {"status": status, "mode": mode, "repository": repository,
+                        "project_id": project_id},
         }
     )
 
@@ -124,7 +167,7 @@ async def list_deployments(
     response_model=DeploymentResponse,
     dependencies=[Depends(require_mutation_token)],
 )
-async def create_deployment(payload: DeploymentRequest):
+async def create_deployment(payload: DeploymentRequest, subject: str = RequireSubject):
     if payload.mode == DeployMode.DEMO and payload.scenario is None:
         return _error(
             400,
@@ -184,6 +227,7 @@ async def create_deployment(payload: DeploymentRequest):
         current_stage=None,
         explain_simple=explain_simple,
         explain_technical=explain_technical,
+        owner_sub=subject,
         created_at=now,
         updated_at=now,
         is_demo=is_demo,
@@ -232,16 +276,16 @@ async def create_deployment(payload: DeploymentRequest):
 
 
 @router.get("/deploy/{deployment_id}")
-async def get_deployment(deployment_id: str):
-    record = repo.get(deployment_id)
+async def get_deployment(deployment_id: str, subject: str = RequireSubject):
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(record.to_api())
 
 
 @router.get("/deploy/{deployment_id}/events")
-async def stream_events(deployment_id: str, request: Request):
-    record = repo.get(deployment_id)
+async def stream_events(deployment_id: str, request: Request, subject: str = RequireSubject):
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
 
@@ -282,8 +326,8 @@ async def stream_events(deployment_id: str, request: Request):
 
 
 @router.get("/deploy/{deployment_id}/constraints", response_model=None)
-async def get_constraints(deployment_id: str):
-    record = repo.get(deployment_id)
+async def get_constraints(deployment_id: str, subject: str = RequireSubject):
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
 
@@ -306,8 +350,8 @@ async def get_constraints(deployment_id: str):
 
 
 @router.get("/deploy/{deployment_id}/graph", response_model=None)
-async def get_graph(deployment_id: str):
-    record = repo.get(deployment_id)
+async def get_graph(deployment_id: str, subject: str = RequireSubject):
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -322,8 +366,8 @@ async def get_graph(deployment_id: str):
 
 
 @router.get("/deploy/{deployment_id}/verification", response_model=None)
-async def get_verification(deployment_id: str):
-    record = repo.get(deployment_id)
+async def get_verification(deployment_id: str, subject: str = RequireSubject):
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -338,8 +382,8 @@ async def get_verification(deployment_id: str):
 
 
 @router.get("/deploy/{deployment_id}/rollback", response_model=None)
-async def get_rollback(deployment_id: str):
-    record = repo.get(deployment_id)
+async def get_rollback(deployment_id: str, subject: str = RequireSubject):
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -352,8 +396,8 @@ async def get_rollback(deployment_id: str):
 
 
 @router.get("/deploy/{deployment_id}/execution", response_model=None)
-async def get_execution(deployment_id: str):
-    record = repo.get(deployment_id)
+async def get_execution(deployment_id: str, subject: str = RequireSubject):
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -371,8 +415,9 @@ async def get_execution(deployment_id: str):
 async def get_logs(
     deployment_id: str,
     limit: int = Query(default=200, ge=1, le=2000),
+    subject: str = RequireSubject,
 ):
-    record = repo.get(deployment_id)
+    record = _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
 

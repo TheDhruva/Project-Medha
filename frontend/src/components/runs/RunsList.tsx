@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Plus, CheckCircle2, AlertTriangle, XCircle, Loader2 } from "lucide-react";
-import { Header } from "@/components/layout/Header";
+import { AppShell } from "@/components/layout/AppShell";
 import { EnvBadge } from "@/components/ui/Section";
 import { fetchRunsList, type RunSummary } from "@/lib/api/client";
 import { scenarioDisplayName } from "@/lib/runs/display";
@@ -34,7 +34,7 @@ function outcomeFor(status: string): { icon: React.ReactNode; label: string } {
     case "started":
     case "queued":
       return {
-        icon: <Loader2 className="h-4 w-4 shrink-0 animate-spin text-medha-accent" aria-hidden />,
+        icon: <Loader2 className="h-4 w-4 shrink-0 animate-spin text-medha-run" aria-hidden />,
         label: status === "queued" ? "Queued" : "Running",
       };
     default:
@@ -95,9 +95,8 @@ export function RunsList() {
   }, [load]);
 
   return (
-    <div className="min-h-screen bg-medha-bg">
-      <Header />
-      <main className="mx-auto max-w-3xl space-y-5 px-4 py-8 sm:px-6">
+    <AppShell>
+      <div className="space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-medha-text">Runs</h1>
@@ -107,7 +106,7 @@ export function RunsList() {
           </div>
           <Link
             href="/verify"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+            className="rounded-md border border-medha-primary bg-medha-primary-soft text-medha-primary px-4 py-2 text-sm font-semibold text-white transition hover:bg-medha-primary-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-primary"
           >
             <Plus className="h-4 w-4" aria-hidden /> New verification
           </Link>
@@ -120,28 +119,28 @@ export function RunsList() {
         ) : error ? (
           <section
             role="alert"
-            className="rounded-xl border border-medha-danger/30 bg-medha-danger-soft p-4 text-sm text-medha-danger"
+            className="rounded-md border border-medha-danger/30 bg-medha-danger-soft p-4 text-sm text-medha-danger"
           >
             <p className="font-semibold">Unable to load runs.</p>
             <p className="mt-1">{error}</p>
             <button
               type="button"
               onClick={() => void load()}
-              className="mt-3 rounded-lg border border-medha-danger/30 bg-white px-3 py-1.5 text-xs font-semibold text-medha-danger hover:bg-medha-danger-soft"
+              className="mt-3 rounded-md border border-medha-danger/30 bg-white px-3 py-1.5 text-xs font-semibold text-medha-danger hover:bg-medha-danger-soft"
             >
               Retry
             </button>
           </section>
         ) : runs.length === 0 ? (
-          <section className="flex flex-col items-center rounded-xl border border-medha-border bg-white p-8 text-center">
-            <p className="text-[15px] font-semibold text-medha-text">No runs yet.</p>
+          <section className="flex flex-col items-center rounded-md border border-medha-border bg-medha-surface p-8 text-center">
+            <p className="text-[13px] font-semibold text-medha-text">No runs yet.</p>
             <p className="mt-1 max-w-md text-sm text-medha-secondary">
               Start your first verification to see Medha analyze, resolve, and verify
               a change.
             </p>
             <Link
               href="/verify"
-              className="mt-4 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white hover:bg-medha-accent-hover"
+              className="mt-4 rounded-md bg-medha-primary px-4 py-2 text-sm font-semibold text-white hover:bg-medha-primary-soft"
             >
               Start verification
             </Link>
@@ -152,7 +151,7 @@ export function RunsList() {
               {total} run{total === 1 ? "" : "s"}
             </p>
             <section aria-label="Runs">
-              <ul className="divide-y divide-medha-border overflow-hidden rounded-xl border border-medha-border bg-white">
+              <ul className="divide-y divide-medha-border overflow-hidden rounded-md border border-medha-border bg-medha-surface">
                 {runs.map((run) => {
                   const outcome = outcomeFor(run.status);
                   const detail = conciseOutcome(run);
@@ -160,7 +159,7 @@ export function RunsList() {
                     <li key={run.deployment_id}>
                       <Link
                         href={`/runs/${run.deployment_id}`}
-                        className="flex items-center gap-3 px-4 py-3.5 transition-colors hover:bg-medha-muted/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                        className="flex items-center gap-3 px-4 py-3.5 transition-colors hover:bg-medha-surface-muted/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
                       >
                         {outcome.icon}
                         <span className="min-w-0 flex-1">
@@ -185,7 +184,7 @@ export function RunsList() {
             </section>
           </>
         )}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }

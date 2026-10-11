@@ -12,7 +12,7 @@ import { VerificationPanel } from "@/components/verification/VerificationPanel";
 import { LiveSystemTrace } from "@/components/trace/LiveSystemTrace";
 import { WhatMedhaIsDoing } from "@/components/explainability/WhatMedhaIsDoing";
 import { ViewModeToggle } from "@/components/explainability/ViewModeToggle";
-import { Header } from "@/components/layout/Header";
+import { AppShell } from "@/components/layout/AppShell";
 import { DeploymentProvider, useDeployment } from "@/context/DeploymentContext";
 import { scenarioById } from "@/lib/demo/scenarios";
 import type { DeploymentSnapshot } from "@/lib/demo/types";
@@ -60,7 +60,7 @@ function StatusLine({ snapshot }: { snapshot: DeploymentSnapshot }) {
     );
   if (s === "running")
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-medha-accent">
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-medha-run">
         <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Running
       </span>
     );
@@ -433,7 +433,7 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
     return (
       <main className="mx-auto max-w-3xl px-4 py-10 sm:px-6">
         <section className="rounded-xl border border-medha-border bg-white p-10 text-center">
-          <Loader2 className="mx-auto h-5 w-5 animate-spin text-medha-accent" aria-hidden />
+          <Loader2 className="mx-auto h-5 w-5 animate-spin text-medha-run" aria-hidden />
           <p className="mt-3 text-[15px] font-semibold text-medha-text">
             Loading verification run…
           </p>
@@ -526,10 +526,9 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
 export function RunDetailView({ deploymentId }: { deploymentId: string }) {
   return (
     <DeploymentProvider>
-      <div className={cn("min-h-screen bg-medha-bg")}>
-        <Header />
+      <AppShell>
         <RunBody deploymentId={deploymentId} />
-      </div>
+      </AppShell>
     </DeploymentProvider>
   );
 }

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_postgres_dsn
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+_SCHEMA_PG_PATH = Path(__file__).with_name("schema_pg.sql")
 
 # Bump when schema.sql or migration steps change. Tracked via PRAGMA user_version.
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 6
 
 _ARTIFACT_COLUMNS = (
     "result_json",
@@ -22,10 +25,184 @@ _ARTIFACT_COLUMNS = (
     "graph_json",
     "rollback_json",
     "change_intel_json",
+    "ai_json",
+)
+
+_NEW_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS users (
+        clerk_sub TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL DEFAULT 'github',
+        repository TEXT NOT NULL,
+        ref TEXT,
+        sha TEXT,
+        event TEXT,
+        status TEXT NOT NULL DEFAULT 'received',
+        proposal_id TEXT,
+        received_at TEXT NOT NULL,
+        note TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS proposals (
+        proposal_id TEXT PRIMARY KEY,
+        repository TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        base_sha TEXT,
+        target_sha TEXT NOT NULL,
+        deployment_id TEXT,
+        plan_hash TEXT,
+        plan_json TEXT,
+        push_json TEXT,
+        project_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        decided_by TEXT,
+        decided_at TEXT,
+        execution_id TEXT,
+        idempotency_key TEXT UNIQUE NOT NULL
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_proposals_repo_branch
+        ON proposals (repository, branch)""",
+    """CREATE TABLE IF NOT EXISTS projects (
+        project_id TEXT PRIMARY KEY,
+        owner_sub TEXT NOT NULL,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'github',
+        repo_owner TEXT NOT NULL,
+        repo_name TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        canonical_url TEXT NOT NULL,
+        branch TEXT NOT NULL DEFAULT 'main',
+        visibility TEXT NOT NULL DEFAULT 'unverified',
+        connection_status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_owner_repo
+        ON projects (owner_sub, repository)""",
+    """CREATE INDEX IF NOT EXISTS idx_projects_repository
+        ON projects (repository)""",
 )
 
 
-def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
+def resolve_backend(db_path: Path | None = None) -> str:
+    """Return "postgres" or "sqlite" without opening any connection.
+
+    An explicit file path always means SQLite (offline tests, Demo Mode).
+    Otherwise MEDHA_DATABASE_URL selects Postgres when set.
+    """
+    if db_path is not None:
+        return "sqlite"
+    return "postgres" if get_settings().use_postgres else "sqlite"
+
+
+def normalize_dsn(dsn: str) -> str:
+    """Append sslmode=require when the DSN sets none (Supabase requires TLS).
+
+    Only the query string is touched; userinfo (percent-encoded password)
+    passes through byte-identical via urlsplit/urlunsplit.
+    """
+    parts = urlsplit(dsn.strip())
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if "sslmode" not in query:
+        query["sslmode"] = "require"
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+        )
+    return dsn.strip()
+
+
+def redacted_label(dsn: str) -> str:
+    """Log-safe database label: scheme + user + host, never the password."""
+    try:
+        parts = urlsplit(dsn.strip())
+        user = parts.username or "?"
+        host = parts.hostname or "?"
+        port = f":{parts.port}" if parts.port else ""
+        db = parts.path.lstrip("/") or "?"
+        return f"postgresql://{user}@{host}{port}/{db}"
+    except ValueError:
+        return "postgresql://?"
+
+
+def describe_db() -> str:
+    """Short log-safe label for the configured backend."""
+    if get_settings().use_postgres:
+        return redacted_label(get_settings().database_url)
+    return str(get_settings().database_path)
+
+
+def translate_sql(sql: str) -> str:
+    """Map repository SQL (sqlite dialect) to Postgres.
+
+    - `?` placeholders become `%s`. Repository SQL never uses `?` inside
+      string literals or JSON operators, so a plain replace is exact.
+    - `rowid` ordering becomes the BIGSERIAL `seq` column (schema_pg.sql).
+    """
+    return sql.replace("rowid", "seq").replace("?", "%s")
+
+
+class PostgresConnection:
+    """Minimal shim so repositories keep `?` placeholders and `row.keys()`.
+
+    Each repository call opens one short-lived connection (same lifecycle as
+    the SQLite path): `with get_connection() as conn:` commits explicitly via
+    conn.commit() and closes on block exit. Uncommitted work on error is
+    rolled back before close.
+    """
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        from psycopg.rows import dict_row
+
+        cursor = self._conn.cursor(row_factory=dict_row)
+        cursor.execute(translate_sql(sql), params or None)
+        return cursor
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> PostgresConnection:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        try:
+            if exc_type is not None:
+                self.rollback()
+        finally:
+            self.close()
+
+
+def _pg_connect() -> PostgresConnection:
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise RuntimeError(
+            "MEDHA_DATABASE_URL selects Postgres but the 'psycopg' package is "
+            "not installed (pip install psycopg[binary])."
+        ) from exc
+    dsn = normalize_dsn(get_settings().database_url)
+    conn = psycopg.connect(dsn, connect_timeout=10)
+    return PostgresConnection(conn)
+
+
+def get_connection(
+    db_path: Path | None = None,
+) -> sqlite3.Connection | PostgresConnection:
+    if resolve_backend(db_path) == "postgres":
+        return _pg_connect()
     path = db_path or get_settings().database_path
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
@@ -49,6 +226,35 @@ def _ensure_revision_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE deployments ADD COLUMN target_revision TEXT")
 
 
+def _ensure_owner_column(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(deployments)")}
+    if "owner_sub" not in existing:
+        conn.execute("ALTER TABLE deployments ADD COLUMN owner_sub TEXT")
+
+
+def _ensure_v5_tables(conn: sqlite3.Connection) -> None:
+    for statement in _NEW_TABLES_SQL:
+        conn.execute(statement)
+
+
+def _ensure_v6_columns(conn: sqlite3.Connection) -> None:
+    """Project-scoped connections (v6): projects table + link columns."""
+    for statement in _NEW_TABLES_SQL:
+        conn.execute(statement)
+    deployments_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(deployments)")
+    }
+    if "project_id" not in deployments_cols:
+        conn.execute("ALTER TABLE deployments ADD COLUMN project_id TEXT")
+    proposals_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(proposals)")
+    }
+    if "project_id" not in proposals_cols:
+        conn.execute("ALTER TABLE proposals ADD COLUMN project_id TEXT")
+    if "push_json" not in proposals_cols:
+        conn.execute("ALTER TABLE proposals ADD COLUMN push_json TEXT")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Apply pending schema migrations. Idempotent and version-gated.
 
@@ -63,15 +269,53 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # every pre-v3 database regardless of which historical version it reports.
     _ensure_artifact_columns(conn)
     _ensure_revision_columns(conn)
+    _ensure_owner_column(conn)
+    _ensure_v5_tables(conn)
+    _ensure_v6_columns(conn)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
-def init_db(db_path: Path | None = None) -> Path:
-    """Create or upgrade the SQLite database deterministically.
+def _split_statements(schema: str) -> list[str]:
+    return [part.strip() for part in schema.split(";") if part.strip()]
 
-    Repeat calls are safe (schema uses IF NOT EXISTS; migrations are guarded by
-    PRAGMA user_version), so init_db can run on every app start.
+
+def _init_postgres() -> str:
+    """Create Postgres tables idempotently. Returns a redacted label."""
+    schema = _SCHEMA_PG_PATH.read_text(encoding="utf-8")
+    with _pg_connect() as conn:
+        for statement in _split_statements(schema):
+            conn.execute(statement)
+        # Heal drift for databases created before seq existed.
+        for table in ("deployments", "events"):
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS seq BIGSERIAL"
+            )
+        for table, column, ddl in (
+            ("deployments", "ai_json", "TEXT"),
+            ("deployments", "owner_sub", "TEXT"),
+            ("deployments", "project_id", "TEXT"),
+            ("proposals", "project_id", "TEXT"),
+            ("proposals", "push_json", "TEXT"),
+        ):
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}"
+            )
+        # New tables are created idempotently by schema_pg.sql above.
+        conn.commit()
+    label = redacted_label(get_settings().database_url)
+    logger.info("Postgres ready at %s", label)
+    return label
+
+
+def init_db(db_path: Path | None = None) -> Path | str:
+    """Create or upgrade the configured database deterministically.
+
+    Repeat calls are safe. An explicit path always initializes SQLite;
+    otherwise the backend follows MEDHA_DATABASE_URL (Postgres) or falls
+    back to the SQLite file.
     """
+    if resolve_backend(db_path) == "postgres":
+        return _init_postgres()
     path = db_path or get_settings().database_path
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with get_connection(path) as conn:
@@ -87,6 +331,13 @@ def ping_db(db_path: Path | None = None) -> bool:
         with get_connection(db_path) as conn:
             conn.execute("SELECT 1").fetchone()
         return True
-    except sqlite3.Error as exc:
-        logger.error("SQLite ping failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - ping must never raise
+        if resolve_backend(db_path) == "postgres":
+            logger.error(
+                "Postgres ping failed at %s: %s",
+                redacted_label(get_settings().database_url),
+                exc,
+            )
+        else:
+            logger.error("SQLite ping failed: %s", exc)
         return False

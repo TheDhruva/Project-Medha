@@ -20,7 +20,10 @@ npm run dev
 
 Open http://localhost:3000
 
-`NEXT_PUBLIC_API_BASE_URL` defaults to `http://127.0.0.1:8000`.
+Same-origin by default: the browser calls relative `/api/*` URLs, which the
+production service proxies to FastAPI via Next.js rewrites (see root
+`render.yaml` / `DECISIONS.md` ADR-026). `NEXT_PUBLIC_API_BASE_URL` only
+overrides this for split local development (default `http://127.0.0.1:8000`).
 
 ## Tests
 

@@ -1,11 +1,15 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { clerkMiddleware } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
 
 const TOKEN_HEADER = "X-Medha-Token";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /**
- * Attach the server-side API token to mutating /api/* requests before the
- * next.config.js rewrite proxies them to FastAPI.
+ * Clerk auth + MEDHA server-side API token injection.
+ *
+ * Clerk handles session/auth state for all matched routes. The MEDHA token
+ * logic is preserved unchanged: attach the server-side API token to mutating
+ * /api/* requests before the next.config.js rewrite proxies them to FastAPI.
  *
  * The token lives only in server env (MEDHA_API_TOKEN): browsers call the
  * same origin with no credentials, so the secret never enters the client
@@ -14,7 +18,7 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
  * production. Streaming (SSE) is untouched: this middleware never reads the
  * request/response body.
  */
-export function middleware(request: NextRequest) {
+export default clerkMiddleware((_auth, request) => {
   if (!MUTATING_METHODS.has(request.method)) {
     return NextResponse.next();
   }
@@ -25,8 +29,12 @@ export function middleware(request: NextRequest) {
   const headers = new Headers(request.headers);
   headers.set(TOKEN_HEADER, token);
   return NextResponse.next({ request: { headers } });
-}
+});
 
 export const config = {
-  matcher: "/api/:path*",
+  matcher: [
+    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    "/(api|trpc)(.*)",
+    "/__clerk/:path*",
+  ],
 };

@@ -20,7 +20,7 @@ export function Section({
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-xl border border-medha-border bg-white p-5 sm:p-6", className)}>
+    <section className={cn("rounded-xl border border-medha-border bg-medha-surface p-5 sm:p-6", className)}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           {eyebrow ? (
@@ -59,12 +59,12 @@ export function Collapsible({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <section className="overflow-hidden rounded-xl border border-medha-border bg-white">
+    <section className="overflow-hidden rounded-xl border border-medha-border bg-medha-surface">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition hover:bg-medha-muted/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+        className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition hover:bg-medha-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
       >
         <span className="min-w-0">
           {eyebrow ? (
@@ -111,13 +111,13 @@ export function EnvBadge({ isDemo, size = "md" }: { isDemo: boolean; size?: "sm"
         "inline-flex items-center gap-1.5 rounded-full border font-semibold",
         size === "sm" ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
         isDemo
-          ? "border-medha-accent/25 bg-medha-accent-soft text-medha-accent-ink"
-          : "border-medha-success/30 bg-medha-success-soft text-medha-success",
+          ? "border-medha-border bg-medha-muted text-medha-secondary"
+          : "border-medha-run/25 bg-medha-run-soft text-medha-run-ink",
       )}
       title={isDemo ? "Deterministic demo fixture" : "Real backend data"}
     >
       <span
-        className={cn("status-dot", isDemo ? "bg-medha-accent" : "bg-medha-success")}
+        className={cn("status-dot", isDemo ? "bg-medha-tertiary" : "bg-medha-run")}
         aria-hidden
       />
       {isDemo ? "DEMO" : "LIVE"}
@@ -142,7 +142,7 @@ export function StatusBadge({
         : tone === "error"
           ? "border-medha-danger/30 bg-medha-danger-soft text-medha-danger"
           : tone === "info"
-            ? "border-medha-accent/25 bg-medha-accent-soft text-medha-accent-ink"
+            ? "border-medha-run/25 bg-medha-run-soft text-medha-run-ink"
             : "border-medha-border bg-medha-muted text-medha-secondary";
   return (
     <span

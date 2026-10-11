@@ -202,7 +202,7 @@ def test_list_deployments_empty(client):
     body = response.json()
     assert body["runs"] == []
     assert body["total"] == 0
-    assert body["filters"] == {"status": None, "mode": None, "repository": None}
+    assert body["filters"] == {"status": None, "mode": None, "repository": None, "project_id": None}
 
 
 def test_list_deployments_returns_completed_run_summary(client):

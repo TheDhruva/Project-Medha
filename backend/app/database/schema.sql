@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS deployments (
     graph_json TEXT,
     rollback_json TEXT,
     change_intel_json TEXT,
+    ai_json TEXT,
+    owner_sub TEXT,
+    project_id TEXT,
     is_demo INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -42,3 +45,73 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_deployment_ts
     ON events (deployment_id, ts);
+
+CREATE TABLE IF NOT EXISTS users (
+    clerk_sub TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT 'github',
+    repository TEXT NOT NULL,
+    ref TEXT,
+    sha TEXT,
+    event TEXT,
+    status TEXT NOT NULL DEFAULT 'received',
+    proposal_id TEXT,
+    received_at TEXT NOT NULL,
+    note TEXT
+);
+
+CREATE TABLE IF NOT EXISTS proposals (
+    proposal_id TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    base_sha TEXT,
+    target_sha TEXT NOT NULL,
+    deployment_id TEXT,
+    plan_hash TEXT,
+    plan_json TEXT,
+    push_json TEXT,
+    project_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    decided_by TEXT,
+    decided_at TEXT,
+    execution_id TEXT,
+    idempotency_key TEXT UNIQUE NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_repo_branch
+    ON proposals (repository, branch);
+
+-- Project-scoped repository connections (multi-user, repository-agnostic).
+-- A project binds one owner's view of one GitHub repository + branch.
+-- No credentials are stored here: readability is proven by git ls-remote
+-- (verify endpoint) and by successful SHA checkout at analysis time.
+-- connection_status: pending | connected | failed | disconnected
+-- visibility: unverified | public | private_unsupported
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    owner_sub TEXT NOT NULL,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'github',
+    repo_owner TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    canonical_url TEXT NOT NULL,
+    branch TEXT NOT NULL DEFAULT 'main',
+    visibility TEXT NOT NULL DEFAULT 'unverified',
+    connection_status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_owner_repo
+    ON projects (owner_sub, repository);
+
+CREATE INDEX IF NOT EXISTS idx_projects_repository
+    ON projects (repository);

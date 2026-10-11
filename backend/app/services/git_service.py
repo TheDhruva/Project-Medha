@@ -1,9 +1,17 @@
-"""Git / local repository acquisition (shallow clone when needed)."""
+"""Git / local repository acquisition (shallow clone when needed).
+
+Exact-commit binding: when a caller passes ``ref_sha`` (e.g. the verified
+``after`` SHA of a GitHub push event), acquisition fetches and checks out
+that exact commit and asserts ``HEAD == ref_sha`` before returning. Anything
+else fails closed — MEDHA never silently analyzes a different commit.
+"""
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,12 +21,19 @@ from app.services.workspace import deployment_workspace, resolve_local_repo_path
 
 logger = get_logger(__name__)
 
+_FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_ZERO_SHA = "0" * 40
+_GIT_TIMEOUT_S = 120
+_LSREMOTE_TIMEOUT_S = 30
+_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+
 
 @dataclass
 class RepoAcquisition:
     path: Path
-    method: str  # local_copy | local_path | shallow_clone
+    method: str  # local_copy | local_archive | shallow_clone
     cleaned_url: str
+    checked_sha: str | None = None  # verified HEAD when ref_sha was requested
 
 
 class GitAcquireError(Exception):
@@ -28,13 +43,158 @@ class GitAcquireError(Exception):
         self.message = message
 
 
-def acquire_repository(deployment_id: str, repository_url: str) -> RepoAcquisition:
+def _require_full_sha(sha: str | None) -> str:
+    """Validate an exact 40-hex commit SHA (fail closed on anything else)."""
+    candidate = (sha or "").strip().lower()
+    if not candidate or candidate == _ZERO_SHA:
+        raise GitAcquireError(
+            "SHA_REQUIRED",
+            "An exact 40-hex commit SHA is required (got empty or null SHA).",
+        )
+    if not _FULL_SHA_RE.match(candidate):
+        raise GitAcquireError(
+            "INVALID_SHA",
+            "Commit SHA must be a 40-character hex string.",
+        )
+    return candidate
+
+
+def normalize_commit_sha(sha: str | None) -> str:
+    """Public SHA validator: normalized 40-hex SHA or GitAcquireError."""
+    return _require_full_sha(sha)
+
+
+def _run_git(
+    args: list[str], *, cwd: Path | None = None, timeout: int = _GIT_TIMEOUT_S
+) -> str:
+    """Run a bounded git command; stdout on success, GitAcquireError otherwise."""
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(cwd) if cwd is not None else None,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitAcquireError("GIT_TIMEOUT", "Git operation timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()[:300]
+        raise GitAcquireError(
+            "GIT_COMMAND_FAILED",
+            f"Git '{' '.join(args[:3])}' failed: {stderr or exc}",
+        ) from exc
+    return (completed.stdout or "").strip()
+
+
+def ls_remote_sha(url: str, ref: str = "HEAD") -> str | None:
+    """Resolve a remote ref to a SHA without cloning (bounded).
+
+    Returns the SHA, or None when the repository/ref is unreachable or
+    private. Never raises for network failures — callers treat None as
+    "not verifiably readable".
+    """
+    try:
+        cleaned = validate_repository_url(url)
+    except RepositoryUrlError:
+        return None
+    if resolve_local_repo_path(cleaned) is not None:
+        return None  # local paths are not remotes; use rev-parse instead
+    if not _git_available():
+        return None
+    try:
+        out = _run_git(
+            ["ls-remote", cleaned, ref], timeout=_LSREMOTE_TIMEOUT_S
+        )
+    except GitAcquireError:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and _FULL_SHA_RE.match(parts[0]):
+            return parts[0].lower()
+    return None
+
+
+def local_rev_parse(local: Path, sha: str) -> str:
+    """Assert a commit exists in a local repository; return normalized SHA."""
+    wanted = _require_full_sha(sha)
+    try:
+        out = _run_git(["-C", str(local), "rev-parse", "--verify", f"{wanted}^{{commit}}"])
+    except GitAcquireError as exc:
+        raise GitAcquireError(
+            "SHA_NOT_FOUND",
+            "Commit is not present in the local repository.",
+        ) from exc
+    resolved = out.strip().lower()
+    if resolved != wanted:
+        raise GitAcquireError(
+            "SHA_MISMATCH",
+            "Local repository resolved a different commit than requested.",
+        )
+    return resolved
+
+
+def checkout_commit(repo_path: Path, sha: str, *, timeout: int = _GIT_TIMEOUT_S) -> str:
+    """Fetch + detach-checkout an exact commit, then assert HEAD == sha."""
+    wanted = _require_full_sha(sha)
+    _run_git(["-C", str(repo_path), "fetch", "--depth", "1", "origin", wanted], timeout=timeout)
+    _run_git(
+        ["-C", str(repo_path), "checkout", "--detach", "--force", wanted],
+        timeout=timeout,
+    )
+    head = _run_git(["-C", str(repo_path), "rev-parse", "HEAD"], timeout=timeout).lower()
+    if head != wanted:
+        raise GitAcquireError(
+            "SHA_MISMATCH",
+            "Checked-out HEAD does not match the requested commit.",
+        )
+    return head
+
+
+def _export_local_archive(local: Path, sha: str, dest: Path) -> None:
+    """Export one commit of a local repo to dest (zip + slip-guarded extract)."""
+    wanted = local_rev_parse(local, sha)
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(local), "archive", "--format=zip", wanted],
+            check=True,
+            capture_output=True,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitAcquireError("GIT_TIMEOUT", "Git archive timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        raise GitAcquireError("GIT_COMMAND_FAILED", "Git archive failed") from exc
+    data = completed.stdout or b""
+    if len(data) > _MAX_ARCHIVE_BYTES:
+        raise GitAcquireError("ARCHIVE_TOO_LARGE", "Commit archive exceeds the size bound.")
+    import io
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        for member in archive.infolist():
+            target = (dest / member.filename).resolve()
+            if dest.resolve() not in target.parents and target != dest.resolve():
+                raise GitAcquireError("UNSAFE_ARCHIVE_PATH", "Archive member escapes destination.")
+        archive.extractall(dest)
+
+
+def acquire_repository(
+    deployment_id: str, repository_url: str, *, ref_sha: str | None = None
+) -> RepoAcquisition:
     """
     Acquire a repository into the deployment workspace.
 
     Supports:
     - local filesystem paths / file:// URIs (offline-friendly)
     - remote git URLs via shallow clone (requires network + git)
+
+    When ``ref_sha`` is given, the exact commit is materialized and
+    ``checked_sha`` carries the verified HEAD. Without it, behavior is
+    unchanged (workspace copy / branch-tip clone, ``checked_sha=None``).
     """
     dest = deployment_workspace(deployment_id) / "repo"
     if dest.exists():
@@ -45,10 +205,22 @@ def acquire_repository(deployment_id: str, repository_url: str) -> RepoAcquisiti
     except RepositoryUrlError as exc:
         raise GitAcquireError(exc.code, exc.message) from exc
 
+    wanted = _require_full_sha(ref_sha) if ref_sha else None
+
     local = resolve_local_repo_path(repository_url)
     if local is not None:
         if not local.exists():
             raise GitAcquireError("REPO_NOT_FOUND", f"Local repository path not found: {local}")
+        if wanted:
+            _export_local_archive(local, wanted, dest)
+            logger.info(
+                "Acquired local repo at commit deployment_id=%s sha=%.12s",
+                deployment_id, wanted,
+            )
+            return RepoAcquisition(
+                path=dest, method="local_archive", cleaned_url=str(local),
+                checked_sha=wanted,
+            )
         shutil.copytree(
             local,
             dest,
@@ -92,8 +264,15 @@ def acquire_repository(deployment_id: str, repository_url: str) -> RepoAcquisiti
             f"Shallow clone failed: {stderr or exc}",
         ) from exc
 
+    checked: str | None = None
+    if wanted:
+        checked = checkout_commit(dest, wanted)
+
     logger.info("Shallow-cloned repo deployment_id=%s url=%s", deployment_id, repository_url)
-    return RepoAcquisition(path=dest, method="shallow_clone", cleaned_url=repository_url)
+    return RepoAcquisition(
+        path=dest, method="shallow_clone", cleaned_url=repository_url,
+        checked_sha=checked,
+    )
 
 
 def _git_available() -> bool:

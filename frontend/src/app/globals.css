@@ -5,31 +5,35 @@
 @tailwind utilities;
 
 :root {
-  /* Bright Mode design tokens */
-  --medha-bg: #f4f5f7;
-  --medha-bg-warm: #f7f6f3;
-  --medha-surface: #ffffff;
-  --medha-surface-muted: #f0f2f5;
-  --medha-text: #141820;
-  --medha-text-secondary: #5a6573;
-  --medha-text-tertiary: #8791a0;
-  --medha-border: #e2e5eb;
-  --medha-border-strong: #c9ced8;
-  --medha-accent: #d2042d;
-  --medha-accent-hover: #a80325;
-  --medha-accent-soft: #fdecef;
-  --medha-accent-ink: #7a031b;
-  --medha-success: #1b7a4a;
-  --medha-success-soft: #e6f5ed;
-  --medha-warning: #a56a12;
-  --medha-warning-soft: #f8efd9;
-  --medha-danger: #b42318;
-  --medha-danger-soft: #fdeceb;
-  --medha-info: #d2042d;
-  --medha-shadow: 0 1px 2px rgba(20, 24, 32, 0.04),
-    0 8px 24px rgba(20, 24, 32, 0.04);
-  --medha-radius: 12px;
-  --medha-radius-sm: 8px;
+  /* ——— Dark Slate DevOps Workspace ——— */
+  --medha-sidebar: #171E2B;
+  --medha-canvas: #222B3A;
+  --medha-surface: #2C3748;
+  --medha-surface-raised: #39465A;
+  --medha-border: #465368;
+  --medha-border-strong: #39465A;
+  --medha-text: #F1F5F9;
+  --medha-text-secondary: #B2BECE;
+  --medha-text-tertiary: #8796AA;
+  --medha-accent: #D93645;
+  --medha-accent-hover: #C82A3B;
+  --medha-accent-soft: #ED4A5E;
+  --medha-accent-ink: #F1F5F9;
+  --medha-run: #82B4FF;
+  --medha-run-soft: #2E4053;
+  --medha-run-ink: #B3D8FF;
+  --medha-success: #4CCB91;
+  --medha-success-soft: #2A5A4A;
+  --medha-warning: #F3B84B;
+  --medha-warning-soft: #5A3D11;
+  --medha-danger: #FF6472;
+  --medha-danger-soft: #3D1F21;
+  --medha-info: #82B4FF;
+  --medha-info-soft: #2A4A6E;
+  --medha-shadow: 0 1px 2px rgba(23, 30, 43, 0.3),
+    0 8px 24px rgba(23, 30, 43, 0.4);
+  --medha-radius: 8px;
+  --medha-radius-sm: 6px;
   --medha-font-display: "Space Grotesk", system-ui, sans-serif;
   --medha-font-sans: "IBM Plex Sans", system-ui, sans-serif;
   --medha-font-mono: "IBM Plex Mono", ui-monospace, monospace;
@@ -43,20 +47,14 @@ html,
 body {
   max-width: 100%;
   overflow-x: hidden;
-}
-
-body {
-  margin: 0;
-  color: var(--medha-text);
-  background:
-    radial-gradient(900px 380px at 8% -8%, #fbfbfc 0%, transparent 60%),
-    var(--medha-bg);
   font-family: var(--medha-font-sans);
+  background-color: var(--medha-canvas);
+  color: var(--medha-text);
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: var(--medha-accent-soft);
+  background: var(--medha-accent);
   color: var(--medha-accent-ink);
 }
 
@@ -65,47 +63,58 @@ body {
   outline-offset: 2px;
 }
 
-@layer components {
-  .medha-panel {
-    @apply bg-medha-surface border border-medha-border rounded-medha shadow-medha;
-  }
+/* Surface hierarchy */
+.bg-canvas { background-color: var(--medha-canvas); }
+.bg-surface { background-color: var(--medha-surface); }
+.bg-raised { background-color: var(--medha-surface-raised); }
+.bg-medha-surface-raised { background-color: var(--medha-surface-raised); }
+.bg-sidebar { background-color: var(--medha-sidebar); }
 
-  .medha-label {
-    @apply text-[11px] font-medium uppercase tracking-[0.08em] text-medha-secondary;
-  }
+/* Borders */
+.border-subtle { border-color: var(--medha-border); }
+.border-strong { border-color: var(--medha-border-strong); }
 
-  .medha-mono {
-    font-family: var(--medha-font-mono);
-  }
+/* Text colors */
+.text-primary { color: var(--medha-text); }
+.text-secondary { color: var(--medha-text-secondary); }
+.text-muted { color: var(--medha-text-tertiary); }
+.text-info { color: var(--medha-info); }
 
-  .status-dot {
-    @apply inline-block h-2 w-2 rounded-full shrink-0;
-  }
+/* Status colors */
+.bg-success { background-color: var(--medha-success); }
+.bg-warning { background-color: var(--medha-warning); }
+.bg-danger { background-color: var(--medha-danger); }
+.bg-info { background-color: var(--medha-info); }
 
-  .field-input {
-    @apply w-full rounded-medha-sm border border-medha-border bg-white px-3 py-2.5 text-sm text-medha-text shadow-sm transition placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent-soft disabled:cursor-not-allowed disabled:bg-medha-muted disabled:text-medha-secondary;
-  }
+/* Component overrides */
+.medha-panel {
+  @apply bg-medha-surface border border-medha-border rounded-md p-4;
+}
+
+.medha-label {
+  @apply text-[11px] font-medium uppercase tracking-[0.08em] text-medha-secondary;
+}
+
+.medha-mono {
+  font-family: var(--medha-font-mono);
+}
+
+.status-dot {
+  @apply inline-block h-1.5 w-1.5 rounded-full shrink-0;
+}
+
+.field-input {
+  @apply w-full rounded-md border border-medha-border bg-medha-surface-raised px-3 py-2.5 text-sm text-medha-text shadow-sm transition placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent-soft disabled:cursor-not-allowed disabled:text-medha-secondary;
 }
 
 @keyframes medha-fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes medha-pulse-soft {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.55;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 .animate-medha-in {
@@ -116,7 +125,59 @@ body {
   animation: medha-pulse-soft 1.4s ease-in-out infinite;
 }
 
-/* React Flow overrides for bright canvas */
-.react-flow__attribution {
-  display: none !important;
+.medha-button {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-md px-4 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent disabled:cursor-not-allowed disabled:opacity-60;
+}
+
+button.medha-primary {
+  @apply bg-medha-accent text-white hover:bg-medha-accent-soft text-medha-accent-ink;
+}
+
+button.medha-secondary {
+  @apply border border-medha-border bg-medha-surface-raised text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text;
+}
+
+button.medha-danger {
+  @apply bg-medha-danger text-white hover:brightness-95;
+}
+
+button.medha-ghost {
+  @apply bg-transparent text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text;
+}
+
+/* Sidebar nav link */
+.sidebar-nav-link {
+  @apply flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition hover:bg-medha-surface-muted;
+}
+
+.sidebar-nav-link-active {
+  @apply bg-medha-surface-raised text-medha-accent;
+}
+
+/* Empty states */
+.empty-state {
+  @apply flex flex-col items-center rounded-md border border-medha-border bg-medha-surface p-8 text-center text-medha-secondary;
+}
+
+/* Table row striping */
+.table-zebra tbody tr:nth-child(odd) {
+  background-color: var(--medha-surface);
+}
+
+/* Alert badge */
+.alert-badge {
+  @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold;
+}
+
+/* High contrast focus */
+.focus-visible-outline {
+  @apply focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .animate-medha-pulse,
+  .animate-medha-spin {
+    animation: none;
+  }
 }

@@ -5,11 +5,12 @@
 # proxy /api/* and /health to FastAPI, so the browser uses one public origin.
 # SSE streams through unbuffered (backend sends X-Accel-Buffering: no).
 #
-# State: SQLite only (AGENTS.md rule 20). The free plan has no persistent
-# disk, so MEDHA_DATABASE_PATH below is ephemeral: deployments restart with a
-# FRESH database and run history is lost on redeploy/restart. To persist
-# history, upgrade to a paid instance, attach a disk mounted at
-# /var/medha-data, and keep MEDHA_DATABASE_PATH as set here.
+# State: Supabase Postgres is the main backend (ADR-029). Set
+# MEDHA_DATABASE_URL in the Render dashboard (secret — never commit it);
+# when set, it takes precedence and run history survives redeploys with no
+# disk needed. MEDHA_DATABASE_PATH below is the SQLite fallback (ephemeral
+# on the free plan: fresh database on restart unless a paid disk is mounted
+# at /var/medha-data).
 services:
   - type: web
     name: medha
@@ -28,6 +29,13 @@ services:
         value: "false"
       - key: MEDHA_DATABASE_PATH
         value: /var/medha-data/medha.db
+      # Main backend database (Supabase Postgres). sync: false means Render
+      # takes the value from the dashboard (secret), not from this file.
+      # Use the pooled connection (port 6543) for hosted use; the direct
+      # connection (port 5432) is fine for local development.
+      # Format: postgresql://postgres:<PASSWORD>@db.<ref>.supabase.co:6543/postgres
+      - key: MEDHA_DATABASE_URL
+        sync: false
       - key: MEDHA_LOG_LEVEL
         value: INFO
       # Same-origin deployment: the browser never contacts the backend
@@ -40,3 +48,38 @@ services:
       # The backend fails closed (503) in production if this is missing.
       - key: MEDHA_API_TOKEN
         generateValue: true
+      # --- Clerk production authentication (dashboard secrets) ---
+      # Create a PRODUCTION Clerk instance first, then paste values here.
+      # Without these, the service runs legacy single-operator (off) mode.
+      - key: MEDHA_AUTH_MODE
+        value: clerk
+      - key: CLERK_DOMAIN
+        sync: false
+      # Only needed for custom Clerk domains; skip for *.clerk.accounts.dev.
+      # - key: CLERK_JWKS_URL
+      #   sync: false
+      # --- AI providers (dashboard secrets; missing keys keep deterministic mode) ---
+      - key: MEDHA_AI_ENABLED
+        value: "true"
+      - key: MEDHA_AI_PRIMARY_PROVIDER
+        value: groq
+      - key: MEDHA_AI_FALLBACK_PROVIDER
+        value: gemini
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      # --- GitHub webhook routing (dashboard secret + allowlist) ---
+      # The secret must exactly match the GitHub webhook secret. Project
+      # connections (per-owner, via the UI) are the primary routing table;
+      # the allowlist below remains a server-level guard.
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: MEDHA_WEBHOOK_ALLOWED_REPOS
+        sync: false
+      - key: MEDHA_WEBHOOK_BRANCHES
+        value: main
