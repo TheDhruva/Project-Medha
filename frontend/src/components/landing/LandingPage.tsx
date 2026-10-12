@@ -31,7 +31,7 @@ function ArchNode({
   return (
     <div
       className={cn(
-        "flex items-center gap-2.5 rounded-[10px] border bg-white px-3 py-2 text-left",
+        "flex items-center gap-2.5 rounded-[10px] border bg-medha-surface-raised px-3 py-2 text-left",
         accent ? "border-medha-accent/40 shadow-medha" : "border-medha-border",
         className,
       )}
@@ -68,7 +68,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
   return (
     <div className="flex min-h-svh flex-col bg-medha-bg">
       {/* Header — 64px, wordmark + product label only */}
-      <header className="h-16 shrink-0 border-b border-medha-border bg-white">
+      <header className="h-16 shrink-0 border-b border-medha-border bg-medha-surface">
         <div className="flex h-full w-full items-center justify-between px-[4.5%]">
           <div className="flex items-center gap-2.5">
             <span className="font-display text-[19px] font-bold tracking-tight text-medha-text">
@@ -128,7 +128,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
                 </Link>
                 <Link
                   href="/sign-in"
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] border border-medha-border-strong bg-white px-5 py-2.5 text-sm font-semibold text-medha-text transition hover:bg-medha-muted/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] border border-medha-border-strong bg-medha-surface-raised px-5 py-2.5 text-sm font-semibold text-medha-text transition hover:bg-medha-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
                   aria-label="Sign In"
                 >
                   Sign In
@@ -181,7 +181,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
               ].map((a) => (
                 <div
                   key={a.title}
-                  className="flex flex-col items-center gap-1 rounded-[10px] border border-medha-border bg-white px-2 py-2 text-center"
+                  className="flex flex-col items-center gap-1 rounded-[10px] border border-medha-border bg-medha-surface-raised px-2 py-2 text-center"
                 >
                   <span
                     className="flex h-7 w-7 items-center justify-center rounded-lg bg-medha-muted text-medha-text"

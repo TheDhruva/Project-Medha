@@ -39,6 +39,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? "";
   const params = useParams<{ id?: string }>();
   const { projects } = useProjects();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const activeId = params?.id ?? null;
   const inProject = pathname.startsWith("/projects/") && activeId;
   const active = projects.find((p) => p.id === activeId) ?? null;
@@ -129,14 +130,28 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-medha-bg">
       <Header />
-      <div className="flex min-h-screen">
+      <div className="flex min-h-[calc(100svh-64px)]">
         <aside
-          className="fixed left-0 top-64 bottom-0 w-64 flex-shrink-0 overflow-y-auto border-r border-medha-border bg-medha-sidebar p-4 flex flex-col gap-2 z-20"
+          id="mobile-navigation"
+          className={cn(
+            "h-[calc(100svh-64px)] w-64 shrink-0 overflow-y-auto border-r border-medha-border bg-medha-sidebar p-4 md:sticky md:top-0 md:flex md:flex-col md:gap-2",
+            mobileNavOpen ? "fixed inset-y-0 left-0 top-16 z-30 flex flex-col gap-2 shadow-medha" : "hidden",
+          )}
         >
           {nav}
         </aside>
-        <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
-          <main className="flex-1 p-6 sm:p-8 overflow-x-auto">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <main className="mx-auto w-full max-w-[1600px] flex-1 overflow-x-auto p-4 sm:p-6 lg:p-8">
+            <button
+              type="button"
+              className="medha-button medha-secondary mb-4 md:hidden"
+              onClick={() => setMobileNavOpen((open) => !open)}
+              aria-expanded={mobileNavOpen}
+              aria-controls="mobile-navigation"
+            >
+              {mobileNavOpen ? <X className="h-4 w-4" aria-hidden /> : <Menu className="h-4 w-4" aria-hidden />}
+              {mobileNavOpen ? "Close navigation" : "Open navigation"}
+            </button>
             {children}
           </main>
         </div>

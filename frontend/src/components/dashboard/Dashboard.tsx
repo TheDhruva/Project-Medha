@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useDeployment } from "@/context/DeploymentContext";
 import { CausalExecutionGraph } from "@/components/graph/CausalExecutionGraph";
 import { VerificationPanel } from "@/components/verification/VerificationPanel";
 import { ConstraintNegotiation } from "@/components/constraints/ConstraintNegotiation";
 import { Badge } from "@/components/ui/primitives";
 import { EnvBadge } from "@/components/ui/Section";
-import { useOptionalDeployment } from "@/context/DeploymentContext";
+import { useDeployment, useOptionalDeployment } from "@/context/DeploymentContext";
 import { cn } from "@/lib/ui/cn";
 import {
   ATLAS_CONTRIBUTORS,
@@ -407,7 +406,7 @@ export function Dashboard() {
                 <p className="mt-1 text-sm text-medha-secondary">
                   {isDeploying
                     ? "atlas-labs/atlas-commerce · main (DEMO mode)"
-                    : `Repository on ${repositoryUrl || "unknown"} · ${branch || "main"}}`}
+                    : `Repository on ${repositoryUrl || "unknown"} · ${branch || "main"}`}
                 </p>
               </div>
 

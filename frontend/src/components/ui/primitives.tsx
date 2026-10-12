@@ -215,7 +215,7 @@ export function Stat({ label, value, hint }: { label: string; value: string; hin
 
 /* ---------- Dialog ---------- */
 
-export function Dialog({ title, body, confirmLabel, cancelLabel = "Cancel", onConfirm, onCancel, danger }: {
+export function Dialog({ title, body, confirmLabel, cancelLabel = "Cancel", onConfirm, onCancel, danger, confirmDisabled }: {
   title: string;
   body: ReactNode;
   confirmLabel: string;
@@ -223,6 +223,7 @@ export function Dialog({ title, body, confirmLabel, cancelLabel = "Cancel", onCo
   onConfirm: () => void;
   onCancel: () => void;
   danger?: boolean;
+  confirmDisabled?: boolean;
 }) {
   const confirmRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -245,8 +246,9 @@ export function Dialog({ title, body, confirmLabel, cancelLabel = "Cancel", onCo
             ref={confirmRef}
             type="button"
             onClick={onConfirm}
+            disabled={confirmDisabled}
             className={cn(
-              "rounded-lg px-4 py-2 text-sm font-semibold text-white",
+              "rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60",
               danger ? "bg-medha-danger" : "bg-medha-accent hover:bg-medha-accent-hover",
             )}
           >

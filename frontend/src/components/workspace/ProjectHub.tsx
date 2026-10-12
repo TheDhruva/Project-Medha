@@ -74,6 +74,7 @@ function CreateDialog({ createProject, onClose, onCreated }: {
     <Dialog
       title="New project"
       confirmLabel={saving ? "Creating…" : "Create project"}
+      confirmDisabled={saving}
       onConfirm={() => void confirm()}
       onCancel={onClose}
       body={
@@ -83,23 +84,6 @@ function CreateDialog({ createProject, onClose, onCreated }: {
             <input id="np-repo" className="field-input mt-1" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/example/app or C:/src/app" />
           </div>
           {error ? <p role="alert" className="rounded-lg border border-medha-danger/30 bg-medha-danger-soft px-3 py-2 text-[13px] text-medha-danger">{error}</p> : null}
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="medha-button medha-secondary rounded-md px-4 py-2 text-sm font-medium cancel-button"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => void confirm()}
-              className="medha-button medha-primary rounded-md px-4 py-2 text-sm font-medium"
-              disabled={saving}
-            >
-              {saving ? "Creating…" : "Create project"}
-            </button>
-          </div>
         </div>
       }
     />
@@ -147,7 +131,7 @@ export function ProjectHub() {
         ) : null}
 
         <div className="flex flex-col">
-          <div className="flex items-center gap-2">
+          <div className="relative flex items-center gap-2">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-medha-tertiary" aria-hidden />
             <label htmlFor="hub-search" className="sr-only">Search projects</label>
             <input

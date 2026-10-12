@@ -33,6 +33,7 @@ const config: Config = {
           danger: "var(--medha-danger)",
           "danger-soft": "var(--medha-danger-soft)",
           "surface-muted": "var(--medha-surface-muted)",
+          "surface-soft": "var(--medha-surface-soft)",
         },
       },
       fontFamily: {

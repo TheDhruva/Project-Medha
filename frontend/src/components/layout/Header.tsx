@@ -22,7 +22,7 @@ export function Header() {
 
   return (
     <header
-      className="min-h-[64px] bg-medha-surface border-b border-medha-flexible flex items-center justify-between px-4 sm:px-6"
+      className="flex min-h-[64px] items-center justify-between border-b border-medha-border bg-medha-surface px-4 sm:px-6"
     >
       <div className="flex items-center gap-2 max-w-7xl w-full mx-auto">
         <div className="flex items-center gap-2">
@@ -46,7 +46,7 @@ export function Header() {
           <span
             className={cn(
               "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold",
-              isDemo ? "border-medha-border bg-medha-surface-muted text-medha-tertiary" : "border-medha-border bg-medha-surface-soft text-medha-secondary",
+              isDemo ? "border-medha-border bg-medha-surface-muted text-medha-secondary" : "border-medha-border bg-medha-surface-soft text-medha-secondary",
             )}
             title={
               deployment
@@ -68,7 +68,7 @@ export function Header() {
             <button
               type="button"
               onClick={() => window.location.pathname = "/runs/new"}
-              className="rounded-md px-3 py-1.5 text-[10px] font-medium text-medha-accent hover:bg-medha-accent-soft text-medha-accent-ink transition-colors"
+              className="rounded-md px-3 py-1.5 text-[10px] font-medium text-medha-accent hover:bg-medha-accent-soft transition-colors"
               title="Start new DEMO run"
             >
               New run

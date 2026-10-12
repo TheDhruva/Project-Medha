@@ -6,9 +6,13 @@
 
 :root {
   /* ——— Dark Slate DevOps Workspace ——— */
+  --medha-bg: #222B3A;
+  --medha-bg-warm: #252F40;
   --medha-sidebar: #171E2B;
   --medha-canvas: #222B3A;
   --medha-surface: #2C3748;
+  --medha-surface-muted: #334054;
+  --medha-surface-soft: #303C4F;
   --medha-surface-raised: #39465A;
   --medha-border: #465368;
   --medha-border-strong: #39465A;
@@ -46,11 +50,18 @@
 html,
 body {
   max-width: 100%;
+  min-height: 100%;
   overflow-x: hidden;
   font-family: var(--medha-font-sans);
   background-color: var(--medha-canvas);
   color: var(--medha-text);
   -webkit-font-smoothing: antialiased;
+}
+
+/* The product uses a dark workspace theme. Keep legacy white utility classes
+   readable when shared components are rendered on dark surfaces. */
+.bg-white {
+  background-color: var(--medha-surface-raised) !important;
 }
 
 ::selection {
