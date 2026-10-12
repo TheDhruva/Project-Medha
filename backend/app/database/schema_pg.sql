@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_deployment_ts
     ON events (deployment_id, ts);
 
+CREATE INDEX IF NOT EXISTS idx_deployments_owner_status
+    ON deployments (owner_sub, status);
+CREATE INDEX IF NOT EXISTS idx_deployments_status
+    ON deployments (status);
+
 CREATE TABLE IF NOT EXISTS users (
     seq BIGSERIAL PRIMARY KEY,
     clerk_sub TEXT UNIQUE NOT NULL,
@@ -92,6 +97,9 @@ CREATE TABLE IF NOT EXISTS proposals (
 
 CREATE INDEX IF NOT EXISTS idx_proposals_repo_branch
     ON proposals (repository, branch);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_deployment
+    ON proposals (deployment_id);
 
 CREATE TABLE IF NOT EXISTS projects (
     seq BIGSERIAL PRIMARY KEY,

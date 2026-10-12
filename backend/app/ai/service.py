@@ -144,6 +144,16 @@ class AIService:
 
     # -- public API ------------------------------------------------------
 
+    async def aclose(self) -> None:
+        """Close the shared HTTP client, if owned. Safe to call repeatedly."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001 - shutdown must never raise
+                pass
+
     async def generate_structured(
         self,
         *,
@@ -168,9 +178,6 @@ class AIService:
         chain = self._chain()
         if not chain:
             return None, meta
-        if budget is not None and not budget.take():
-            meta.failure_category = "budget_exhausted"
-            return None, meta
 
         safe_payload = redact_mapping(payload)
         key = cache_key(
@@ -188,6 +195,10 @@ class AIService:
             restored = AIMeta(**{k: hit.get(k, getattr(AIMeta(), k)) for k in hit})
             restored.cached = True
             return dict(cached["data"]), restored
+        # Budget consumed only on actual provider calls: cache hits are free.
+        if budget is not None and not budget.take():
+            meta.failure_category = "budget_exhausted"
+            return None, meta
 
         user_text = json.dumps(safe_payload, sort_keys=True, default=str)
         started = time.perf_counter()

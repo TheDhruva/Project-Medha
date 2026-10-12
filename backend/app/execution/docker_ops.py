@@ -30,8 +30,14 @@ ALLOWED_VERBS = frozenset(
         "ps",
         "compose",
         "pull",
+        "logs",
+        "images",
+        "rmi",
     }
 )
+# NOTE: `build` is deliberately NOT in ALLOWED_VERBS (V1 invariant: the
+# generic gateway never builds). Controlled MEDHA-template builds go through
+# build_image(), a purpose-built path with fixed flags below.
 
 
 class DockerOpsError(RuntimeError):
@@ -159,6 +165,12 @@ def start_container(
     command: list[str] | None = None,
     ports: list[str] | None = None,
     env: dict[str, str] | None = None,
+    publish_port: int | None = None,
+    container_port: int | None = None,
+    memory: str = "512m",
+    cpus: str = "1.0",
+    pids_limit: int = 256,
+    readonly_root: bool = False,
 ) -> str:
     """Start a labeled container. Image/command must come from verified plan."""
     name = resource_name(deployment_id, service)
@@ -177,8 +189,19 @@ def start_container(
         f"{LABEL_MANAGED}={LABEL_VALUE_MANAGED}",
         "--network",
         network,
+        # Isolation defaults (enforced at the runtime interface, not just policy):
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--memory", memory,
+        "--cpus", cpus,
+        "--pids-limit", str(pids_limit),
     ]
-    if ports:
+    if readonly_root:
+        args += ["--read-only"]
+    if publish_port and container_port:
+        mapping = f"127.0.0.1:{int(publish_port)}:{int(container_port)}"
+        args.extend(["-p", mapping])
+    elif ports:
         for mapping in ports:
             if not _safe_port_mapping(mapping):
                 raise DockerOpsError(f"Unsafe port mapping rejected: {mapping}", code="PORT_REJECTED")
@@ -314,6 +337,97 @@ def _safe_env_key(key: str) -> bool:
     if not key or len(key) > 64:
         return False
     return key.replace("_", "").isalnum()
+
+
+def build_image(*, context_dir: str, dockerfile: str, tag: str, timeout: float = 600) -> str:
+    """Build a controlled image; returns the image digest (Id) or tag.
+
+    Purpose-built path (not the generic _run gateway): fixed `docker build`
+    shape, no shell, validated tag/dockerfile args. Only MEDHA-generated
+    Dockerfiles are ever built — never repository Dockerfiles.
+    """
+    if not _safe_image(tag):
+        raise DockerOpsError(f"Unsafe image tag rejected: {tag}", code="IMAGE_REJECTED")
+    if "\n" in dockerfile or "\r" in dockerfile or len(dockerfile) > 500:
+        raise DockerOpsError("Unsafe dockerfile path rejected", code="BUILD_REJECTED")
+    if not docker_cli_available():
+        raise DockerOpsError("Docker CLI not available", code="DOCKER_UNAVAILABLE")
+    import subprocess as _sp
+
+    try:
+        proc = _sp.run(
+            ["docker", "build", "-t", tag, "-f", dockerfile, context_dir],
+            capture_output=True, text=True, timeout=timeout, shell=False, check=False,
+        )
+    except _sp.TimeoutExpired as exc:
+        raise DockerOpsError("Image build timed out", code="BUILD_TIMEOUT") from exc
+    except OSError as exc:
+        raise DockerOpsError(f"Docker CLI error: {exc}", code="OS_ERROR") from exc
+    if proc.returncode != 0:
+        raise DockerOpsError(
+            f"Image build failed: {(proc.stderr or proc.stdout or '').strip()[:1000]}",
+            code="BUILD_FAILED",
+        )
+    inspect = _run(["inspect", "--format", "{{.Id}}", tag], timeout=30, check=False)
+    digest = (inspect.stdout or "").strip() if inspect.returncode == 0 else ""
+    return digest or tag
+
+
+def remove_image(tag: str, *, deployment_id: str) -> bool:
+    """Remove only MEDHA-tagged images for this deployment."""
+    if short_deployment_id(deployment_id) not in tag:
+        logger.warning("Refusing to remove foreign image tag=%s", tag)
+        return False
+    proc = _run(["rmi", "-f", tag], timeout=60, check=False)
+    return proc.returncode == 0
+
+
+def container_logs(name: str, *, tail: int = 500, timeout: float = 15.0) -> dict[str, Any]:
+    """Bounded stdout/stderr retrieval; never raises, never fabricates."""
+    try:
+        tail_n = max(1, min(int(tail), 2000))
+    except (TypeError, ValueError):
+        tail_n = 500
+    try:
+        proc = _run(["logs", "--tail", str(tail_n), name], timeout=timeout, check=False)
+    except DockerOpsError as exc:
+        return {"available": False, "code": exc.code, "stdout": "", "stderr": ""}
+    if proc.returncode != 0:
+        return {"available": False, "code": "LOGS_UNAVAILABLE",
+                "stdout": "", "stderr": (proc.stderr or "").strip()[:500]}
+    # docker logs multiplexes: stdout->stdout, stderr->stderr
+    return {"available": True, "stdout": (proc.stdout or "")[-20000:],
+            "stderr": (proc.stderr or "")[-20000:]}
+
+
+def wait_http_readiness(
+    port: int, *, host: str = "127.0.0.1", path: str = "/",
+    expect_below: int = 500, timeout: float = 60.0,
+    interval: float = 2.0, grace: float = 5.0,
+) -> dict[str, Any]:
+    """Blocking readiness gate: poll until 2xx/3xx/4xx or timeout. Never raises."""
+    import time as _time
+    import urllib.request
+
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return {"status": "failed", "reason": "non_loopback_target"}
+    deadline = _time.monotonic() + max(1.0, timeout)
+    _time.sleep(max(0.0, grace))
+    attempts = 0
+    last_error = ""
+    url = f"http://{host}:{int(port)}{path}"
+    while _time.monotonic() < deadline:
+        attempts += 1
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                code = getattr(resp, "status", 200)
+            if code < expect_below:
+                return {"status": "ready", "http_status": code, "attempts": attempts}
+            last_error = f"http_{code}"
+        except Exception as exc:  # noqa: BLE001 - readiness polling
+            last_error = str(exc)[:150]
+        _time.sleep(interval)
+    return {"status": "timed_out", "reason": last_error[:200], "attempts": attempts}
 
 
 def _run(

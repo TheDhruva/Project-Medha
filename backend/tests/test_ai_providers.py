@@ -236,9 +236,16 @@ async def test_budget_exhaustion_stays_deterministic():
     calls: list = []
     service = AIService(_settings(), client=_client(lambda r: _groq_ok(VALID_SUMMARY), calls))
     budget = AIBudget(max_calls=1)
-    await service.generate_structured(kind="change_summary", payload={}, system="s", budget=budget)
+    first, _ = await service.generate_structured(kind="change_summary", payload={}, system="s", budget=budget)
+    assert first is not None and len(calls) == 1
+    # Same prompt is cache-served without consuming the exhausted budget:
+    # deterministic, no extra provider call. A *different* prompt with an
+    # exhausted budget still falls back to rule_based.
     data, meta = await service.generate_structured(kind="change_summary", payload={}, system="s", budget=budget)
-    assert data is None and meta.outcome == RULE_BASED and len(calls) == 1
+    assert data == first and meta.cached is True and len(calls) == 1
+    other, other_meta = await service.generate_structured(
+        kind="change_summary", payload={"different": True}, system="s", budget=budget)
+    assert other is None and other_meta.failure_category == "budget_exhausted" and len(calls) == 1
 
 
 async def test_assist_helpers_use_budget_and_stay_deterministic_when_disabled():

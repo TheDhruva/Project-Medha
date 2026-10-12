@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
@@ -68,9 +68,23 @@ _ERROR_MAP = {
     response_model=None,
     dependencies=[Depends(require_mutation_token)],
 )
-async def change_impact_analyze(payload: ChangeImpactRequest):
+async def change_impact_analyze(
+    payload: ChangeImpactRequest, request: Request, subject: str = RequireSubject
+):
+    from app.core.config import get_settings
+    from app.core.rate_limit import check_rate_limit, client_ip
+
+    ip = client_ip(request, trusted_proxy=get_settings().trusted_proxy)
+    if not check_rate_limit(
+        f"change-impact:{ip}",
+        limit_per_minute=get_settings().rate_limit_per_minute,
+    ):
+        return _error(429, "RATE_LIMITED", "Too many analysis requests; retry later.")
     try:
-        analysis = analyze_change_impact(
+        import asyncio
+
+        analysis = await asyncio.to_thread(
+            analyze_change_impact,
             repository_url=payload.repository_url,
             base_revision=payload.base_revision,
             target_revision=payload.target_revision,
@@ -81,16 +95,20 @@ async def change_impact_analyze(payload: ChangeImpactRequest):
 
     analysis_generated_at = analysis.generated_at
     if payload.deployment_id:
-        record = repo.get(payload.deployment_id)
-        if record is None:
+        import asyncio
+
+        record = await asyncio.to_thread(repo.get, payload.deployment_id)
+        owner = subject if subject != LOCAL_SUBJECT else None
+        if record is None or (owner is not None and record.owner_sub != owner):
             return _error(
                 404,
                 "NOT_FOUND",
                 f"Deployment '{payload.deployment_id}' was not found.",
             )
         stored = analysis.model_dump(mode="json")
-        repo.save_artifacts(
-            deployment_id=payload.deployment_id,
+        await asyncio.to_thread(
+            repo.save_artifacts,
+            payload.deployment_id,
             change_intel=stored,
             updated_at=utc_now_iso(),
         )
@@ -109,7 +127,9 @@ async def change_impact_analyze(payload: ChangeImpactRequest):
 
 @router.get("/deploy/{deployment_id}/change-impact", response_model=None)
 async def get_change_impact(deployment_id: str, subject: str = RequireSubject):
-    record = repo.get(deployment_id)
+    import asyncio
+
+    record = await asyncio.to_thread(repo.get, deployment_id)
     owner = subject if subject != LOCAL_SUBJECT else None
     if record is None or (owner is not None and record.owner_sub != owner):
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")

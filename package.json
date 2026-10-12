@@ -1,0 +1,17 @@
+{
+  "name": "medha",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MEDHA — Constraint-Negotiating Multi-Agent Architecture for Verifiable DevOps Automation (local dev runner)",
+  "scripts": {
+    "dev": "concurrently -k --kill-others-on-fail --names \"backend,frontend\" --prefix-colors \"blue,magenta\" \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "node scripts/run-backend.mjs",
+    "dev:frontend": "node scripts/ensure-next-manifest.mjs && npm --prefix frontend run dev"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}

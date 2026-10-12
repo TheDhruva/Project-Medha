@@ -191,7 +191,8 @@ def test_cross_owner_approve_rejected(tmp_path, monkeypatch):
                     idempotency_key="test:prp_alice",
                 )
             )
-            # Bob can neither view nor decide Alice's project proposal.
+            # Bob can neither view nor decide Alice's project proposal (uniform
+            # 404 avoids leaking resource existence across owners).
             assert client.get(
                 "/api/proposals/prp_alice", headers={"Authorization": "Bearer token-bob"}
             ).status_code == 404
@@ -199,7 +200,7 @@ def test_cross_owner_approve_rejected(tmp_path, monkeypatch):
                 "/api/proposals/prp_alice/approve", json={},
                 headers={"Authorization": "Bearer token-bob"},
             )
-            assert denied.status_code == 403
+            assert denied.status_code == 404
             assert client.get(
                 "/api/proposals", headers={"Authorization": "Bearer token-bob"}
             ).json()["total"] == 0

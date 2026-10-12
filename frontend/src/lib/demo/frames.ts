@@ -1498,6 +1498,8 @@ export function createIdleSnapshot(): DeploymentSnapshot {
   return {
     deploymentId: null,
     isDemo: true,
+    executionMode: "demo",
+    runtimeLogs: null,
     scenario: null,
     runStatus: "idle",
     explain: {

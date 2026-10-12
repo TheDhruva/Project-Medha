@@ -79,7 +79,10 @@ The backend is one FastAPI process. Logical agents are in-process Python compone
 
 ## Quick start
 
-From the repository root:
+Prerequisites: Python 3.11+, Node.js 18+, npm, Git. Docker Desktop is only
+needed for optional Docker execution tests.
+
+One-time setup from the repository root:
 
 ```powershell
 Copy-Item .env.example .env
@@ -88,18 +91,60 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+cd ..
+
+npm install          # root dev runner (concurrently)
+npm --prefix frontend install
 ```
 
-In a second terminal:
+Start everything with one command from the repository root:
 
 ```powershell
+npm run dev
+```
+
+This starts the FastAPI backend (`127.0.0.1:8000`, autoreload scoped to
+`backend/app`) and the Next.js frontend (`localhost:3000`, Fast Refresh) in
+the same terminal with `[backend]` / `[frontend]` log prefixes. A failing
+child stops the other (`--kill-others-on-fail`); Ctrl+C stops both. The
+backend python resolves to `backend/.venv` automatically, so no manual venv
+activation is needed. No dependencies are reinstalled on startup. On a fresh
+clone (no `frontend/.next`), the first start runs a one-time `next build`
+(~1 minute) to generate the routes manifest that `next dev` needs; later
+starts skip it.
+
+Open [http://localhost:3000](http://localhost:3000): visitors land on a public page with **Try Demo** (registration-free simulated runs at `/demo`, always labelled `DEMO/MOCK`) and **Sign In** (Clerk; authenticated users get a backend-backed project hub at `/`, with projects grouped by repository). The API is available at [http://127.0.0.1:8000](http://127.0.0.1:8000); its health endpoint is `/health`. Local frontend API calls use same-origin rewrites (`/api/*`, `/health` → FastAPI), so no extra proxy setup is needed.
+
+Two-terminal alternative (equivalent, no root runner):
+
+```powershell
+# Terminal 1
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000
+```
+
+```powershell
+# Terminal 2
 cd frontend
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000): visitors land on a public page with **Try Demo** (registration-free simulated runs at `/demo`, always labelled `DEMO/MOCK`) and **Sign In** (Clerk; authenticated users get a backend-backed project hub at `/`, with projects grouped by repository). The API is available at [http://127.0.0.1:8000](http://127.0.0.1:8000); its health endpoint is `/health`.
+Reload and restart notes:
+
+- Editing files under `frontend/src` recompiles in place (Fast Refresh); no restart.
+- Editing files under `backend/app` triggers a backend reload; the frontend keeps running and API/SSE calls resume against the reloaded backend.
+- Full restart (`Ctrl+C`, then `npm run dev` again) is required after `.env` changes, `pip install` / `npm install` changes, or port changes.
+- The reloader watches `backend/app` only — `.venv`, `data/`, caches, and build output are never watched.
+
+Troubleshooting:
+
+- `Port 8000 ... is already in use`: another backend is running (the launcher refuses to start a duplicate). Stop the other process and retry. Same for port `3000` (Next.js reports `EADDRINUSE`); stop the other frontend and retry.
+- Backend exits with Postgres connection errors: the backend follows `MEDHA_DATABASE_URL` from the root `.env` first (`backend/.env` is only a fallback; shell env wins over both). Empty or non-Postgres values mean local SQLite. Clear or fix the URL, then restart.
+- `npm run dev` fails immediately with both processes stopping: read the `[backend]` / `[frontend]` prefixed output — the first error names the failing side.
+- Homepage `/` returns 500 `ENOENT ... routes-manifest.json`: the one-time frontend build did not complete (offline `npm` registry, missing `frontend/.env.local` keys at build time, or a deleted `frontend/.next`). Run `npm --prefix frontend run build` once, then retry `npm run dev`. Rewrites (`/health`, `/api/*`) keep working while this is broken, so use them to tell this apart from a backend outage.
+- Sign-in loops or Clerk errors locally: `frontend/.env.local` (untracked) must define the Clerk publishable/secret keys; the homepage and demo run without them.
 
 ## Configuration
 

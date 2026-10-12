@@ -13,7 +13,11 @@ const toneClass = {
 
 export function LiveSystemTrace() {
   const { form, snapshot, viewMode } = useDeployment();
-  const events = [...snapshot.trace].reverse();
+  // Render window: newest 200 only. Full history (≤500 in state, more via
+  // REST logs) stays accessible; mounting thousands of <li> per SSE event
+  // was the dominant rerender cost.
+  const events = snapshot.trace.slice(-200).reverse();
+  const truncated = snapshot.trace.length > 200;
   const source = runSourceLabel(form.mode, snapshot.isDemo);
 
   return (
@@ -32,7 +36,13 @@ export function LiveSystemTrace() {
           No events yet. Start a deployment to stream the {source} timeline.
         </p>
       ) : (
-        <ol className="space-y-0 overflow-y-auto pr-1">
+        <>
+          {truncated ? (
+            <p className="mb-2 text-[11px] text-medha-tertiary">
+              Showing latest 200 of {snapshot.trace.length} events. Full history via run logs.
+            </p>
+          ) : null}
+          <ol className="space-y-0 overflow-y-auto pr-1">
           {events.map((event, index) => (
             <li
               key={event.id}
@@ -65,7 +75,8 @@ export function LiveSystemTrace() {
               ) : null}
             </li>
           ))}
-        </ol>
+          </ol>
+        </>
       )}
     </section>
   );

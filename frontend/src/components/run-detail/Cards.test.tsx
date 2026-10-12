@@ -6,6 +6,7 @@ import type { DeploymentSnapshot } from "@/lib/demo/types";
 
 vi.mock("@/components/ui/Section", () => ({
   EnvBadge: ({ isDemo }: { isDemo: boolean }) => <span>{isDemo ? "DEMO" : "LIVE"}</span>,
+  ExecutionModeBadge: ({ mode }: { mode: string | null }) => <span>{mode ?? "UNKNOWN"}</span>,
   Section: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Collapsible: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   StatusBadge: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,

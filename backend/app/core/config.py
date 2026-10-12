@@ -8,6 +8,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BACKEND_ROOT.parent
+# Repository root: the canonical local `.env` lives here (see README
+# quick start and .env.example). backend/.env remains as a fallback so
+# direct `uvicorn` runs behave like `npm run dev` (root wins; later
+# env_file entries override earlier ones; shell env wins over both).
+REPO_ROOT = PROJECT_ROOT.parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "medha.db"
 
 
@@ -15,7 +20,7 @@ class Settings(BaseSettings):
     """Local configuration for MEDHA. Deterministic, local-first, no API keys."""
 
     model_config = SettingsConfigDict(
-        env_file=str(PROJECT_ROOT / ".env"),
+        env_file=(str(PROJECT_ROOT / ".env"), str(REPO_ROOT / ".env")),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -68,6 +73,53 @@ class Settings(BaseSettings):
     github_webhook_secret: str = Field(default="", alias="GITHUB_WEBHOOK_SECRET")
     webhook_allowed_repos: str = Field(default="", alias="MEDHA_WEBHOOK_ALLOWED_REPOS")
     webhook_branches: str = Field(default="main", alias="MEDHA_WEBHOOK_BRANCHES")
+
+    # --- GitHub App (private-repo support; server-only, never persisted in plaintext) ---
+    github_app_id: str = Field(default="", alias="GITHUB_APP_ID")
+    github_app_private_key: str = Field(default="", alias="GITHUB_APP_PRIVATE_KEY")
+    github_app_installation_id: str = Field(default="", alias="GITHUB_APP_INSTALLATION_ID")
+
+    # --- Abuse protection ---
+    rate_limit_per_minute: int = Field(default=60, alias="MEDHA_RATE_LIMIT_PER_MINUTE")
+    trusted_proxy: str = Field(default="", alias="MEDHA_TRUSTED_PROXY")
+
+    # --- Isolated real-execution builder/runtime ---
+    real_readiness_timeout_seconds: float = Field(
+        default=90.0, alias="MEDHA_REAL_READINESS_TIMEOUT_SECONDS"
+    )
+    real_build_timeout_seconds: float = Field(
+        default=600.0, alias="MEDHA_REAL_BUILD_TIMEOUT_SECONDS"
+    )
+
+    def hosted_security_error(self) -> str | None:
+        """Fail-closed check for publicly reachable production services."""
+        if (self.medha_env or "").strip().lower() != "production":
+            return None
+        if (self.auth_mode or "off").strip().lower() != "clerk":
+            return "MEDHA_AUTH_MODE must be 'clerk' in production."
+        if not (self.clerk_domain or self.clerk_jwks_url or "").strip():
+            return "CLERK_DOMAIN or CLERK_JWKS_URL must be configured in production."
+        if not (self.api_token or "").strip():
+            return "MEDHA_API_TOKEN must be configured in production."
+        if not (self.database_url or "").strip():
+            return "MEDHA_DATABASE_URL (pooled Postgres) must be configured in production."
+        if (self.executor_mode or "auto").strip().lower() in {"real", "docker"}:
+            return (
+                "MEDHA_EXECUTOR_MODE must not be 'real'/'docker' on the hosted "
+                "control plane (simulator-only). Run the isolated builder separately."
+            )
+        return None
+
+    def real_execution_error(self) -> str | None:
+        """Fail-closed validation for explicitly requested real execution."""
+        mode = (self.executor_mode or "auto").strip().lower()
+        if mode not in {"real", "docker"} or not self.docker_execute:
+            return None  # real execution not requested — nothing to validate
+        if (self.medha_env or "").strip().lower() == "production":
+            return "Real execution is disabled on the hosted control plane."
+        if self.real_readiness_timeout_seconds <= 0 or self.real_build_timeout_seconds <= 0:
+            return "Real-execution timeouts must be positive."
+        return None
 
     @property
     def cors_origins(self) -> list[str]:

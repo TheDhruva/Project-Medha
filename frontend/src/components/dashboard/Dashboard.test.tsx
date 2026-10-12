@@ -8,8 +8,23 @@ vi.mock("@/lib/api/client", async (importOriginal) => {
   return { ...original, fetchRunsList: vi.fn() };
 });
 
+// Dashboard reads live deployment state via context (same pattern as
+// StartVerificationFlow.test.tsx): provide the real idle snapshot the
+// provider guarantees, so the overview renders deterministically.
+const { mockDeployment } = vi.hoisted(() => ({ mockDeployment: vi.fn() }));
+
+vi.mock("@/context/DeploymentContext", async (importOriginal) => {
+  const { createIdleSnapshot } = await import("@/lib/demo/frames");
+  return {
+    DeploymentProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+    useOptionalDeployment: () => mockDeployment(),
+    useDeployment: () => ({ snapshot: createIdleSnapshot() }),
+  };
+});
+
 describe("Overview", () => {
   beforeEach(() => {
+    mockDeployment.mockReturnValue(null);
     vi.mocked(fetchRunsList).mockResolvedValue({
       runs: [],
       total: 0,
@@ -19,31 +34,36 @@ describe("Overview", () => {
     });
   });
 
-  it("explains Medha in plain language with a primary action", () => {
+  it("explains the project in plain language with its live mode badge", () => {
     render(<Dashboard />);
-    expect(screen.getByRole("heading", { name: "MEDHA" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Deploy infrastructure changes with confidence."),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Start verification/ })).toHaveAttribute(
-      "href",
-      "/verify",
-    );
+    expect(screen.getByRole("heading", { name: "My Project" })).toBeInTheDocument();
+    expect(screen.getByText(/Repository on /)).toBeInTheDocument();
+    // Idle (non-demo) state is labelled honestly as local execution.
+    expect(screen.getByText("LIVE · LOCAL")).toBeInTheDocument();
+    expect(screen.queryByText(/DEMO · SIMULATED/)).not.toBeInTheDocument();
   });
 
-  it("shows the four-step flow without technical jargon by default", () => {
+  it("labels demo execution distinctly with its primary new-run action", () => {
+    mockDeployment.mockReturnValue({
+      form: { mode: "demo", repositoryUrl: "https://github.com/atlas-labs/atlas-commerce", baseRevision: "main" },
+    });
     render(<Dashboard />);
-    for (const step of ["Analyze", "Resolve", "Verify", "Deploy"]) {
-      expect(screen.getAllByText(step).length).toBeGreaterThan(0);
+    expect(screen.getByText("DEMO · SIMULATED")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New run" })).toBeInTheDocument();
+  });
+
+  it("shows the pipeline stages without protocol jargon by default", async () => {
+    render(<Dashboard />);
+    // Plain-language stage panels are visible. The execution graph is
+    // lazy-loaded (dynamic import), so its heading resolves asynchronously.
+    for (const panel of ["CONSTRAINT NEGOTIATION", "VERIFICATION"]) {
+      expect(screen.getByRole("heading", { name: panel })).toBeInTheDocument();
     }
-    // Global navigation (Verify, Runs, …) lives in AppShell's sidebar, not in
-    // this legacy panel — the primary entry point stays on the /verify route.
-    expect(screen.getByRole("link", { name: /Start verification/ })).toHaveAttribute(
-      "href",
-      "/verify",
-    );
+    expect(
+      await screen.findByRole("heading", { name: "CAUSAL EXECUTION GRAPH" }),
+    ).toBeInTheDocument();
+    // Protocol-level jargon stays out of the default overview.
     expect(screen.queryByText(/Constraint Negotiation Protocol/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Causal Execution Graph/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Change Impact Graph/)).not.toBeInTheDocument();
   });
 });

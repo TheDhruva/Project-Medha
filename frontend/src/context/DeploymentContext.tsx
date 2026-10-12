@@ -12,10 +12,11 @@ import {
 } from "react";
 import {
   ApiError,
+  clearApiCache,
   createDeployment,
   fetchDeployment,
   fetchRunHydration,
-  subscribeDeploymentEvents,
+  subscribeDeploymentEventsShared,
   type BackendSystemEvent,
   type EventSubscription,
 } from "@/lib/api/client";
@@ -105,13 +106,19 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
     (deploymentId: string) => {
       closeStream();
       seenEventsRef.current = new Set();
-      const subscription = subscribeDeploymentEvents(deploymentId, {
+      const subscription = subscribeDeploymentEventsShared(deploymentId, {
         onEvent: (event: BackendSystemEvent) => {
           if (seenEventsRef.current.has(event.event_id)) return;
           seenEventsRef.current.add(event.event_id);
+          // Bound dedup memory for very long runs (see client MAX_SEEN).
+          if (seenEventsRef.current.size > 5000) {
+            const first = seenEventsRef.current.values().next().value;
+            if (first) seenEventsRef.current.delete(first);
+          }
           setSnapshot((prev) => applyBackendEvent(prev, event));
         },
         onTerminal: () => {
+          clearApiCache(`/api/deploy/${deploymentId}`);
           closeStream();
         },
         onError: (message: string) => {
@@ -309,6 +316,8 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
           buildBackendSnapshot({
             api,
             logs: hydrate.logs,
+            executionMode: hydrate.executionMode,
+            runtimeLogs: hydrate.runtimeLogs,
             constraints,
             negotiation,
             verification,

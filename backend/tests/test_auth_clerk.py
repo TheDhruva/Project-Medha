@@ -188,6 +188,8 @@ def test_user_id_from_body_not_trusted(clerk_client):
 
 
 def test_missing_production_auth_config_fails_closed(tmp_path, monkeypatch):
+    import pytest
+
     monkeypatch.setenv("MEDHA_DATABASE_PATH", str(tmp_path / "test_prod.db"))
     monkeypatch.setenv("MEDHA_DATABASE_URL", "")
     monkeypatch.setenv("MEDHA_CORS_ORIGINS", "http://localhost:3000")
@@ -199,9 +201,10 @@ def test_missing_production_auth_config_fails_closed(tmp_path, monkeypatch):
     get_settings.cache_clear()
     init_db(tmp_path / "test_prod.db")
     try:
-        with TestClient(create_app()) as client:
-            response = client.get("/api/deploys", headers=_auth("token-alice"))
-            assert response.status_code == 503
+        # Phase 2: missing Clerk JWKS config refuses hosted startup entirely.
+        with pytest.raises(RuntimeError, match="Refusing to start hosted production"):
+            with TestClient(create_app()):
+                pass
     finally:
         get_settings.cache_clear()
         clerk_auth.clear_jwks_cache()

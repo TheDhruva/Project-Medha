@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CausalExecutionGraph } from "@/components/graph/CausalExecutionGraph";
+import dynamic from "next/dynamic";
+// Heavy graph lib (ReactFlow) loads only when the dashboard graph section
+// renders — never on unrelated routes or initial paint.
+const CausalExecutionGraph = dynamic(
+  () => import("@/components/graph/CausalExecutionGraph").then((m) => m.CausalExecutionGraph),
+  { ssr: false, loading: () => null },
+);
 import { VerificationPanel } from "@/components/verification/VerificationPanel";
 import { ConstraintNegotiation } from "@/components/constraints/ConstraintNegotiation";
 import { Badge } from "@/components/ui/primitives";

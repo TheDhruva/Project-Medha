@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import type { DeploymentSnapshot } from "@/lib/demo/types";
 import { getDecision, getJourney } from "@/lib/run/decision";
-import { EnvBadge } from "@/components/ui/Section";
+import { EnvBadge, ExecutionModeBadge } from "@/components/ui/Section";
 import { cn } from "@/lib/ui/cn";
 
 export function DecisionCard({
@@ -73,7 +73,10 @@ export function DecisionCard({
             )}
           </div>
         </div>
-        <EnvBadge isDemo={snapshot.isDemo} />
+        <div className="flex items-center gap-2">
+          <EnvBadge isDemo={snapshot.isDemo} />
+          <ExecutionModeBadge mode={snapshot.executionMode} />
+        </div>
       </div>
       <p className="mt-3 max-w-2xl text-sm leading-relaxed text-medha-secondary">
         {decision.body}

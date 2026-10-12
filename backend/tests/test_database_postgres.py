@@ -115,12 +115,16 @@ def test_describe_db_redacts_postgres_password(monkeypatch) -> None:
 
 
 def _configured_live_url() -> str | None:
-    """Live URL from shell env or local backend/.env (whatever configured it)."""
+    """Live URL from shell env or local backend/.env (whatever configured it).
+
+    Placeholders and non-Postgres values (e.g. an unset template) count as
+    unconfigured — the live test skips instead of failing on them.
+    """
     shell = os.environ.get("MEDHA_DATABASE_URL", "").strip()
     if shell:
-        return shell
+        return shell if is_postgres_dsn(shell) else None
     file_url = get_settings().database_url.strip()
-    return file_url or None
+    return file_url if file_url and is_postgres_dsn(file_url) else None
 
 
 def test_live_postgres_roundtrip() -> None:

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clearApiCache,
   decideProposal,
   fetchAiStatus,
   fetchDeployment,
@@ -53,6 +54,7 @@ function authOf(call: SeenCall): string | null {
 afterEach(() => {
   vi.unstubAllGlobals();
   registerAuthTokenGetter(null);
+  clearApiCache();
 });
 
 describe("shared API client auth", () => {
@@ -118,7 +120,7 @@ describe("shared API client auth", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     sub.close();
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.url).toMatch(/\/api\/deploy\/dep_1\/events$/);
+    expect(calls[0]?.url).toMatch(/\/api\/deploy\/dep_1\/events(\?.*)?$/);
     expect(authOf(calls[0]!)).toBe("Bearer sess_test_jwt");
   });
 

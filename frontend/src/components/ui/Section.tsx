@@ -104,8 +104,7 @@ export function Collapsible({
   );
 }
 
-export function EnvBadge({ isDemo, size = "md" }: { isDemo: boolean; size?: "sm" | "md" }) {
-  return (
+export function EnvBadge({ isDemo, size = "md" }: { isDemo: boolean; size?: "sm" | "md" }) {  return (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border font-semibold",
@@ -121,6 +120,58 @@ export function EnvBadge({ isDemo, size = "md" }: { isDemo: boolean; size?: "sm"
         aria-hidden
       />
       {isDemo ? "DEMO" : "LIVE"}
+    </span>
+  );
+}
+
+/**
+ * How the run actually executed, from GET /logs `execution_mode`.
+ * Distinct from EnvBadge (demo-data vs backend-data): a non-demo run may
+ * still be simulated. Renders nothing when the mode is unknown.
+ */
+export function ExecutionModeBadge({
+  mode,
+  size = "md",
+}: {
+  mode: string | null | undefined;
+  size?: "sm" | "md";
+}) {
+  const label =
+    mode === "real"
+      ? "REAL"
+      : mode === "controlled_test"
+        ? "CONTROLLED TEST"
+        : mode === "simulator"
+          ? "SIMULATED"
+          : mode === "demo"
+            ? "DEMO"
+            : null;
+  if (!label) return null;
+  const hot = mode === "real";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border font-semibold",
+        size === "sm" ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
+        hot
+          ? "border-medha-success/30 bg-medha-success-soft text-medha-success"
+          : "border-medha-border bg-medha-muted text-medha-secondary",
+      )}
+      title={
+        mode === "real"
+          ? "Built and ran in the isolated runtime with a blocking readiness gate"
+          : mode === "controlled_test"
+            ? "Controlled local execution (BusyBox), not a full application build"
+            : mode === "simulator"
+              ? "Deterministic simulation — no containers were started"
+              : "Deterministic demo fixture"
+      }
+    >
+      <span
+        className={cn("status-dot", hot ? "bg-medha-success" : "bg-medha-tertiary")}
+        aria-hidden
+      />
+      {label}
     </span>
   );
 }

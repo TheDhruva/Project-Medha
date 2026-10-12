@@ -28,7 +28,14 @@ class EventBus:
         queue: asyncio.Queue[SystemEvent] = asyncio.Queue(maxsize=256)
         async with self._lock:
             self._subscribers[deployment_id].add(queue)
+        from app.core.perf import bump
+
+        bump("sse.subscribe")
         return queue
+
+    def subscriber_count(self, deployment_id: str | None = None) -> int:
+        subs = self._subscribers.get(deployment_id, set()) if deployment_id else set().union(*self._subscribers.values()) if self._subscribers else set()
+        return len(subs)
 
     async def unsubscribe(self, deployment_id: str, queue: asyncio.Queue[SystemEvent]) -> None:
         async with self._lock:
@@ -42,10 +49,14 @@ class EventBus:
     async def publish(self, event: SystemEvent) -> None:
         async with self._lock:
             subscribers = list(self._subscribers.get(event.deployment_id, set()))
+        from app.core.perf import bump
+
+        bump("sse.published")
         for queue in subscribers:
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
+                bump("sse.dropped")
                 logger.warning(
                     "Dropping event for slow SSE subscriber deployment_id=%s type=%s",
                     event.deployment_id,

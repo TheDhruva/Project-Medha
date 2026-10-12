@@ -89,12 +89,13 @@ def test_evaluation_and_change_impact_posts_guarded(authed_client):
 
 
 def test_production_without_token_fails_closed(authed_client):
-    with authed_client(MEDHA_ENV="production") as client:
-        resp = client.post("/api/deploy", json=_demo_payload())
-        assert resp.status_code == 503
-        assert resp.json()["detail"]["code"] == "API_TOKEN_NOT_CONFIGURED"
-        # Reads stay open: health + deployment reads are not mutating routes.
-        assert client.get("/health").status_code == 200
+    # Phase 2: hosted production with incomplete security config refuses to
+    # start (fail closed at startup, not just per-route 503).
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Refusing to start hosted production"):
+        with authed_client(MEDHA_ENV="production"):
+            pass
 
 
 def test_production_pins_simulator_executor(monkeypatch):

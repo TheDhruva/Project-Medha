@@ -135,6 +135,13 @@ async def github_webhook(request: Request):
         )
     body = await request.body()
     signature = request.headers.get("x-hub-signature-256", "")
+    from app.core.rate_limit import check_rate_limit, client_ip
+
+    ip = client_ip(request, trusted_proxy=get_settings().trusted_proxy)
+    if not check_rate_limit(
+        f"webhook:{ip}", limit_per_minute=get_settings().rate_limit_per_minute
+    ):
+        return _error(429, "RATE_LIMITED", "Too many webhook deliveries; retry later.")
     if not verify_github_signature(body, signature, secret):
         return _error(401, "INVALID_SIGNATURE", "Webhook signature verification failed.")
     delivery_id = request.headers.get("x-github-delivery", "").strip()
@@ -425,7 +432,7 @@ def _may_view(proposal: ProposalRecord, subject: str) -> bool:
         if project is None:
             return False
         return project.owner_sub == subject
-    return proposal.created_by in (None, subject, "webhook:github")
+    return proposal.created_by in (None, subject)
 
 
 def _may_decide(proposal: ProposalRecord, subject: str) -> bool:
@@ -438,7 +445,7 @@ def _may_decide(proposal: ProposalRecord, subject: str) -> bool:
         if project is None or project.connection_status == "disconnected":
             return False
         return project.owner_sub == subject
-    return proposal.created_by in (None, "webhook:github", subject)
+    return proposal.created_by in (None, subject)
 
 
 class DecisionBody(BaseModel):
@@ -454,7 +461,7 @@ async def approve_proposal(proposal_id: str, body: DecisionBody, subject: str = 
     if proposal is None:
         return _error(404, "NOT_FOUND", f"Proposal '{proposal_id}' was not found.")
     if not _may_decide(proposal, subject):
-        return _error(403, "FORBIDDEN", "Only the project owner can approve it.")
+        return _error(404, "NOT_FOUND", f"Proposal '{proposal_id}' was not found.")
     if proposal.status in (
         ProposalStatus.APPROVED.value,
         ProposalStatus.EXECUTING.value,
@@ -533,7 +540,7 @@ async def reject_proposal(proposal_id: str, body: DecisionBody, subject: str = R
     if proposal is None:
         return _error(404, "NOT_FOUND", f"Proposal '{proposal_id}' was not found.")
     if not _may_decide(proposal, subject):
-        return _error(403, "FORBIDDEN", "Only the project owner can reject it.")
+        return _error(404, "NOT_FOUND", f"Proposal '{proposal_id}' was not found.")
     if proposal.status != ProposalStatus.READY.value:
         return _error(
             409, "PROPOSAL_NOT_READY",

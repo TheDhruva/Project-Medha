@@ -10,10 +10,27 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
+# Bounded health-result cache: expensive dependency pings (fresh TCP/TLS
+# for Postgres) are cached for 5s so scrapes don't open a connection each
+# time. Liveness (process up, config valid) is never cached — only the DB
+# reachability bit. A real outage flips to degraded within 5s.
+_health_cache: dict[str, object] = {"ok": True, "at": 0.0}
+_HEALTH_TTL_S = 5.0
+
 
 @router.get("/health")
 async def health() -> dict:
-    db_ok = ping_db()
+    import asyncio
+    import time as _time
+
+    now = _time.monotonic()
+    cached_at = float(_health_cache.get("at") or 0.0)
+    if now - cached_at < _HEALTH_TTL_S:
+        db_ok = bool(_health_cache.get("ok"))
+    else:
+        db_ok = await asyncio.to_thread(ping_db)
+        _health_cache["ok"] = db_ok
+        _health_cache["at"] = now
     settings = get_settings()
     backend = "postgres" if settings.use_postgres else "sqlite"
     if (settings.medha_env or "").strip().lower() == "production" and backend == "sqlite":

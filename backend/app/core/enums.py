@@ -75,6 +75,7 @@ class EventType(str, Enum):
     PROPOSAL_READY = "proposal.ready"
     DEPLOYMENT_COMPLETED = "deployment.completed"
     DEPLOYMENT_FAILED = "deployment.failed"
+    DEPLOYMENT_CANCELLED = "deployment.cancelled"
 
 
 class ProposalStatus(str, Enum):
@@ -97,6 +98,7 @@ TERMINAL_EVENT_TYPES = frozenset(
     {
         EventType.DEPLOYMENT_COMPLETED.value,
         EventType.DEPLOYMENT_FAILED.value,
+        EventType.DEPLOYMENT_CANCELLED.value,
         EventType.PROPOSAL_READY.value,
     }
 )

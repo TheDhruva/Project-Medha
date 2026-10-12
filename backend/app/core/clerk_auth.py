@@ -158,12 +158,18 @@ async def require_subject(request: Request) -> str:
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         raise _unauthorized()
-    claims = verify_clerk_token(token.strip())
+    import asyncio
+
+    # verify_clerk_token does sync JWKS HTTP (httpx.get, 10s timeout) and
+    # RSA verify — must not block the event loop per request.
+    claims = await asyncio.to_thread(verify_clerk_token, token.strip())
     subject = str(claims["sub"])
     try:
         from app.core.events import utc_now_iso
 
-        AccountRepository().upsert_user(subject, seen_at=utc_now_iso())
+        repo = AccountRepository()
+        seen_at = utc_now_iso()
+        await asyncio.to_thread(repo.upsert_user, subject, seen_at=seen_at)
     except Exception as exc:  # noqa: BLE001 - audit write must not open the gate
         logger.warning("User upsert failed: %s", type(exc).__name__)
     return subject

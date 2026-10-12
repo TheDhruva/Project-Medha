@@ -36,14 +36,20 @@ logger = get_logger(__name__)
 PHASE_LABEL = "10-11"
 
 
-def _canonical_plan(exec_plan: Any) -> dict[str, Any]:
-    """Stable, serializable plan snapshot for hashing and proposals."""
+def _canonical_plan(exec_plan: Any, *, repository_url: str | None = None, target_sha: str | None = None) -> dict[str, Any]:
+    """Stable, serializable plan snapshot for hashing and proposals.
+
+    Phase 2: binds repository identity + resolved source SHA into the plan
+    identity so branch-tip movement is detected as STALE on retry/approve.
+    """
     try:
         data = exec_plan.model_dump(mode="json")
     except Exception:  # noqa: BLE001 - hash must never break execution
         data = {}
     return {
         "deployment_id": getattr(exec_plan, "deployment_id", None),
+        "repository_url": repository_url,
+        "target_sha": target_sha,
         "services": data.get("services", []),
         "actions": data.get("actions", []),
         "dependencies": data.get("dependencies", {}),
@@ -120,7 +126,9 @@ class PlanningPipeline:
         proposal_id: str | None = None,
     ) -> None:
         settings = get_settings()
-        delay = settings.workflow_step_delay_seconds
+        # Real pipeline never paces for presentation: DemoRunner keeps its
+        # own pacing for demo readability; sleeps here only slowed runs.
+        delay = 0.0
         record = self.repo.get(deployment_id)
         if record is None:
             logger.error("PlanningPipeline missing deployment_id=%s", deployment_id)
@@ -138,6 +146,19 @@ class PlanningPipeline:
             return
 
         pipeline_t0 = time.perf_counter()
+        # One shared HTTP client for all AI assists in this run (keep-alive
+        # reuse instead of a new TCP/TLS pool per assist). Closed in finally.
+        try:
+            import httpx as _httpx
+
+            _ai_client = _httpx.AsyncClient(timeout=_httpx.Timeout(connect=5.0))
+        except Exception:  # noqa: BLE001 - AI degrades to rule_based without it
+            _ai_client = None
+        if _ai_client is not None:
+            try:
+                ai_ctx["service"]._client = _ai_client
+            except Exception:  # noqa: BLE001 - advisory only
+                pass
         try:
             await self._emit(
                 deployment_id,
@@ -170,6 +191,91 @@ class PlanningPipeline:
 
             await self._stage(deployment_id, StageId.PREFLIGHT, "completed", delay)
 
+            # Source identity: resolve the requested ref (branch/tag/SHA) to an
+            # immutable commit SHA before anything else. Fail closed when the
+            # ref cannot be resolved to exactly one commit.
+            from app.services.git_service import GitAcquireError as _GAE
+            from app.services.git_service import resolve_ref_to_sha
+            from app.services.github_app import GitHubAppError as _GHE
+            from app.services.github_app import prepare_private_access
+
+            # Private GitHub access: mint a short-lived installation token
+            # scoped to the requested repo (empty env = public/anonymous path).
+            # The token lives only in this run's memory — never persisted,
+            # logged, or embedded in URLs.
+            try:
+                git_auth_env = await asyncio.to_thread(
+                    prepare_private_access, record.repository_url
+                )
+            except _GHE as exc:
+                await self._fail(
+                    deployment_id,
+                    f"Private repository access failed: {exc.message}",
+                    technical=f"github.{exc.code}",
+                )
+                return
+
+            requested_ref = record.target_revision
+            resolved_sha: str | None = None
+            if requested_ref:
+                exact = _exact_sha_or_none(requested_ref)
+                if exact:
+                    resolved_sha = exact
+                else:
+                    try:
+                        resolved_sha = await asyncio.to_thread(
+                            resolve_ref_to_sha,
+                            record.repository_url,
+                            requested_ref,
+                            env=git_auth_env or None,
+                        )
+                    except _GAE as exc:
+                        from app.services.workspace import resolve_local_repo_path as _local
+
+                        if _local(record.repository_url) is not None:
+                            # Single-operator local workflow: the checkout is the
+                            # operator's own files, not a moving remote tip.
+                            # Continue unpinned but say so explicitly.
+                            await self._emit(
+                                deployment_id,
+                                EventType.SYSTEM_MESSAGE,
+                                f"Source ref '{requested_ref}' is not a git ref; "
+                                "analyzing the working copy without commit binding.",
+                                stage=StageId.ANALYZE.value,
+                                level="warning",
+                                metadata={
+                                    "simple": "No commit binding for this local source.",
+                                    "technical": (
+                                        f"requested_ref={requested_ref} · "
+                                        f"resolved_sha=None · code={exc.code}"
+                                    ),
+                                    "requested_ref": requested_ref,
+                                    "resolved_sha": None,
+                                },
+                            )
+                        else:
+                            await self._fail(
+                                deployment_id,
+                                f"Cannot resolve source ref '{requested_ref}': {exc.message}",
+                                technical=f"git.{exc.code}",
+                            )
+                            return
+                if resolved_sha:
+                    await self._emit(
+                        deployment_id,
+                        EventType.SYSTEM_MESSAGE,
+                        f"Source pinned to commit {resolved_sha[:12]}.",
+                        stage=StageId.ANALYZE.value,
+                        metadata={
+                            "simple": "MEDHA pinned the requested revision to an immutable commit.",
+                            "technical": (
+                                f"requested_ref={requested_ref} · resolved_sha={resolved_sha}"
+                            ),
+                            "requested_ref": requested_ref,
+                            "resolved_sha": resolved_sha,
+                        },
+                    )
+
             # ANALYZE
             self._status(
                 deployment_id,
@@ -179,40 +285,54 @@ class PlanningPipeline:
                 "workflow=planning · stage=ANALYZE",
             )
             await self._stage(deployment_id, StageId.ANALYZE, "started", 0)
-            ref_sha = _exact_sha_or_none(record.target_revision)
-            acquisition = acquire_repository(
-                deployment_id, record.repository_url, ref_sha=ref_sha
-            )
+            ref_sha = resolved_sha
+            from app.core.perf import stage as _stage_timer
+
+            with _stage_timer("acquire", deployment_id=deployment_id):
+                acquisition = await asyncio.to_thread(
+                    acquire_repository,
+                    deployment_id,
+                    record.repository_url,
+                    ref_sha=ref_sha,
+                    token_env=git_auth_env or None,
+                )
             if ref_sha and acquisition.checked_sha != ref_sha:
                 # Defense in depth: acquire_repository already asserts this.
                 raise RuntimeError(
                     "SHA_MISMATCH: checked-out commit does not match the requested SHA."
                 )
-            profile, analysis = analyze_repository(
-                deployment_id=deployment_id,
-                repository_url=record.repository_url,
-                workspace_path=acquisition.path,
-                target_host=record.target_host,
-                target_port=record.target_port,
-                intent=record.intent,
-            )
+            with _stage_timer("analyze", deployment_id=deployment_id):
+                profile, analysis = await asyncio.to_thread(
+                    analyze_repository,
+                    deployment_id=deployment_id,
+                    repository_url=record.repository_url,
+                    workspace_path=acquisition.path,
+                    target_host=record.target_host,
+                    target_port=record.target_port,
+                    intent=record.intent,
+                )
             await self._agent_events(deployment_id, "analyzer", analysis.summary, delay)
             change_intel = await self._run_change_intel(
                 deployment_id, record, settings, delay
             )
-            await self._ai_assist(
-                deployment_id,
-                "change_summary",
-                {"change": self._fresh_change_intel(deployment_id)},
-                ai_ctx,
-                stage=StageId.ANALYZE.value,
-            )
-            await self._ai_assist(
-                deployment_id,
-                "repo_interpretation",
-                {"profile": self._dump_profile(profile)},
-                ai_ctx,
-                stage=StageId.ANALYZE.value,
+            # change_summary and repo_interpretation are independent payloads
+            # (shared budget + semaphore bound them safely) — overlap them.
+            # _ai_assist never raises, so gather is latency-only.
+            await asyncio.gather(
+                self._ai_assist(
+                    deployment_id,
+                    "change_summary",
+                    {"change": self._fresh_change_intel(deployment_id)},
+                    ai_ctx,
+                    stage=StageId.ANALYZE.value,
+                ),
+                self._ai_assist(
+                    deployment_id,
+                    "repo_interpretation",
+                    {"profile": self._dump_profile(profile)},
+                    ai_ctx,
+                    stage=StageId.ANALYZE.value,
+                ),
             )
             await self._emit(
                 deployment_id,
@@ -291,9 +411,14 @@ class PlanningPipeline:
             )
             await self._stage(deployment_id, StageId.AGENTS, "started", 0)
 
-            docker_res = run_docker_agent(profile)
-            nginx_res = run_nginx_agent(profile)
-            security_res = run_security_agent(profile)
+            # Independent pure functions over the same immutable profile:
+            # bounded concurrency, deterministic aggregation order preserved.
+            # Each runs in a worker thread (sync CPU/file work off the loop).
+            docker_res, nginx_res, security_res = await asyncio.gather(
+                asyncio.to_thread(run_docker_agent, profile),
+                asyncio.to_thread(run_nginx_agent, profile),
+                asyncio.to_thread(run_security_agent, profile),
+            )
             agent_results = [preflight, analysis, docker_res, nginx_res, security_res]
 
             all_constraints = [
@@ -507,6 +632,9 @@ class PlanningPipeline:
                 expected_plan_hash=expected_plan_hash,
                 proposal_id=proposal_id,
                 ai_ctx=ai_ctx,
+                acquisition=acquisition,
+                requested_ref=requested_ref,
+                resolved_sha=resolved_sha,
             )
             logger.info(
                 "Planning+execution pipeline completed deployment_id=%s duration=%.2fs",
@@ -520,6 +648,14 @@ class PlanningPipeline:
             await self._fail(deployment_id, str(exc), technical=type(exc).__name__)
         finally:
             release_real_deploy(deployment_id)
+            try:
+                service = ai_ctx.get("service") if ai_ctx else None
+                client = getattr(service, "_client", None)
+                if client is not None:
+                    await client.aclose()
+                    service._client = None
+            except Exception:  # noqa: BLE001 - shutdown must never raise
+                pass
             try:
                 if get_settings().docker_execute and get_settings().docker_cleanup:
                     docker_ops.cleanup_deployment(deployment_id)
@@ -624,13 +760,16 @@ class PlanningPipeline:
         try:
             from app.changeintel.engine import analyze_change_impact
             from app.changeintel.git_extract import ChangeIntelError
+            from app.core.perf import stage as _stage_timer
 
-            info = analyze_change_impact(
-                repository_url=record.repository_url,
-                base_revision=record.base_revision,
-                target_revision=record.target_revision,
-                deployment_id=deployment_id,
-            )
+            with _stage_timer("change_intel", deployment_id=deployment_id):
+                info = await asyncio.to_thread(
+                    analyze_change_impact,
+                    repository_url=record.repository_url,
+                    base_revision=record.base_revision,
+                    target_revision=record.target_revision,
+                    deployment_id=deployment_id,
+                )
         except ChangeIntelError as exc:
             await self._emit(
                 deployment_id,
@@ -733,7 +872,8 @@ class PlanningPipeline:
             )
             return None
         try:
-            info = analyze_push_checkout(
+            info = await asyncio.to_thread(
+                analyze_push_checkout,
                 repository_url=record.repository_url,
                 base_sha=record.base_revision,
                 target_sha=target_sha,
@@ -793,6 +933,9 @@ class PlanningPipeline:
         expected_plan_hash: str | None = None,
         proposal_id: str | None = None,
         ai_ctx: dict | None = None,
+        acquisition=None,
+        requested_ref: str | None = None,
+        resolved_sha: str | None = None,
     ) -> None:
         settings = get_settings()
         max_rounds = settings.max_verify_rounds
@@ -1193,7 +1336,16 @@ class PlanningPipeline:
         )
         self.repo.save_artifacts(deployment_id, graph=ceg.to_ui(), updated_at=utc_now_iso())
 
-        canonical_plan = _canonical_plan(exec_plan)
+        _sha_record = self.repo.get(deployment_id)
+        canonical_plan = _canonical_plan(
+            exec_plan,
+            repository_url=_sha_record.repository_url if _sha_record else None,
+            # Bind the resolved immutable SHA (not the moving ref) so a
+            # moved branch/tag invalidates previously approved plans.
+            target_sha=resolved_sha
+            or _exact_sha_or_none(_sha_record.target_revision if _sha_record else None),
+        )
+        canonical_plan["requested_ref"] = requested_ref
         plan_digest = _plan_hash(canonical_plan)
         if expected_plan_hash and expected_plan_hash != plan_digest:
             await self._fail(
@@ -1202,9 +1354,84 @@ class PlanningPipeline:
                 technical="STALE_PLAN",
             )
             return
+        # Recheck source identity immediately before execution and retries:
+        # a moved branch/tag since ingestion must invalidate the run.
+        if requested_ref and resolved_sha and not _exact_sha_or_none(requested_ref):
+            try:
+                from app.services.git_service import resolve_ref_to_sha as _r2s
+
+                fresh = _r2s(
+                    _sha_record.repository_url if _sha_record else "",
+                    requested_ref,
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                await self._fail(
+                    deployment_id,
+                    f"Source revalidation failed for '{requested_ref}': "
+                    f"{getattr(exc, 'message', exc)}",
+                    technical=f"git.{getattr(exc, 'code', 'SOURCE_RECHECK_FAILED')}",
+                )
+                return
+            if fresh != resolved_sha:
+                await self._fail(
+                    deployment_id,
+                    f"Source moved during approval: '{requested_ref}' now resolves to "
+                    f"{fresh[:12]} (approved {resolved_sha[:12]}). Re-plan required.",
+                    technical="STALE_SOURCE",
+                )
+                return
+        # Verified-checkout recheck: HEAD must still equal the approved SHA.
+        if resolved_sha and acquisition is not None:
+            try:
+                from app.services.git_service import _run_git as _git_run
+
+                head = _git_run(["-C", str(acquisition.path), "rev-parse", "HEAD"]).lower()
+                if head != resolved_sha and acquisition.method == "shallow_clone":
+                    await self._fail(
+                        deployment_id,
+                        "Checked-out HEAD does not match the approved commit.",
+                        technical="SHA_MISMATCH",
+                    )
+                    return
+            except Exception as exc:  # noqa: BLE001 - local check; shallow clones only
+                if getattr(exc, "code", "") in {"SHA_MISMATCH"}:
+                    await self._fail(
+                        deployment_id, str(getattr(exc, "message", exc)),
+                        technical="SHA_MISMATCH",
+                    )
+                    return
         if plan_only:
             await self._pause_for_approval(
                 deployment_id, canonical_plan, plan_digest, proposal_id, ai_ctx
+            )
+            return
+
+        # Explicit real-execution mode: build + run the supported app profile
+        # through the isolated RealExecutor (blocking readiness gate). Never
+        # falls back to simulation — structured failure instead.
+        _settings = get_settings()
+        _real_requested = (
+            _settings.docker_execute
+            and (_settings.executor_mode or "auto").lower() in {"real", "docker"}
+        )
+        if _real_requested and acquisition is not None:
+            await self._run_real_execute(
+                deployment_id=deployment_id,
+                profile=profile,
+                exec_plan=exec_plan,
+                ceg=ceg,
+                acquisition=acquisition,
+                requested_ref=requested_ref,
+                resolved_sha=resolved_sha,
+                canonical_plan=canonical_plan,
+                plan_digest=plan_digest,
+                verification=verification,
+                critic=critic,
+                constraints_resolved=constraints_resolved,
+                delay=delay,
+                ai_ctx=ai_ctx,
+                synthetic_services=synthetic_services,
+                expanded_to_canonical=expanded_to_canonical,
             )
             return
 
@@ -1418,8 +1645,16 @@ class PlanningPipeline:
             message=message,
         )
         result["phase"] = PHASE_LABEL
+        result["execution_mode"] = "controlled_test" if exec_result.executor == "docker" else exec_result.executor
         result["synthetic_services"] = synthetic_services
         result["expanded_to_canonical"] = expanded_to_canonical
+        result["repository_url"] = _sha_record.repository_url if _sha_record else None
+        result["target_sha"] = resolved_sha or _exact_sha_or_none(
+            _sha_record.target_revision if _sha_record else None
+        )
+        result["requested_ref"] = requested_ref
+        result["plan"] = canonical_plan
+        result["plan_hash"] = plan_digest
         if expanded_to_canonical:
             result["message"] = (
                 f"{message} Demonstration scaffolding added synthetic services "
@@ -1463,6 +1698,187 @@ class PlanningPipeline:
                     "COMPLETE": {"status": "success", "detail": "Deployment finished"},
                 },
             },
+        )
+
+    async def _run_real_execute(
+        self,
+        *,
+        deployment_id: str,
+        profile,
+        exec_plan,
+        ceg,
+        acquisition,
+        requested_ref: str | None,
+        resolved_sha: str | None,
+        canonical_plan: dict[str, Any],
+        plan_digest: str,
+        verification,
+        critic,
+        constraints_resolved: int,
+        delay: float,
+        ai_ctx: dict | None,
+        synthetic_services: list[str],
+        expanded_to_canonical: bool,
+    ) -> None:
+        """Real application build + run through the isolated RealExecutor."""
+        from app.ceg.rollback import apply_scope_to_graph, compute_rollback_scope
+        from app.execution.policy import PolicyViolation
+        from app.execution.real_executor import RealExecutor
+        from app.models.execution import NodeStatus
+
+        settings = get_settings()
+        self._status(
+            deployment_id,
+            DeploymentStatus.RUNNING,
+            StageId.EXECUTE,
+            "MEDHA is building and running the application in the isolated runtime.",
+            "stage=EXECUTE · executor=real",
+        )
+        await self._stage(deployment_id, StageId.EXECUTE, "started", delay * 0.2)
+        await self._emit(
+            deployment_id,
+            EventType.EXECUTION_STARTED,
+            "Real execution started (isolated builder).",
+            stage=StageId.EXECUTE.value,
+            metadata={
+                "simple": "MEDHA is building the application image in the isolated runtime.",
+                "technical": f"executor=real · resolved_sha={resolved_sha}",
+                "graph": ceg.to_ui(),
+            },
+        )
+        target_port = profile.target_port
+        try:
+            real = RealExecutor()
+            outcome = await real.deploy(
+                deployment_id=deployment_id,
+                checkout=acquisition.path,
+                target_port=target_port,
+                readiness_timeout=settings.real_readiness_timeout_seconds,
+                build_timeout=settings.real_build_timeout_seconds,
+            )
+        except PolicyViolation as exc:
+            await self._fail(
+                deployment_id,
+                exc.message,
+                technical=exc.code,
+                result={
+                    "kind": "failed", "title": exc.code, "final_status": "failed",
+                    "message": exc.message, "execution_mode": "real",
+                    "requested_ref": requested_ref, "target_sha": resolved_sha,
+                    "plan": canonical_plan, "plan_hash": plan_digest,
+                    "phase": PHASE_LABEL, "is_demo": False, "code": exc.code,
+                },
+            )
+            return
+
+        base_provenance = {
+            "execution_mode": "real",
+            "requested_ref": requested_ref,
+            "target_sha": resolved_sha,
+            "repository_url": (lambda r: r.repository_url if r else None)(
+                self.repo.get(deployment_id)
+            ),
+            "profile": outcome.profile,
+            "image": outcome.image,
+            "image_digest": outcome.image_digest,
+            "container": outcome.container,
+            "port": outcome.port,
+            "readiness": outcome.readiness,
+            "plan": canonical_plan,
+            "plan_hash": plan_digest,
+            "phase": PHASE_LABEL,
+            "is_demo": False,
+        }
+        if outcome.ok:
+            # Mark CEG app nodes success with real provenance.
+            nodes = []
+            for node in ceg.nodes:
+                updated = node.model_copy(deep=True)
+                if updated.status == NodeStatus.PENDING.value:
+                    updated.status = NodeStatus.SUCCESS.value
+                    updated.metadata = {
+                        **updated.metadata,
+                        "container": outcome.container,
+                        "image_digest": outcome.image_digest,
+                        "readiness": outcome.readiness,
+                    }
+                nodes.append(updated)
+            ceg_out = ceg.model_copy(update={"nodes": nodes})
+            result = {
+                "kind": "success", "title": "SUCCESS", "final_status": "succeeded",
+                "message": (
+                    f"Application is live on port {outcome.port} "
+                    f"(profile={outcome.profile}, readiness=ready)."
+                ),
+                "durationLabel": "real",
+                "servicesLabel": f"1 / 1 healthy ({outcome.profile})",
+                "verificationScore": critic.score if critic else None,
+                "constraintsResolved": constraints_resolved,
+                "rollbackScope": None,
+                **base_provenance,
+            }
+            self.repo.save_artifacts(
+                deployment_id, graph=ceg_out.to_ui(),
+                verification=verification.to_ui() if verification else None,
+                critic=critic.to_ui() if critic else None,
+                result=result,
+                ai=_ai_rollup(ai_ctx["notes"]) if ai_ctx and ai_ctx.get("notes") else None,
+                updated_at=utc_now_iso(),
+            )
+            self._status(
+                deployment_id, DeploymentStatus.COMPLETED, StageId.COMPLETE,
+                result["message"], f"final_status=succeeded · executor=real",
+            )
+            await self._emit(
+                deployment_id, EventType.DEPLOYMENT_COMPLETED, result["message"],
+                stage=StageId.COMPLETE.value, status=DeploymentStatus.COMPLETED.value,
+                metadata={"simple": result["message"],
+                          "technical": f"executor=real · digest={outcome.image_digest}",
+                          "result": result, "graph": ceg_out.to_ui()},
+            )
+            return
+
+        # Failure: clean up the failed workload, record CEG-scoped rollback.
+        try:
+            await RealExecutor().cleanup(
+                deployment_id=deployment_id, container=outcome.container,
+                image=outcome.image,
+            )
+        except Exception:  # noqa: BLE001 - cleanup best effort
+            pass
+        failed_id = ceg.nodes[0].node_id if ceg.nodes else "n_unknown"
+        nodes_map = {n.node_id: n.model_copy(deep=True) for n in ceg.nodes}
+        if failed_id in nodes_map:
+            nodes_map[failed_id].status = NodeStatus.FAILED.value
+            nodes_map[failed_id].reason = outcome.message[:500]
+        tmp_graph = ceg.model_copy(update={"nodes": list(nodes_map.values())})
+        try:
+            scope = compute_rollback_scope(tmp_graph, failed_id, is_demo=False)
+            graph_out = apply_scope_to_graph(tmp_graph, scope)
+            ui_scope = scope.to_ui()
+        except Exception:  # noqa: BLE001 - observability only
+            graph_out, ui_scope = tmp_graph, None
+        result = {
+            "kind": "failed", "title": outcome.code or "FAILED",
+            "final_status": "failed", "message": outcome.message,
+            "durationLabel": "real", "servicesLabel": "0 / 1 healthy",
+            "verificationScore": critic.score if critic else None,
+            "constraintsResolved": constraints_resolved,
+            "rollbackScope": None, "code": outcome.code,
+            **base_provenance,
+        }
+        self.repo.save_artifacts(
+            deployment_id, graph=graph_out.to_ui(), rollback=ui_scope,
+            verification=verification.to_ui() if verification else None,
+            critic=critic.to_ui() if critic else None,
+            result=result,
+            ai=_ai_rollup(ai_ctx["notes"]) if ai_ctx and ai_ctx.get("notes") else None,
+            updated_at=utc_now_iso(),
+        )
+        await self._fail(
+            deployment_id, outcome.message,
+            technical=f"executor=real · code={outcome.code}",
+            result=result,
         )
 
     async def _pause_for_approval(

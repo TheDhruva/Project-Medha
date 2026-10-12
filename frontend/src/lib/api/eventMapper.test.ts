@@ -416,7 +416,8 @@ describe("buildBackendSnapshot (run detail hydration)", () => {
     expect(snap.runStatus).toBe("running");
     expect(snap.explain.currentStage).toBe("ANALYZE");
     expect(snap.explain.simpleText).toContain("Retrieving run state");
-    expect(snap.result?.kind).toBe("success");
+    // Phase 2: running deployments have no result yet — never fake SUCCESS.
+    expect(snap.result).toBeNull();
   });
 });
 
@@ -468,5 +469,51 @@ describe("mapVerificationArtifact", () => {
     expect(verification?.passed).toBe(false);
     expect(critic?.score).toBe(72);
     expect(critic?.recommendation).toBe("WARN");
+  });
+});
+
+describe("execution mode and runtime logs hydration", () => {
+  const baseApi: DeploymentApiSnapshot = {
+    deployment_id: "dep_mode",
+    status: "completed",
+    mode: "real",
+    is_demo: false,
+    scenario: null,
+    repository_url: "https://github.com/example/app",
+    target: { host: "localhost", port: 8080 },
+    intent: null,
+    current_stage: "COMPLETE",
+    created_at: "2026-01-01T00:00:00+00:00",
+    updated_at: "2026-01-01T00:00:05+00:00",
+  };
+
+  it("carries explicit real mode and container logs through", () => {
+    const snap = buildBackendSnapshot({
+      api: baseApi,
+      executionMode: "real",
+      runtimeLogs: { available: true, container: "medha_x", stdout: "ok", stderr: "" },
+    });
+    expect(snap.executionMode).toBe("real");
+    expect(snap.runtimeLogs?.stdout).toBe("ok");
+  });
+
+  it("falls back honestly when the backend sends no mode", () => {
+    const demo = buildBackendSnapshot({ api: { ...baseApi, is_demo: true } });
+    expect(demo.executionMode).toBe("demo");
+    expect(demo.runtimeLogs).toBeNull();
+    const sim = buildBackendSnapshot({ api: baseApi });
+    expect(sim.executionMode).toBe("simulator");
+  });
+
+  it("never upgrades an unknown mode to real", () => {
+    const snap = buildBackendSnapshot({ api: baseApi, executionMode: "quantum" });
+    expect(snap.executionMode).toBe("simulator");
+  });
+
+  it("reads the mode from the stored result when /logs omits it", () => {
+    const snap = buildBackendSnapshot({
+      api: { ...baseApi, result: { execution_mode: "controlled_test" } },
+    });
+    expect(snap.executionMode).toBe("controlled_test");
   });
 });

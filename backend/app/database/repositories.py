@@ -85,14 +85,22 @@ class DeploymentRepository:
         return record
 
     def get(self, deployment_id: str) -> DeploymentRecord | None:
-        with get_connection(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT * FROM deployments WHERE deployment_id = ?",
-                (deployment_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return self._row_to_record(row)
+        import time as _time
+
+        from app.core.perf import timed_db
+
+        _t0 = _time.perf_counter()
+        try:
+            with get_connection(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT * FROM deployments WHERE deployment_id = ?",
+                    (deployment_id,),
+                ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_record(row)
+        finally:
+            timed_db("get", _t0)
 
     def list(
         self,
@@ -126,21 +134,29 @@ class DeploymentRepository:
         clause = (f" WHERE {' AND '.join(where)}") if where else ""
         params_count = list(params)
 
-        with get_connection(self.db_path) as conn:
-            # AS count: sqlite3.Row and psycopg dict rows both expose the
-            # alias by name; positional [0] only works on sqlite3.Row.
-            total = conn.execute(
-                f"SELECT COUNT(*) AS count FROM deployments{clause}", params_count
-            ).fetchone()["count"]
-            rows = conn.execute(
-                f"""
-                SELECT * FROM deployments{clause}
-                ORDER BY rowid DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, limit, offset),
-            ).fetchall()
-        return [self._row_to_record(row) for row in rows], int(total)
+        import time as _time
+
+        from app.core.perf import timed_db
+
+        _t0 = _time.perf_counter()
+        try:
+            with get_connection(self.db_path) as conn:
+                # AS count: sqlite3.Row and psycopg dict rows both expose the
+                # alias by name; positional [0] only works on sqlite3.Row.
+                total = conn.execute(
+                    f"SELECT COUNT(*) AS count FROM deployments{clause}", params_count
+                ).fetchone()["count"]
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM deployments{clause}
+                    ORDER BY rowid DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (*params, limit, offset),
+                ).fetchall()
+            return [self._row_to_record(row) for row in rows], int(total)
+        finally:
+            timed_db("list", _t0)
 
     def update_status(
         self,
@@ -152,42 +168,79 @@ class DeploymentRepository:
         explain_technical: str | None = None,
         error_summary: str | None = None,
         updated_at: str,
+        allowed_from: set[str] | None = None,
     ) -> DeploymentRecord | None:
-        record = self.get(deployment_id)
-        if record is None:
-            return None
+        from app.core.enums import DeploymentStatus as _DS
 
-        new_status = status or record.status
-        new_stage = current_stage if current_stage is not None else record.current_stage
-        new_simple = (
-            explain_simple if explain_simple is not None else record.explain_simple
-        )
-        new_technical = (
-            explain_technical
-            if explain_technical is not None
-            else record.explain_technical
-        )
-        new_error = error_summary if error_summary is not None else record.error_summary
+        terminal = {
+            _DS.COMPLETED.value,
+            _DS.FAILED.value,
+            _DS.CANCELLED.value,
+        }
+        new_status = status or None  # resolved after guard read below
 
         with get_connection(self.db_path) as conn:
-            conn.execute(
-                """
+            # Atomic conditional transition: a single UPDATE whose WHERE
+            # clause refuses to overwrite terminal states and enforces
+            # allowed_from. No read-then-write race; rowcount decides.
+            where = ["deployment_id = ?"]
+            params: list[Any] = []
+            if new_status is not None:
+                where.append(
+                    "(status NOT IN ('completed', 'failed', 'cancelled') OR status = ?)"
+                )
+                params.append(new_status.value)
+            if allowed_from is not None:
+                where.append(
+                    f"status IN ({', '.join(['?'] * len(allowed_from))})"
+                )
+                params.extend(sorted(allowed_from))
+            # Fetch current values for unchanged-field merge inside the same
+            # transaction boundary (single connection, immediate write).
+            row = conn.execute(
+                "SELECT status, current_stage, explain_simple, explain_technical,"
+                " error_summary FROM deployments WHERE deployment_id = ?",
+                (deployment_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = {key: row[key] for key in row.keys()}
+            if (
+                new_status is not None
+                and current["status"] in terminal
+                and current["status"] != new_status.value
+            ):
+                return self.get(deployment_id)
+            if allowed_from is not None and current["status"] not in allowed_from:
+                return self.get(deployment_id)
+            final_status = new_status.value if new_status else current["status"]
+            cursor = conn.execute(
+                f"""
                 UPDATE deployments
                 SET status = ?, current_stage = ?, explain_simple = ?,
                     explain_technical = ?, error_summary = ?, updated_at = ?
-                WHERE deployment_id = ?
+                WHERE {' AND '.join(where)}
                 """,
                 (
-                    new_status.value,
-                    new_stage,
-                    new_simple,
-                    new_technical,
-                    new_error,
+                    final_status,
+                    current_stage if current_stage is not None else current["current_stage"],
+                    explain_simple if explain_simple is not None else current["explain_simple"],
+                    explain_technical
+                    if explain_technical is not None
+                    else current["explain_technical"],
+                    error_summary if error_summary is not None else current["error_summary"],
                     updated_at,
                     deployment_id,
+                    *params,
                 ),
             )
             conn.commit()
+            try:
+                if int(cursor.rowcount or 0) == 0:
+                    # Lost a race (state moved under us) — return fresh truth.
+                    pass
+            except (TypeError, ValueError):
+                pass
         return self.get(deployment_id)
 
     def save_artifacts(
@@ -205,93 +258,136 @@ class DeploymentRepository:
         ai: dict[str, Any] | None = None,
         updated_at: str,
     ) -> DeploymentRecord | None:
-        record = self.get(deployment_id)
-        if record is None:
-            return None
+        import time as _time
 
-        new_constraints = constraints if constraints is not None else record.constraints
-        new_negotiation = negotiation if negotiation is not None else record.negotiation
-        new_verification = (
-            verification if verification is not None else record.verification
-        )
-        new_critic = critic if critic is not None else record.critic
-        new_graph = graph if graph is not None else record.graph
-        # Allow explicit null for rollback via sentinel — use "rollback" key presence
-        # Callers pass rollback=None intentionally to clear; distinguish with Ellipsis? 
-        # Simpler: always update when provided as argument using a flag pattern.
-        # For Phase 3 we only ever set rollback when present in step data merge.
-        new_rollback = rollback if rollback is not None else record.rollback
-        new_result = result if result is not None else record.result
-        new_change_intel = (
-            change_intel if change_intel is not None else record.change_intel
-        )
-        new_ai = ai if ai is not None else record.ai
+        from app.core.perf import timed_db
 
-        with get_connection(self.db_path) as conn:
-            conn.execute(
-                """
-                UPDATE deployments
-                SET result_json = ?, constraints_json = ?, negotiation_json = ?,
-                    verification_json = ?, critic_json = ?, graph_json = ?,
-                    rollback_json = ?, change_intel_json = ?, ai_json = ?, updated_at = ?
-                WHERE deployment_id = ?
-                """,
-                (
-                    json.dumps(new_result) if new_result is not None else None,
-                    json.dumps(new_constraints) if new_constraints is not None else None,
-                    json.dumps(new_negotiation) if new_negotiation is not None else None,
-                    json.dumps(new_verification) if new_verification is not None else None,
-                    json.dumps(new_critic) if new_critic is not None else None,
-                    json.dumps(new_graph) if new_graph is not None else None,
-                    json.dumps(new_rollback) if new_rollback is not None else None,
-                    json.dumps(new_change_intel)
-                    if new_change_intel is not None
-                    else None,
-                    json.dumps(new_ai) if new_ai is not None else None,
-                    updated_at,
-                    deployment_id,
-                ),
-            )
-            conn.commit()
-        return self.get(deployment_id)
+        _t0 = _time.perf_counter()
+        try:
+            # Update only explicitly provided columns: callers pass exactly
+            # what changed, so unchanged JSON blobs are never re-serialized
+            # or rewritten. rollback=None keeps prior value (clear via sentinel
+            # not supported in V1 — matches prior behavior).
+            updates: dict[str, Any] = {}
+            if constraints is not None:
+                updates["constraints_json"] = json.dumps(constraints)
+            if negotiation is not None:
+                updates["negotiation_json"] = json.dumps(negotiation)
+            if verification is not None:
+                updates["verification_json"] = json.dumps(verification)
+            if critic is not None:
+                updates["critic_json"] = json.dumps(critic)
+            if graph is not None:
+                updates["graph_json"] = json.dumps(graph)
+            if rollback is not None:
+                updates["rollback_json"] = json.dumps(rollback)
+            if result is not None:
+                updates["result_json"] = json.dumps(result)
+            if change_intel is not None:
+                updates["change_intel_json"] = json.dumps(change_intel)
+            if ai is not None:
+                updates["ai_json"] = json.dumps(ai)
+            if not updates:
+                return self.get(deployment_id)
+            set_clause = ", ".join(f"{col} = ?" for col in updates) + ", updated_at = ?"
+            with get_connection(self.db_path) as conn:
+                cursor = conn.execute(
+                    f"UPDATE deployments SET {set_clause} WHERE deployment_id = ?",
+                    (*updates.values(), updated_at, deployment_id),
+                )
+                conn.commit()
+                if int(cursor.rowcount or 0) == 0:
+                    return None
+            return self.get(deployment_id)
+        finally:
+            timed_db("save_artifacts", _t0)
 
     def add_event(self, event: SystemEvent) -> SystemEvent:
-        with get_connection(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO events (
-                    event_id, deployment_id, event_type, ts, stage,
-                    message, status, level, is_demo, data_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.event_id,
-                    event.deployment_id,
-                    event.event_type,
-                    event.ts,
-                    event.stage,
-                    event.message,
-                    event.status,
-                    event.level,
-                    1 if event.is_demo else 0,
-                    json.dumps(event.data),
-                ),
-            )
-            conn.commit()
-        return event
+        import time as _time
 
-    def list_events(self, deployment_id: str, limit: int = 500) -> list[SystemEvent]:
-        with get_connection(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM events
-                WHERE deployment_id = ?
-                ORDER BY rowid ASC
-                LIMIT ?
-                """,
-                (deployment_id, limit),
-            ).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        from app.core.perf import timed_db
+
+        _t0 = _time.perf_counter()
+        try:
+            with get_connection(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO events (
+                        event_id, deployment_id, event_type, ts, stage,
+                        message, status, level, is_demo, data_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        event.deployment_id,
+                        event.event_type,
+                        event.ts,
+                        event.stage,
+                        event.message,
+                        event.status,
+                        event.level,
+                        1 if event.is_demo else 0,
+                        json.dumps(event.data),
+                    ),
+                )
+                conn.commit()
+            return event
+        finally:
+            timed_db("add_event", _t0)
+
+    def list_events(
+        self,
+        deployment_id: str,
+        limit: int = 500,
+        *,
+        after_event_id: str | None = None,
+    ) -> list[SystemEvent]:
+        import time as _time
+
+        from app.core.perf import timed_db
+
+        _t0 = _time.perf_counter()
+        try:
+            limit = max(1, min(int(limit), 500))
+            with get_connection(self.db_path) as conn:
+                after_rowid: int | None = None
+                if after_event_id:
+                    row = conn.execute(
+                        "SELECT rowid AS rid FROM events WHERE event_id = ? AND deployment_id = ?",
+                        (after_event_id, deployment_id),
+                    ).fetchone()
+                    if row is not None:
+                        try:
+                            after_rowid = int(row["rid"])
+                        except (KeyError, TypeError, ValueError):
+                            after_rowid = None
+                    else:
+                        # Unknown cursor: caller holds stale state — return
+                        # everything up to limit rather than nothing.
+                        after_rowid = None
+                if after_rowid is not None:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM events
+                        WHERE deployment_id = ? AND rowid > ?
+                        ORDER BY rowid ASC
+                        LIMIT ?
+                        """,
+                        (deployment_id, after_rowid, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM events
+                        WHERE deployment_id = ?
+                        ORDER BY rowid ASC
+                        LIMIT ?
+                        """,
+                        (deployment_id, limit),
+                    ).fetchall()
+            return [self._row_to_event(row) for row in rows]
+        finally:
+            timed_db("list_events", _t0)
 
     @staticmethod
     def _row_to_record(row: Any) -> DeploymentRecord:

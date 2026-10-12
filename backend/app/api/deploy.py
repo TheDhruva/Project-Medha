@@ -18,6 +18,7 @@ from app.core.enums import (
 )
 from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
+from app.core.redact import redact_mapping, redact_text
 from app.database.repositories import DeploymentRepository, ProjectRepository
 from app.demo.runner import schedule_demo_runner
 from app.demo.scenarios import list_scenarios
@@ -43,8 +44,8 @@ def _owner_scope(subject: str) -> str | None:
     return subject if subject != LOCAL_SUBJECT else None
 
 
-def _owned_record(deployment_id: str, subject: str) -> DeploymentRecord | None:
-    record = repo.get(deployment_id)
+async def _owned_record(deployment_id: str, subject: str) -> DeploymentRecord | None:
+    record = await asyncio.to_thread(repo.get, deployment_id)
     if record is None:
         return None
     owner = _owner_scope(subject)
@@ -54,7 +55,7 @@ def _owned_record(deployment_id: str, subject: str) -> DeploymentRecord | None:
         # Project-bound runs (e.g. webhook analyses) carry the project
         # owner's subject: visible to whoever owns the linked project.
         if record.project_id:
-            project = ProjectRepository().get(record.project_id)
+            project = await asyncio.to_thread(ProjectRepository().get, record.project_id)
             if project is not None and project.owner_sub == owner:
                 return record
         return None
@@ -88,6 +89,12 @@ def _run_summary(record: DeploymentRecord) -> dict:
         "status": record.status.value,
         "mode": record.mode.value,
         "is_demo": record.is_demo,
+        "execution_mode": (
+            (record.result or {}).get("execution_mode")
+            if isinstance(record.result, dict)
+            else None
+        )
+        or ("demo" if record.is_demo else "controlled_test"),
         "label": "DEMO/MOCK" if record.is_demo else None,
         "scenario": record.scenario.value if record.scenario else None,
         "repository_url": record.repository_url,
@@ -134,13 +141,14 @@ async def list_deployments(
     if mode is not None and mode not in {DeployMode.DEMO.value, DeployMode.REAL.value}:
         return _error(400, "INVALID_MODE", f"mode must be 'demo' or 'real', got '{mode}'")
     if project_id:
-        project = ProjectRepository().get(project_id)
+        project = await asyncio.to_thread(ProjectRepository().get, project_id)
         if (
             project is None
             or (subject != LOCAL_SUBJECT and project.owner_sub != subject)
         ):
             return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
-    records, total = repo.list(
+    records, total = await asyncio.to_thread(
+        repo.list,
         status=status,
         mode=mode,
         repository=repository,
@@ -167,7 +175,18 @@ async def list_deployments(
     response_model=DeploymentResponse,
     dependencies=[Depends(require_mutation_token)],
 )
-async def create_deployment(payload: DeploymentRequest, subject: str = RequireSubject):
+async def create_deployment(
+    payload: DeploymentRequest, request: Request, subject: str = RequireSubject
+):
+    from app.core.config import get_settings
+    from app.core.rate_limit import check_rate_limit, client_ip
+
+    ip = client_ip(request, trusted_proxy=get_settings().trusted_proxy)
+    if not check_rate_limit(
+        f"deploy:{ip}",
+        limit_per_minute=get_settings().rate_limit_per_minute,
+    ):
+        return _error(429, "RATE_LIMITED", "Too many deployment requests; retry later.")
     if payload.mode == DeployMode.DEMO and payload.scenario is None:
         return _error(
             400,
@@ -220,7 +239,7 @@ async def create_deployment(payload: DeploymentRequest, subject: str = RequireSu
         scenario=payload.scenario,
         target_host=payload.target.host,
         target_port=payload.target.port,
-        intent=payload.intent,
+        intent=(redact_text(payload.intent or "", max_len=500) if payload.intent else None),
         base_revision=payload.base_revision,
         target_revision=payload.target_revision,
         status=DeploymentStatus.STARTED,
@@ -233,7 +252,7 @@ async def create_deployment(payload: DeploymentRequest, subject: str = RequireSu
         is_demo=is_demo,
     )
     try:
-        repo.create(record)
+        await asyncio.to_thread(repo.create, record)
 
         created = make_event(
             deployment_id=deployment_id,
@@ -250,7 +269,7 @@ async def create_deployment(payload: DeploymentRequest, subject: str = RequireSu
             },
             is_demo=is_demo,
         )
-        repo.add_event(created)
+        await asyncio.to_thread(repo.add_event, created)
         await event_bus.publish(created)
 
         if is_demo:
@@ -277,20 +296,41 @@ async def create_deployment(payload: DeploymentRequest, subject: str = RequireSu
 
 @router.get("/deploy/{deployment_id}")
 async def get_deployment(deployment_id: str, subject: str = RequireSubject):
-    record = _owned_record(deployment_id, subject)
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(record.to_api())
 
 
 @router.get("/deploy/{deployment_id}/events")
-async def stream_events(deployment_id: str, request: Request, subject: str = RequireSubject):
-    record = _owned_record(deployment_id, subject)
+async def stream_events(
+    deployment_id: str,
+    request: Request,
+    subject: str = RequireSubject,
+    limit: int = Query(default=100, ge=1, le=500),
+    after: str | None = Query(default=None),
+):
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
 
     async def event_generator():
-        for event in repo.list_events(deployment_id):
+        from app.core.perf import bump
+
+        replayed = await asyncio.to_thread(
+            repo.list_events, deployment_id, limit, after_event_id=after
+        )
+        bump("sse.replay_batches")
+        for _ in replayed:
+            bump("sse.replayed")
+        logger.info(
+            "SSE replay deployment_id=%s events=%d limit=%d after=%s",
+            deployment_id,
+            len(replayed),
+            limit,
+            "set" if after else "none",
+        )
+        for event in replayed:
             payload = json.dumps(event.to_sse_payload())
             yield f"data: {payload}\n\n"
             if event.event_type in TERMINAL_TYPES:
@@ -327,7 +367,7 @@ async def stream_events(deployment_id: str, request: Request, subject: str = Req
 
 @router.get("/deploy/{deployment_id}/constraints", response_model=None)
 async def get_constraints(deployment_id: str, subject: str = RequireSubject):
-    record = _owned_record(deployment_id, subject)
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
 
@@ -351,7 +391,7 @@ async def get_constraints(deployment_id: str, subject: str = RequireSubject):
 
 @router.get("/deploy/{deployment_id}/graph", response_model=None)
 async def get_graph(deployment_id: str, subject: str = RequireSubject):
-    record = _owned_record(deployment_id, subject)
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -367,7 +407,7 @@ async def get_graph(deployment_id: str, subject: str = RequireSubject):
 
 @router.get("/deploy/{deployment_id}/verification", response_model=None)
 async def get_verification(deployment_id: str, subject: str = RequireSubject):
-    record = _owned_record(deployment_id, subject)
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -383,7 +423,7 @@ async def get_verification(deployment_id: str, subject: str = RequireSubject):
 
 @router.get("/deploy/{deployment_id}/rollback", response_model=None)
 async def get_rollback(deployment_id: str, subject: str = RequireSubject):
-    record = _owned_record(deployment_id, subject)
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -397,7 +437,7 @@ async def get_rollback(deployment_id: str, subject: str = RequireSubject):
 
 @router.get("/deploy/{deployment_id}/execution", response_model=None)
 async def get_execution(deployment_id: str, subject: str = RequireSubject):
-    record = _owned_record(deployment_id, subject)
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     return JSONResponse(
@@ -412,16 +452,16 @@ async def get_execution(deployment_id: str, subject: str = RequireSubject):
 
 
 @router.get("/deploy/{deployment_id}/logs")
-async def get_logs(
-    deployment_id: str,
+async def get_logs(    deployment_id: str,
     limit: int = Query(default=200, ge=1, le=2000),
+    tail: int = Query(default=200, ge=1, le=2000),
     subject: str = RequireSubject,
 ):
-    record = _owned_record(deployment_id, subject)
+    record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
 
-    events = repo.list_events(deployment_id, limit=limit)
+    events = await asyncio.to_thread(repo.list_events, deployment_id, limit)
     lines = [
         {
             "ts": event.ts,
@@ -435,11 +475,102 @@ async def get_logs(
         }
         for event in events
     ]
+    # Real runtime logs (container stdout/stderr) — access-controlled via the
+    # same ownership check above; never fabricated when unavailable.
+    runtime_logs: dict | None = None
+    result = record.result or {}
+    container = result.get("container") if isinstance(result, dict) else None
+    if container and result.get("execution_mode") == "real":
+        from app.execution import docker_ops
+
+        raw = await asyncio.to_thread(docker_ops.container_logs, container, tail=tail)
+        if raw.get("available"):
+            runtime_logs = {
+                "available": True,
+                "container": container,
+                "stdout": redact_text(raw.get("stdout") or "")[-20000:],
+                "stderr": redact_text(raw.get("stderr") or "")[-20000:],
+            }
+        else:
+            runtime_logs = {
+                "available": False,
+                "container": container,
+                "code": raw.get("code", "LOGS_UNAVAILABLE"),
+            }
     return JSONResponse(
         {
             "deployment_id": deployment_id,
             "is_demo": record.is_demo,
             "label": "DEMO/MOCK" if record.is_demo else None,
+            "execution_mode": result.get("execution_mode") if isinstance(result, dict) else None,
             "lines": lines,
+            "runtime_logs": runtime_logs,
+            "note": (
+                "Event replay (structured deployment events). "
+                "Container stdout/stderr appears under runtime_logs when a real "
+                "execution container exists; null means unavailable, never synthetic."
+            ),
         }
+    )
+
+
+@router.post(
+    "/deploy/{deployment_id}/cancel",
+    dependencies=[Depends(require_mutation_token)],
+)
+async def cancel_deployment(deployment_id: str, subject: str = RequireSubject):
+    record = await _owned_record(deployment_id, subject)
+    if record is None:
+        return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
+    if record.status in (DeploymentStatus.COMPLETED, DeploymentStatus.FAILED, DeploymentStatus.CANCELLED):
+        return JSONResponse({"deployment_id": deployment_id, "status": record.status.value, "duplicate": True})
+    updated = await asyncio.to_thread(
+        repo.update_status,
+        deployment_id,
+        status=DeploymentStatus.CANCELLED,
+        explain_simple="Deployment cancelled by the owner.",
+        explain_technical="cancel requested via POST /deploy/{id}/cancel",
+        updated_at=utc_now_iso(),
+        allowed_from={
+            DeploymentStatus.STARTED.value,
+            DeploymentStatus.RUNNING.value,
+            DeploymentStatus.AWAITING_APPROVAL.value,
+            DeploymentStatus.QUEUED.value,
+            DeploymentStatus.PARTIAL_RECOVERY.value,
+        },
+    )
+    if not record.is_demo:
+        try:
+            from app.core.deploy_lock import release_real_deploy
+
+            release_real_deploy(deployment_id)
+        except Exception:
+            pass
+        # Stop the actual active execution when possible (real containers).
+        # Blocking Docker CLI work stays off the event loop; timeouts preserved.
+        try:
+            from app.execution import docker_ops
+
+            container = (record.result or {}).get("container")
+            if container:
+                await asyncio.to_thread(
+                    docker_ops.stop_and_remove_container,
+                    container,
+                    deployment_id=deployment_id,
+                )
+            await asyncio.to_thread(docker_ops.cleanup_deployment, deployment_id)
+        except Exception:
+            pass
+    event = make_event(
+        deployment_id=deployment_id,
+        event_type=EventType.DEPLOYMENT_CANCELLED,
+        message="Deployment cancelled by the owner.",
+        status=DeploymentStatus.CANCELLED.value,
+        metadata={"simple": "Deployment cancelled by the owner."},
+        is_demo=record.is_demo,
+    )
+    await asyncio.to_thread(repo.add_event, event)
+    await event_bus.publish(event)
+    return JSONResponse(
+        {"deployment_id": deployment_id, "status": (updated.status.value if updated else "cancelled")}
     )

@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_deployment_ts
     ON events (deployment_id, ts);
 
+-- Perf (measured filters): owner/status listing, recovery status scans.
+CREATE INDEX IF NOT EXISTS idx_deployments_owner_status
+    ON deployments (owner_sub, status);
+CREATE INDEX IF NOT EXISTS idx_deployments_status
+    ON deployments (status);
+
 CREATE TABLE IF NOT EXISTS users (
     clerk_sub TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -87,6 +93,10 @@ CREATE TABLE IF NOT EXISTS proposals (
 
 CREATE INDEX IF NOT EXISTS idx_proposals_repo_branch
     ON proposals (repository, branch);
+
+-- Perf: get_by_deployment + approve/decision paths filter by deployment_id.
+CREATE INDEX IF NOT EXISTS idx_proposals_deployment
+    ON proposals (deployment_id);
 
 -- Project-scoped repository connections (multi-user, repository-agnostic).
 -- A project binds one owner's view of one GitHub repository + branch.

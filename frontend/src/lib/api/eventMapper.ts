@@ -7,9 +7,11 @@ import type {
   CriticView,
   DeploymentResultView,
   DeploymentSnapshot,
+  ExecutionMode,
   NegotiationView,
   PipelineStage,
   RollbackSummary,
+  RuntimeLogsView,
   ScenarioId,
   StageId,
   TraceEvent,
@@ -54,6 +56,8 @@ export function createRunningSnapshot(
   return {
     deploymentId,
     isDemo,
+    executionMode: isDemo ? "demo" : "simulator",
+    runtimeLogs: null,
     scenario: isDemo ? scenario : null,
     runStatus: "running",
     explain: {
@@ -89,7 +93,7 @@ export function applyBackendEvent(
   event: BackendSystemEvent,
 ): DeploymentSnapshot {
   const data = event.data || {};
-  const nextTrace: TraceEvent[] = [
+  const appended: TraceEvent[] = [
     ...snapshot.trace,
     {
       id: event.event_id,
@@ -99,6 +103,10 @@ export function applyBackendEvent(
       technical: technicalLine(event, data),
     },
   ];
+  // Bound in-memory trace growth for long runs; full history stays
+  // available via GET /api/deploy/{id}/logs. Render window slices further.
+  const nextTrace: TraceEvent[] =
+    appended.length > 500 ? appended.slice(appended.length - 500) : appended;
 
   let pipeline = snapshot.pipeline;
   let explain = snapshot.explain;
@@ -443,6 +451,8 @@ export function reconcileTerminalState(
 export interface BackendHydrationInput {
   api: DeploymentApiSnapshot;
   logs?: RunLogLine[];
+  executionMode?: string | null;
+  runtimeLogs?: RuntimeLogsView | null;
   constraints?: ConstraintView[] | null;
   negotiation?: NegotiationView | null;
   verification?: VerificationView | null;
@@ -450,6 +460,31 @@ export interface BackendHydrationInput {
   graph?: CegGraph | null;
   rollback?: RollbackSummary | null;
   changeIntel?: ChangeIntelAnalysis | null;
+}
+
+/**
+ * Resolve how a run actually executed. Explicit backend `execution_mode`
+ * (from /logs, falling back to the stored result) wins; otherwise derive
+ * honestly from is_demo. Never claims "real" without backend evidence.
+ */
+export function resolveExecutionMode(
+  executionMode: string | null | undefined,
+  result: Record<string, unknown> | null | undefined,
+  isDemo: boolean,
+): ExecutionMode {
+  const raw =
+    (typeof executionMode === "string" && executionMode) ||
+    (typeof result?.["execution_mode"] === "string" ? (result["execution_mode"] as string) : "");
+  const normalized = raw.trim().toLowerCase();
+  if (
+    normalized === "demo" ||
+    normalized === "simulator" ||
+    normalized === "controlled_test" ||
+    normalized === "real"
+  ) {
+    return normalized;
+  }
+  return isDemo ? "demo" : "simulator";
 }
 
 export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSnapshot {
@@ -479,9 +514,20 @@ export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSn
             ? "Waiting for approval"
             : "Complete";
 
+  const apiResult = api.result as DeploymentResultView | null | undefined;
+  // A still-running deployment has no result yet — never fabricate SUCCESS.
+  const hydratedResult =
+    runStatus === "running" && !apiResult ? null : (apiResult ?? terminalResultFallback(runStatus));
+
   return {
     deploymentId: api.deployment_id,
     isDemo,
+    executionMode: resolveExecutionMode(
+      input.executionMode,
+      api.result as Record<string, unknown> | null | undefined,
+      isDemo,
+    ),
+    runtimeLogs: input.runtimeLogs ?? null,
     scenario: api.scenario,
     runStatus,
     explain: {
@@ -511,7 +557,7 @@ export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSn
     graph: input.graph ?? emptyGraph(),
     selectedNodeId: null,
     rollback: input.rollback ?? null,
-    result: (api.result as DeploymentResultView | null | undefined) ?? terminalResultFallback(runStatus),
+    result: hydratedResult as DeploymentResultView,
     trace,
     frameIndex: 0,
     totalFrames: 0,

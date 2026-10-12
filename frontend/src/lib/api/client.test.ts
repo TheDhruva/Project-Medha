@@ -5,6 +5,8 @@ import {
   eventsUrl,
   fetchChangeImpact,
   fetchDemoChangeImpact,
+  fetchRunHydration,
+  fetchRunLogs,
 } from "@/lib/api/client";
 import type { ChangeImpactResponse } from "@/lib/api/client";
 
@@ -101,5 +103,52 @@ describe("change intelligence client", () => {
     stubFetch(jsonResponse({ deployment_id: "dep_1", analysis: {} } as ChangeImpactResponse));
     await fetchChangeImpact("dep_a/b");
     expect(lastUrl).toContain(`/api/deploy/${encodeURIComponent("dep_a/b")}/change-impact`);
+  });
+});
+
+describe("run logs and hydration client", () => {
+  it("fetchRunLogs passes through execution_mode and runtime_logs", async () => {
+    stubFetch(
+      jsonResponse({
+        deployment_id: "dep_1",
+        is_demo: false,
+        label: null,
+        execution_mode: "real",
+        lines: [],
+        runtime_logs: { available: true, container: "c1", stdout: "hi", stderr: "" },
+      }),
+    );
+    const r = await fetchRunLogs("dep_1");
+    expect(r.execution_mode).toBe("real");
+    expect(r.runtime_logs?.stdout).toBe("hi");
+  });
+
+  it("fetchRunHydration maps mode/logs and tolerates absent fields", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.endsWith("/logs")) {
+          return jsonResponse({
+            deployment_id: "dep_1",
+            is_demo: false,
+            label: null,
+            execution_mode: "controlled_test",
+            lines: [],
+            runtime_logs: { available: false, container: "c1", code: "LOGS_UNAVAILABLE" },
+          });
+        }
+        if (url.endsWith("/change-impact")) {
+          return jsonResponse({ error: { code: "NOT_FOUND" } }, false, 404);
+        }
+        return jsonResponse({});
+      }),
+    );
+    const h = await fetchRunHydration("dep_1");
+    expect(h.executionMode).toBe("controlled_test");
+    expect(h.runtimeLogs?.code).toBe("LOGS_UNAVAILABLE");
+    expect(h.logs).toEqual([]);
   });
 });

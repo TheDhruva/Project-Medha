@@ -14,7 +14,7 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _SCHEMA_PG_PATH = Path(__file__).with_name("schema_pg.sql")
 
 # Bump when schema.sql or migration steps change. Tracked via PRAGMA user_version.
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 _ARTIFACT_COLUMNS = (
     "result_json",
@@ -82,10 +82,16 @@ _NEW_TABLES_SQL = (
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_owner_repo
+    """Create UNIQUE INDEX IF NOT EXISTS idx_projects_owner_repo
         ON projects (owner_sub, repository)""",
     """CREATE INDEX IF NOT EXISTS idx_projects_repository
         ON projects (repository)""",
+    """CREATE INDEX IF NOT EXISTS idx_deployments_owner_status
+        ON deployments (owner_sub, status)""",
+    """CREATE INDEX IF NOT EXISTS idx_deployments_status
+        ON deployments (status)""",
+    """CREATE INDEX IF NOT EXISTS idx_proposals_deployment
+        ON proposals (deployment_id)""",
 )
 
 
@@ -205,9 +211,18 @@ def get_connection(
         return _pg_connect()
     path = db_path or get_settings().database_path
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    # timeout=10s bounds lock waits; WAL + busy_timeout keep concurrent
+    # readers/writers (API + pipeline tasks) from failing fast with
+    # SQLITE_BUSY. SQLite-only pragmas — never applied to Postgres.
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except Exception:  # noqa: BLE001 - pragmas are advisory (e.g. read-only fs)
+        pass
     return conn
 
 
@@ -319,8 +334,20 @@ def init_db(db_path: Path | None = None) -> Path | str:
     path = db_path or get_settings().database_path
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with get_connection(path) as conn:
-        conn.executescript(schema)
+        # Legacy databases may lack newer columns that fresh-schema indexes
+        # reference (e.g. owner_sub). Create tables first, heal columns via
+        # _migrate, then create indexes — so upgrades never fail on index
+        # creation against a stale column set.
+        statements = _split_statements(schema)
+        tables = [s for s in statements if s.upper().startswith("CREATE TABLE")]
+        indexes = [s for s in statements if s.upper().startswith("CREATE")]
+        indexes = [s for s in indexes if s not in tables]
+        for statement in tables:
+            conn.execute(statement)
         _migrate(conn)
+        for statement in indexes:
+            conn.execute(statement)
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         conn.commit()
     logger.info("SQLite ready at %s (schema v%d)", path, _SCHEMA_VERSION)
     return path

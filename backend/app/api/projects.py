@@ -228,7 +228,9 @@ async def verify_project(project_id: str, subject: str = RequireSubject):
         return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
     from app.services import git_service
 
-    sha = git_service.ls_remote_sha(project.canonical_url, "HEAD")
+    import asyncio
+
+    sha = await asyncio.to_thread(git_service.ls_remote_sha, project.canonical_url, "HEAD")
     now = utc_now_iso()
     if sha:
         updated = projects.update(

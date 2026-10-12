@@ -314,7 +314,8 @@ def test_owner_can_gate_others_proposal(tmp_path, monkeypatch):
                 json={},
                 headers={"Authorization": "Bearer token-bob"},
             )
-            assert denied.status_code == 403
+            # Phase 2: uniform 404 (no existence oracle across owners).
+            assert denied.status_code == 404
     finally:
         get_settings.cache_clear()
         clerk_auth.clear_jwks_cache()

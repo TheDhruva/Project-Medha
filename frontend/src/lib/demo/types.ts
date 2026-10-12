@@ -379,6 +379,18 @@ export interface TraceEvent {
   technical?: string;
 }
 
+/** How the run actually executed — from GET /logs `execution_mode`, never guessed. */
+export type ExecutionMode = "demo" | "simulator" | "controlled_test" | "real";
+
+/** Real container stdout/stderr from GET /logs `runtime_logs` (null = none). */
+export interface RuntimeLogsView {
+  available: boolean;
+  container?: string | null;
+  code?: string | null;
+  stdout?: string;
+  stderr?: string;
+}
+
 export interface ExplainabilityState {
   currentStage: StageId | null;
   round: number | null;
@@ -390,6 +402,8 @@ export interface ExplainabilityState {
 export interface DeploymentSnapshot {
   deploymentId: string | null;
   isDemo: boolean;
+  executionMode: ExecutionMode | null;
+  runtimeLogs: RuntimeLogsView | null;
   scenario: ScenarioId | null;
   runStatus: DeploymentRunStatus;
   explain: ExplainabilityState;

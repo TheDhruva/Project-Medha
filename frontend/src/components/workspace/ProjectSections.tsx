@@ -271,10 +271,18 @@ export function ChangeReview({ projectId, proposalId }: { projectId: string; pro
 export function OrchestrationView({ projectId }: { projectId: string }) {
   const { repo, name, runs, loading, error, backendReachable, selectedId, selectRun, hydration, hydrating, refresh } =
     useProjectData(projectId);
-  if (!repo) return <NotFound what="This project link does not decode to a known repository." />;
   const selected = runs.find((r) => r.deployment_id === selectedId) ?? runs[0] ?? null;
-  const agents = hydration ? deriveAgentsFromLogs(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : [];
-  const pipeline = hydration ? derivePipeline(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : [];
+  // O(10×N) log scan per render — memoize on the actual inputs.
+  // (Hooks stay unconditional: the !repo early-return renders below them.)
+  const agents = useMemo(
+    () => (hydration ? deriveAgentsFromLogs(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : []),
+    [hydration, selected?.current_stage, selected?.status],
+  );
+  const pipeline = useMemo(
+    () => (hydration ? derivePipeline(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : []),
+    [hydration, selected?.current_stage, selected?.status],
+  );
+  if (!repo) return <NotFound what="This project link does not decode to a known repository." />;
   const activeAgents = agents.filter((a) => a.state === "active" || a.state === "blocked");
 
   return (

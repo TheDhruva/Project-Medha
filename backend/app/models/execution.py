@@ -174,6 +174,12 @@ class ExecutionNode(BaseModel):
     is_demo: bool = False
 
     def to_ui(self) -> dict[str, Any]:
+        meta = self.metadata if isinstance(self.metadata, dict) else {}
+        safe_meta = {
+            k: meta.get(k)
+            for k in ("readiness", "health", "container", "exit_code", "logs_tail")
+            if k in meta
+        }
         return {
             "id": self.node_id,
             "node_id": self.node_id,
@@ -190,6 +196,9 @@ class ExecutionNode(BaseModel):
             "preserved": self.status == NodeStatus.PRESERVED.value,
             "reversible": self.reversible,
             "is_demo": self.is_demo,
+            "readiness": meta.get("readiness"),
+            "health": meta.get("health"),
+            "metadata": safe_meta,
         }
 
 

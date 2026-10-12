@@ -2,14 +2,23 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { ArrowLeft, CheckCircle2, XCircle, AlertTriangle, Loader2, ChevronDown } from "lucide-react";
 import { ChangeImpactPanel } from "@/components/changeintel/ChangeImpactPanel";
 import { ConstraintNegotiation } from "@/components/constraints/ConstraintNegotiation";
-import { CausalExecutionGraph } from "@/components/graph/CausalExecutionGraph";
+// Heavy views load on demand: graph lib + trace list are not needed for
+// the initial run header/status paint.
+const CausalExecutionGraph = dynamic(
+  () => import("@/components/graph/CausalExecutionGraph").then((m) => m.CausalExecutionGraph),
+  { ssr: false, loading: () => null },
+);
 import { AgentActivity } from "@/components/agents/AgentActivity";
 import { Pipeline } from "@/components/pipeline/Pipeline";
 import { VerificationPanel } from "@/components/verification/VerificationPanel";
-import { LiveSystemTrace } from "@/components/trace/LiveSystemTrace";
+const LiveSystemTrace = dynamic(
+  () => import("@/components/trace/LiveSystemTrace").then((m) => m.LiveSystemTrace),
+  { ssr: false, loading: () => null },
+);
 import { WhatMedhaIsDoing } from "@/components/explainability/WhatMedhaIsDoing";
 import { ViewModeToggle } from "@/components/explainability/ViewModeToggle";
 import { AppShell } from "@/components/layout/AppShell";
@@ -23,7 +32,8 @@ import {
   CollapsibleShell,
   SectionShell,
 } from "@/components/run-detail/Cards";
-import { EnvBadge } from "@/components/ui/Section";
+import { EnvBadge, ExecutionModeBadge } from "@/components/ui/Section";
+import { RuntimeLogsPanel } from "@/components/run-detail/RuntimeLogs";
 import { cn } from "@/lib/ui/cn";
 
 function runTitle(snapshot: DeploymentSnapshot, deploymentId: string): string {
@@ -305,6 +315,12 @@ function RunStory({ snapshot }: { snapshot: DeploymentSnapshot }) {
         </div>
       ) : null}
 
+      {/* RUNTIME LOGS — real container output; null when not applicable */}
+      <RuntimeLogsPanel
+        executionMode={snapshot.executionMode}
+        runtimeLogs={snapshot.runtimeLogs}
+      />
+
       {/* TECHNICAL DETAILS — collapsed by default in Simple mode */}
       <TechnicalDetails snapshot={snapshot} />
     </div>
@@ -487,6 +503,7 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
         </Link>
         <div className="flex items-center gap-2">
           <EnvBadge isDemo={snapshot.isDemo} size="sm" />
+          <ExecutionModeBadge mode={snapshot.executionMode} size="sm" />
           <button
             type="button"
             onClick={() => void openDeployment(deploymentId)}

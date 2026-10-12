@@ -129,6 +129,8 @@ export async function createDeployment(
   if (!response.ok) {
     throw await parseError(response);
   }
+  clearApiCache("/api/deploys");
+  clearApiCache("/api/proposals");
   return response.json();
 }
 
@@ -151,8 +153,61 @@ export function eventsUrl(deploymentId: string): string {
 const TERMINAL_SSE_TYPES = new Set([
   "deployment.completed",
   "deployment.failed",
+  "deployment.cancelled",
   "proposal.ready",
 ]);
+
+/* --- Lightweight diagnostics (bounded, in-memory, no PII) -------------- */
+const diag: { sseConnections: number; sseReconnects: number; sseEvents: number } = {
+  sseConnections: 0,
+  sseReconnects: 0,
+  sseEvents: 0,
+};
+
+export function getSseDiagnostics() {
+  return { ...diag };
+}
+
+/* --- Tiny shared GET cache (same-tab, short TTL, explicit invalidation) --
+ * Same browser tab == same signed-in user, so URL-keyed caching with an 8s
+ * TTL is tenant-safe here. Mutations and terminal SSE events invalidate.
+ * Auth-sensitive decisions (ownership, approval) always revalidate via
+ * fetchDeployment on open; lists/hydration tolerate seconds of staleness.
+ * ------------------------------------------------------------------------ */
+const apiCache = new Map<string, { expiry: number; data: unknown }>();
+const API_CACHE_TTL_MS = 8000;
+
+export function clearApiCache(prefix?: string): void {
+  if (!prefix) {
+    apiCache.clear();
+    return;
+  }
+  for (const key of [...apiCache.keys()]) {
+    if (key.startsWith(prefix)) apiCache.delete(key);
+  }
+}
+
+async function cachedGet<T>(path: string, ttlMs = API_CACHE_TTL_MS): Promise<T> {
+  const now = Date.now();
+  const hit = apiCache.get(path);
+  if (hit && hit.expiry > now) return hit.data as T;
+  const response = await apiFetch(path, { cache: "no-store" });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const data = (await response.json()) as T;
+  if (apiCache.size > 200) apiCache.clear();
+  apiCache.set(path, { expiry: now + ttlMs, data });
+  return data;
+}
+
+async function cachedGetOrNull<T>(path: string, ttlMs = API_CACHE_TTL_MS): Promise<T | null> {
+  try {
+    return await cachedGet<T>(path, ttlMs);
+  } catch {
+    return null;
+  }
+}
 
 export interface EventSubscription {
   close: () => void;
@@ -174,9 +229,11 @@ export function subscribeDeploymentEvents(
     onError?: (message: string) => void;
     onTerminal?: () => void;
   },
+  opts?: { after?: string | null; limit?: number },
 ): EventSubscription {
   const controller = new AbortController();
   let closed = false;
+  diag.sseConnections += 1;
 
   async function authHeader(): Promise<Headers> {
     const headers = new Headers({ Accept: "text/event-stream" });
@@ -194,71 +251,110 @@ export function subscribeDeploymentEvents(
   }
 
   void (async () => {
-    let headers: Headers;
-    try {
-      headers = await authHeader();
-    } catch {
-      fail("Cannot reach MEDHA backend event stream.");
-      return;
-    }
-    let response: Response;
-    try {
-      response = await fetch(
-        `${API_BASE}/api/deploy/${encodeURIComponent(deploymentId)}/events`,
-        { headers, signal: controller.signal },
-      );
-    } catch (err) {
-      if (!controller.signal.aborted) fail("Cannot reach MEDHA backend event stream.");
-      return;
-    }
-    if (!response.ok || !response.body) {
+    const seen = new Set<string>();
+    // Bound dedup memory for very long runs; IDs are unique so eviction
+    // only risks reprocessing an ancient event after 5k+ uniques.
+    const MAX_SEEN = 5000;
+    let attempt = 0;
+    let afterCursor = opts?.after ?? null;
+    const limit = Math.max(1, Math.min(opts?.limit ?? 100, 500));
+    while (!closed && attempt <= 5) {
+      let headers: Headers;
       try {
-        const err = await parseError(response);
-        fail(err.status === 401 || err.status === 503 ? err.message : "Cannot reach MEDHA backend event stream.");
+        headers = await authHeader();
       } catch {
         fail("Cannot reach MEDHA backend event stream.");
+        return;
       }
-      return;
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    try {
-      for (;;) {
-        if (closed) break;
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-        for (const frame of frames) {
-          for (const rawLine of frame.split("\n")) {
-            const line = rawLine.trim();
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice("data:".length).trim();
-            if (!payload) continue;
-            try {
-              const event = JSON.parse(payload) as BackendSystemEvent;
-              handlers.onEvent(event);
-              if (TERMINAL_SSE_TYPES.has(event.type)) {
-                handlers.onTerminal?.();
-                return;
+      let response: Response;
+      try {
+        const params = new URLSearchParams();
+        params.set("limit", String(limit));
+        if (afterCursor) params.set("after", afterCursor);
+        response = await fetch(
+          `${API_BASE}/api/deploy/${encodeURIComponent(deploymentId)}/events?${params.toString()}`,
+          { headers, signal: controller.signal },
+        );
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        attempt += 1;
+        if (attempt > 5) {
+          fail("Cannot reach MEDHA backend event stream.");
+          return;
+        }
+        await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 8000)));
+        continue;
+      }
+      if (!response.ok || !response.body) {
+        try {
+          const err = await parseError(response);
+          fail(err.status === 401 || err.status === 503 ? err.message : "Cannot reach MEDHA backend event stream.");
+        } catch {
+          fail("Cannot reach MEDHA backend event stream.");
+        }
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let disconnected = false;
+      try {
+        for (;;) {
+          if (closed) break;
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const frame of frames) {
+            for (const rawLine of frame.split("\n")) {
+              const line = rawLine.trim();
+              if (!line.startsWith("data:")) continue;
+              const payload = line.slice("data:".length).trim();
+              if (!payload) continue;
+              try {
+                const event = JSON.parse(payload) as BackendSystemEvent;
+                const key = (event as { event_id?: string }).event_id ?? `${event.type}:${event.ts}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                if (seen.size > MAX_SEEN) {
+                  const first = seen.values().next().value;
+                  if (first) seen.delete(first);
+                }
+                afterCursor = key;
+                diag.sseEvents += 1;
+                handlers.onEvent(event);
+                if (TERMINAL_SSE_TYPES.has(event.type)) {
+                  clearApiCache(`/api/deploy/${encodeURIComponent(deploymentId)}`);
+                  clearApiCache("/api/deploys");
+                  handlers.onTerminal?.();
+                  return;
+                }
+              } catch {
+                fail("Failed to parse backend event.");
               }
-            } catch {
-              fail("Failed to parse backend event.");
             }
+            if (closed) return;
           }
-          if (closed) return;
+        }
+      } catch {
+        disconnected = true;
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          /* noop */
         }
       }
-    } catch {
-      fail("Lost connection to MEDHA backend event stream.");
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        /* noop */
+      if (closed) return;
+      if (!disconnected) return; // clean EOF without terminal: stop, state reconciles via REST
+      attempt += 1;
+      diag.sseReconnects += 1;
+      if (attempt > 5) {
+        fail("Lost connection to MEDHA backend event stream.");
+        return;
       }
+      await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 8000)));
     }
   })();
 
@@ -273,6 +369,88 @@ export function subscribeDeploymentEvents(
     },
     get closed() {
       return closed;
+    },
+  };
+}
+
+/* --- Shared per-deployment subscription (refcounted, duplicate-safe) -----
+ * Multiple components mounting for the same deployment in one tab share a
+ * single HTTP stream; each subscriber keeps its own dedup via handlers.
+ * The underlying stream closes when the last subscriber releases it or a
+ * terminal event arrives.
+ * ------------------------------------------------------------------------ */
+const sharedSubs = new Map<
+  string,
+  { sub: EventSubscription; refs: number; handlers: Set<(e: BackendSystemEvent) => void> }
+>();
+
+export function subscribeDeploymentEventsShared(
+  deploymentId: string,
+  handlers: {
+    onEvent: (event: BackendSystemEvent) => void;
+    onError?: (message: string) => void;
+    onTerminal?: () => void;
+  },
+): EventSubscription {
+  const existing = sharedSubs.get(deploymentId);
+  if (existing && !existing.sub.closed) {
+    existing.refs += 1;
+    existing.handlers.add(handlers.onEvent);
+    let released = false;
+    return {
+      close: () => {
+        if (released) return;
+        released = true;
+        existing.handlers.delete(handlers.onEvent);
+        existing.refs -= 1;
+        if (existing.refs <= 0) {
+          existing.sub.close();
+          sharedSubs.delete(deploymentId);
+        }
+      },
+      get closed() {
+        return released || existing.sub.closed;
+      },
+    };
+  }
+  const handlersSet = new Set<(e: BackendSystemEvent) => void>([handlers.onEvent]);
+  const sub = subscribeDeploymentEvents(
+    deploymentId,
+    {
+      onEvent: (e) => {
+        for (const fn of [...handlersSet]) {
+          try {
+            fn(e);
+          } catch {
+            /* one bad subscriber must not break the shared stream */
+          }
+        }
+      },
+      onError: handlers.onError,
+      onTerminal: () => {
+        handlers.onTerminal?.();
+        sharedSubs.delete(deploymentId);
+      },
+    },
+    { limit: 100 },
+  );
+  sharedSubs.set(deploymentId, { sub, refs: 1, handlers: handlersSet });
+  let released = false;
+  return {
+    close: () => {
+      if (released) return;
+      released = true;
+      const entry = sharedSubs.get(deploymentId);
+      if (!entry) return;
+      entry.handlers.delete(handlers.onEvent);
+      entry.refs -= 1;
+      if (entry.refs <= 0) {
+        entry.sub.close();
+        sharedSubs.delete(deploymentId);
+      }
+    },
+    get closed() {
+      return released;
     },
   };
 }
@@ -348,16 +526,19 @@ export async function analyzeChangeImpact(
 export async function fetchChangeImpact(
   deploymentId: string,
 ): Promise<ChangeImpactResponse> {
-  const response = await apiFetch(
-    `/api/deploy/${encodeURIComponent(deploymentId)}/change-impact`,
-    {
-      cache: "no-store",
-    },
-  );
+  const path = `/api/deploy/${encodeURIComponent(deploymentId)}/change-impact`;
+  const now = Date.now();
+  const hit = apiCache.get(path);
+  // change-impact is immutable once computed for a run; cache longer but
+  // fall back to direct fetch (404 when not yet computed is normal).
+  if (hit && hit.expiry > now) return hit.data as ChangeImpactResponse;
+  const response = await apiFetch(path, { cache: "no-store" });
   if (!response.ok) {
     throw await parseError(response);
   }
-  return response.json();
+  const data = (await response.json()) as ChangeImpactResponse;
+  apiCache.set(path, { expiry: now + 30000, data });
+  return data;
 }
 
 export async function fetchDemoChangeImpact(): Promise<ChangeImpactResponse> {
@@ -416,11 +597,7 @@ export async function fetchRunsList(params?: {
   if (params?.limit != null) query.set("limit", String(params.limit));
   if (params?.offset != null) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  const response = await apiFetch(`/api/deploys${suffix}`, { cache: "no-store" });
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-  return response.json();
+  return cachedGet<RunsListResponse>(`/api/deploys${suffix}`);
 }
 
 export interface RunLogLine {
@@ -434,11 +611,21 @@ export interface RunLogLine {
   is_demo: boolean;
 }
 
+export interface RuntimeLogsResponse {
+  available: boolean;
+  container?: string | null;
+  code?: string | null;
+  stdout?: string;
+  stderr?: string;
+}
+
 export interface RunLogsResponse {
   deployment_id: string;
   is_demo: boolean;
   label: string | null;
+  execution_mode: string | null;
   lines: RunLogLine[];
+  runtime_logs: RuntimeLogsResponse | null;
 }
 
 export async function fetchRunLogs(deploymentId: string): Promise<RunLogsResponse> {
@@ -462,18 +649,11 @@ export interface ConstraintsArtifact {
 export async function fetchConstraintsArtifact(
   deploymentId: string,
 ): Promise<ConstraintsArtifact | null> {
-  const response = await apiFetch(
-    `/api/deploy/${encodeURIComponent(deploymentId)}/constraints`,
-    {
-      cache: "no-store",
-    },
-  );
-  if (!response.ok) return null;
-  const body = (await response.json()) as {
+  const body = await cachedGetOrNull<{
     constraints?: ConstraintView[];
     negotiation?: NegotiationView | null;
-  };
-  if (!body.constraints) return null;
+  }>(`/api/deploy/${encodeURIComponent(deploymentId)}/constraints`);
+  if (!body?.constraints) return null;
   return { constraints: body.constraints, negotiation: body.negotiation ?? null };
 }
 
@@ -485,18 +665,12 @@ export interface VerificationArtifact {
 export async function fetchVerificationArtifact(
   deploymentId: string,
 ): Promise<VerificationArtifact | null> {
-  const response = await apiFetch(
-    `/api/deploy/${encodeURIComponent(deploymentId)}/verification`,
-    {
-      cache: "no-store",
-    },
-  );
-  if (!response.ok) return null;
-  const body = (await response.json()) as {
+  const body = await cachedGetOrNull<{
     verification?: Record<string, unknown> | null;
     critic?: Record<string, unknown> | null;
-  };
-  if (body.verification == null && body.critic == null) return null;
+  }>(`/api/deploy/${encodeURIComponent(deploymentId)}/verification`);
+  if (body?.verification == null && body?.critic == null) return null;
+  if (!body) return null;
   return { verification: body.verification ?? null, critic: body.critic ?? null };
 }
 
@@ -506,18 +680,11 @@ export interface GraphArtifact {
 }
 
 export async function fetchGraphArtifact(deploymentId: string): Promise<GraphArtifact | null> {
-  const response = await apiFetch(
-    `/api/deploy/${encodeURIComponent(deploymentId)}/graph`,
-    {
-      cache: "no-store",
-    },
-  );
-  if (!response.ok) return null;
-  const body = (await response.json()) as {
+  const body = await cachedGetOrNull<{
     graph?: { nodes?: CegNode[]; edges?: CegEdge[] };
     rollback?: RollbackSummary | null;
-  };
-  if (!body.graph) return null;
+  }>(`/api/deploy/${encodeURIComponent(deploymentId)}/graph`);
+  if (!body?.graph) return null;
   return {
     graph: { nodes: body.graph.nodes ?? [], edges: body.graph.edges ?? [] },
     rollback: body.rollback ?? null,
@@ -531,6 +698,8 @@ export async function fetchGraphArtifact(deploymentId: string): Promise<GraphArt
  */
 export async function fetchRunHydration(deploymentId: string): Promise<{
   logs: RunLogLine[];
+  executionMode: string | null;
+  runtimeLogs: RuntimeLogsResponse | null;
   constraints: ConstraintsArtifact | null;
   verification: VerificationArtifact | null;
   graph: GraphArtifact | null;
@@ -543,8 +712,11 @@ export async function fetchRunHydration(deploymentId: string): Promise<{
     fetchGraphArtifact(deploymentId),
     fetchChangeImpact(deploymentId),
   ]);
+  const logsValue = logs.status === "fulfilled" ? logs.value : null;
   return {
-    logs: logs.status === "fulfilled" ? logs.value.lines : [],
+    logs: logsValue?.lines ?? [],
+    executionMode: logsValue?.execution_mode ?? null,
+    runtimeLogs: logsValue?.runtime_logs ?? null,
     constraints: constraints.status === "fulfilled" ? constraints.value : null,
     verification: verification.status === "fulfilled" ? verification.value : null,
     graph: graph.status === "fulfilled" ? graph.value : null,
@@ -625,11 +797,7 @@ export async function fetchProposals(params?: {
   if (params?.limit != null) query.set("limit", String(params.limit));
   if (params?.offset != null) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  const response = await apiFetch(`/api/proposals${suffix}`, { cache: "no-store" });
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-  return response.json();
+  return cachedGet<ProposalsListResponse>(`/api/proposals${suffix}`);
 }
 
 export async function decideProposal(
@@ -674,11 +842,7 @@ export interface ProjectsListResponse {
 }
 
 export async function fetchProjects(): Promise<ProjectsListResponse> {
-  const response = await apiFetch(`/api/projects`, { cache: "no-store" });
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-  return response.json();
+  return cachedGet<ProjectsListResponse>(`/api/projects`);
 }
 
 export async function createProject(input: {

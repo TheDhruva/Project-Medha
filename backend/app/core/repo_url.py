@@ -143,3 +143,52 @@ def validate_repository_url(raw: str) -> str:
     host = parsed.hostname or ""
     _check_host(host)
     return value
+
+
+def resolve_and_recheck(host: str) -> str:
+    """Resolve host via DNS and reject private/loopback/link-local targets.
+
+    Returns the pinned IP string. Raises RepositoryUrlError when the name
+    does not resolve to a public address. Callers must use the returned IP
+    (or refuse redirects away from it) at the connection boundary.
+    """
+    import socket
+
+    normalized = (host or "").strip().lower().rstrip(".")
+    if not normalized or normalized in _BLOCKED_HOSTNAMES or normalized.endswith(".internal"):
+        raise RepositoryUrlError("REPOSITORY_URL_BLOCKED", f"Repository host '{host}' is blocked.")
+    try:
+        infos = socket.getaddrinfo(normalized, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise RepositoryUrlError("REPOSITORY_URL_BLOCKED", f"Repository host '{host}' does not resolve.") from exc
+    if not infos:
+        raise RepositoryUrlError("REPOSITORY_URL_BLOCKED", f"Repository host '{host}' does not resolve.")
+    pinned = infos[0][4][0]
+    try:
+        ip = ipaddress.ip_address(pinned)
+    except ValueError as exc:
+        raise RepositoryUrlError("REPOSITORY_URL_BLOCKED", "Resolved address is invalid.") from exc
+    if ip.is_loopback and normalized not in {"localhost"}:
+        raise RepositoryUrlError("REPOSITORY_URL_BLOCKED", f"Repository host '{host}' resolves to loopback.")
+    if ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        raise RepositoryUrlError(
+            "REPOSITORY_URL_BLOCKED",
+            f"Repository host '{host}' resolves to a non-public address and is blocked.",
+        )
+    return pinned
+
+
+APPROVED_GITHUB_HOSTS = frozenset({"github.com", "api.github.com", "objects.githubusercontent.com"})
+
+
+def ensure_approved_github_host(url: str) -> str:
+    """Restrict GitHub acquisition to approved endpoints (redirect guard)."""
+    from urllib.parse import urlparse as _urlparse
+
+    host = (_urlparse(url).hostname or "").lower()
+    if host not in APPROVED_GITHUB_HOSTS:
+        raise RepositoryUrlError(
+            "REPOSITORY_URL_BLOCKED",
+            f"GitHub fetch host '{host}' is not approved.",
+        )
+    return host
