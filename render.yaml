@@ -50,10 +50,15 @@ services:
         generateValue: true
       # --- Clerk production authentication (dashboard secrets) ---
       # Create a PRODUCTION Clerk instance first, then paste values here.
-      # Without these, the service runs legacy single-operator (off) mode.
+      # ALL of these are required: without them the backend refuses to boot
+      # (fail-closed) and the frontend renders guest-only mode.
       - key: MEDHA_AUTH_MODE
         value: clerk
       - key: CLERK_DOMAIN
+        sync: false
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
         sync: false
       # Only needed for custom Clerk domains; skip for *.clerk.accounts.dev.
       # - key: CLERK_JWKS_URL

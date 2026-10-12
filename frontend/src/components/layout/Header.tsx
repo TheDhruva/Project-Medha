@@ -5,6 +5,11 @@ import { Show, UserButton, SignInButton, SignUpButton } from "@clerk/nextjs";
 import { useOptionalDeployment } from "@/context/DeploymentContext";
 import { cn } from "@/lib/ui/cn";
 
+// Inlined at build time: keyless builds (Render before Clerk secrets are set)
+// have no ClerkProvider, and Clerk components throw without one — even at
+// prerender. Guest mode simply hides the account controls.
+const CLERK_ON = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+
 export function Header() {
   const deployment = useOptionalDeployment();
   const snapshot = deployment?.snapshot;
@@ -75,20 +80,24 @@ export function Header() {
             </button>
           )}
 
-          {/* Account controls */}
-          <Show when="signed-out">
-            <SignInButton mode="modal">
-              <button
-                type="button"
-                className="rounded-full px-2.5 py-0.5 text-[11px] font-medium text-medha-secondary transition-colors hover:bg-medha-surface-muted hover:text-medha-text"
-              >
-                Sign in
-              </button>
-            </SignInButton>
-          </Show>
-          <Show when="signed-in">
-            <UserButton />
-          </Show>
+          {/* Account controls (hidden without Clerk keys — guest mode) */}
+          {CLERK_ON && (
+            <Show when="signed-out">
+              <SignInButton mode="modal">
+                <button
+                  type="button"
+                  className="rounded-full px-2.5 py-0.5 text-[11px] font-medium text-medha-secondary transition-colors hover:bg-medha-surface-muted hover:text-medha-text"
+                >
+                  Sign in
+                </button>
+              </SignInButton>
+            </Show>
+          )}
+          {CLERK_ON && (
+            <Show when="signed-in">
+              <UserButton />
+            </Show>
+          )}
         </div>
       </div>
     </header>

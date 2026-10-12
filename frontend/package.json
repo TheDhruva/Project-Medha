@@ -15,7 +15,6 @@
     "@xyflow/react": "^12.11.6",
     "autoprefixer": "10.4.20",
     "lucide-react": "^1.47.0",
-    "medha": "file:..",
     "next": "15.5.7",
     "react": "^18",
     "react-dom": "^18"

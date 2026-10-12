@@ -1,5 +1,5 @@
 import { clerkMiddleware } from "@clerk/nextjs/server";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 const TOKEN_HEADER = "X-Medha-Token";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -17,8 +17,13 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
  * the backend then allows it locally, or fails closed when MEDHA_ENV is
  * production. Streaming (SSE) is untouched: this middleware never reads the
  * request/response body.
+ *
+ * Without Clerk keys (e.g. Render build/preview before dashboard secrets are
+ * set) Clerk's middleware would throw on every request, so fall back to
+ * token-only injection. Guest demo keeps working; protected routes just see
+ * signed-out state.
  */
-export default clerkMiddleware((_auth, request) => {
+function injectApiToken(request: NextRequest) {
   if (!MUTATING_METHODS.has(request.method)) {
     return NextResponse.next();
   }
@@ -29,7 +34,15 @@ export default clerkMiddleware((_auth, request) => {
   const headers = new Headers(request.headers);
   headers.set(TOKEN_HEADER, token);
   return NextResponse.next({ request: { headers } });
-});
+}
+
+const clerkHandler = clerkMiddleware((_auth, request) => injectApiToken(request));
+
+const hasClerkKeys =
+  !!process.env.CLERK_SECRET_KEY ||
+  !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+
+export default hasClerkKeys ? clerkHandler : injectApiToken;
 
 export const config = {
   matcher: [

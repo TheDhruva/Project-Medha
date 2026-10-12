@@ -34,3 +34,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local run logs (regenerable via npm run build/lint/test)
+build-output*.txt
+lint-output*.txt
+eslint-errors.txt
+test-output*.txt
+test-summary.txt
+vitest-*.txt

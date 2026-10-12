@@ -7,6 +7,12 @@ backend/data/
 data/*.db
 frontend/node_modules/
 frontend/.next/
+frontend/build-output*.txt
+frontend/lint-output*.txt
+frontend/eslint-errors.txt
+frontend/test-output*.txt
+frontend/test-summary.txt
+frontend/vitest-*.txt
 node_modules/
 __pycache__/
 *.db
