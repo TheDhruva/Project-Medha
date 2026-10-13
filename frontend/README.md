@@ -44,8 +44,8 @@ Graph (CIG)** — visually distinct from the CEG — with evidence-labelled
 dependency edges, risk factor list, changed files, direct/transitive impact,
 unresolved dependencies, and verification requirements (executable vs
 source-level, never faked). It consumes `snapshot.changeIntel` from the live
-SSE pipeline or a labelled `DEMO/MOCK` fixture; in the idle state a
-"Load demo fixture" button fetches `GET /api/change-impact/demo/fixture`.
+SSE pipeline (`POST /api/change-impact/analyze` for ad-hoc repo revisions,
+`GET /api/deploy/{id}/change-impact` for persisted results).
 
 Live payloads arrive on the ANALYZE stage via `data.change_intel` (mapped in
 `src/lib/api/eventMapper.ts`).

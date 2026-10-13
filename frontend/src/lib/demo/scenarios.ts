@@ -10,48 +10,7 @@ import type {
   VerificationView,
 } from "./types";
 
-export const SCENARIOS: ScenarioMeta[] = [
-  {
-    id: "SUCCESSFUL_DEPLOYMENT",
-    name: "Successful Deployment",
-    description:
-      "A clean path from analysis through negotiation, verification, and execution.",
-    expectedBehavior:
-      "All stages succeed. Constraints agree without conflict. The causal graph shows every service healthy.",
-  },
-  {
-    id: "PORT_CONFLICT",
-    name: "Port Conflict",
-    description:
-      "Two specialist agents claim the same host port before anything is started.",
-    expectedBehavior:
-      "CNP detects the conflict, resolves it within bounded rounds, remaps Nginx to an alternative port, then continues.",
-  },
-  {
-    id: "SECURITY_CONFLICT",
-    name: "Security Conflict",
-    description:
-      "A preference for unrestricted access conflicts with a security policy.",
-    expectedBehavior:
-      "SECURITY priority wins over PREFERENCE. The unsafe request is rejected; deployment continues with the hardened choice.",
-  },
-  {
-    id: "VERIFICATION_FAILURE",
-    name: "Verification Failure",
-    description:
-      "Generated configuration fails a hard verification gate, then MEDHA performs one bounded replan.",
-    expectedBehavior:
-      "Verification fails once (missing env), replan round 1 corrects the fixture, verification passes, then execution succeeds.",
-  },
-  {
-    id: "PARTIAL_FAILURE",
-    name: "Partial Failure",
-    description:
-      "Backend fails after dependent services have started.",
-    expectedBehavior:
-      "MEDHA identifies the affected branch and preserves independent successful services via scoped rollback.",
-  },
-];
+export const SCENARIOS: ScenarioMeta[] = [];
 
 export const STAGE_ORDER: StageId[] = [
   "PREFLIGHT",
@@ -193,7 +152,9 @@ export function emptyCritic(): CriticView {
 }
 
 export function scenarioById(id: ScenarioId): ScenarioMeta {
-  return SCENARIOS.find((s) => s.id === id) ?? SCENARIOS[0];
+  const found = SCENARIOS.find((s) => s.id === id);
+  if (!found) throw new Error(`Unknown scenario (demo catalog removed): ${id}`);
+  return found;
 }
 
 export function setStages(

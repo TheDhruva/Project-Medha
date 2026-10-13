@@ -60,7 +60,17 @@ def git_env_with_token(token: str) -> dict[str, str]:
 
 
 def redact_token_env(env: dict[str, str]) -> dict[str, str]:
-    return {k: ("***" if "header" in k.lower() or "author" in v.lower() else v) for k, v in env.items()}
+    """Redact any secret-bearing git env entry by key name.
+
+    Keys carrying credentials (extraHeader / GIT_CONFIG_VALUE_* / token /
+    author / bearer) are replaced with "***". Matching is key-based only —
+    never depends on the secret value itself.
+    """
+    _SENSITIVE_KEY_PARTS = ("header", "author", "token", "bearer", "git_config_value")
+    return {
+        k: ("***" if any(part in k.lower() for part in _SENSITIVE_KEY_PARTS) else v)
+        for k, v in env.items()
+    }
 
 
 def build_app_jwt(*, app_id: str, private_key_pem: str, now: float | None = None) -> str:

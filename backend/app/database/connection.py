@@ -14,7 +14,7 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _SCHEMA_PG_PATH = Path(__file__).with_name("schema_pg.sql")
 
 # Bump when schema.sql or migration steps change. Tracked via PRAGMA user_version.
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 _ARTIFACT_COLUMNS = (
     "result_json",
@@ -252,6 +252,74 @@ def _ensure_v5_tables(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_V8_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS jobs (
+        job_id TEXT PRIMARY KEY,
+        delivery_id TEXT UNIQUE,
+        project_id TEXT,
+        repository TEXT NOT NULL,
+        branch TEXT NOT NULL DEFAULT 'main',
+        base_sha TEXT,
+        target_sha TEXT NOT NULL,
+        seq INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        deployment_id TEXT,
+        last_error TEXT,
+        not_before TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_jobs_repo_branch_seq
+        ON jobs (repository, branch, seq)""",
+    """CREATE INDEX IF NOT EXISTS idx_jobs_status
+        ON jobs (status)""",
+    """CREATE TABLE IF NOT EXISTS commits (
+        project_id TEXT NOT NULL,
+        sha TEXT NOT NULL,
+        parents_json TEXT NOT NULL DEFAULT '[]',
+        author TEXT,
+        committed_at TEXT,
+        message TEXT,
+        branch TEXT,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, sha)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_commits_project_time
+        ON commits (project_id, committed_at)""",
+    """CREATE TABLE IF NOT EXISTS scores (
+        run_id TEXT NOT NULL,
+        score_name TEXT NOT NULL,
+        value REAL,
+        value_null INTEGER NOT NULL DEFAULT 0,
+        version TEXT NOT NULL DEFAULT 'v1',
+        computed_at TEXT NOT NULL,
+        inputs_hash TEXT NOT NULL,
+        target_sha TEXT NOT NULL,
+        project_id TEXT,
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, score_name)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_scores_project_sha
+        ON scores (project_id, target_sha)""",
+    """CREATE TABLE IF NOT EXISTS analysis_cache (
+        cache_key TEXT PRIMARY KEY,
+        project_id TEXT,
+        kind TEXT NOT NULL,
+        inputs_hash TEXT NOT NULL,
+        target_sha TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}'
+    )""",
+)
+
+
+def _ensure_v8_tables(conn: sqlite3.Connection) -> None:
+    for statement in _V8_TABLES_SQL:
+        conn.execute(statement)
+
+
 def _ensure_v6_columns(conn: sqlite3.Connection) -> None:
     """Project-scoped connections (v6): projects table + link columns."""
     for statement in _NEW_TABLES_SQL:
@@ -287,11 +355,42 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _ensure_owner_column(conn)
     _ensure_v5_tables(conn)
     _ensure_v6_columns(conn)
+    _ensure_v8_tables(conn)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
 def _split_statements(schema: str) -> list[str]:
     return [part.strip() for part in schema.split(";") if part.strip()]
+
+
+def _schema_code(schema: str) -> str:
+    """Schema text with full-line `--` comments removed.
+
+    schema.sql documents tables with comment blocks directly above the
+    CREATE TABLE they describe, and some comments contain semicolons.
+    Splitting the raw text on ";" would slice comment fragments into the
+    following statement, so a table chunk would no longer be recognized
+    as one: the table is silently skipped and its indexes later fail
+    with "no such table". All `--` markers in schema.sql are full-line
+    comments (no `--` inside string literals), so line filtering is safe.
+    """
+    return "\n".join(
+        line for line in schema.splitlines()
+        if not line.strip().startswith("--")
+    )
+
+
+def _code_without_comments(statement: str) -> str:
+    """Statement with leading/trailing `--` comment lines removed.
+
+    Kept as a safety net for classification when statements arrive from
+    other sources (e.g. inline migration SQL with header comments).
+    """
+    lines = [
+        line for line in statement.splitlines()
+        if not line.strip().startswith("--")
+    ]
+    return "\n".join(lines).strip()
 
 
 def _init_postgres() -> str:
@@ -332,14 +431,14 @@ def init_db(db_path: Path | None = None) -> Path | str:
     if resolve_backend(db_path) == "postgres":
         return _init_postgres()
     path = db_path or get_settings().database_path
-    schema = _SCHEMA_PATH.read_text(encoding="utf-8")
+    schema = _schema_code(_SCHEMA_PATH.read_text(encoding="utf-8"))
     with get_connection(path) as conn:
         # Legacy databases may lack newer columns that fresh-schema indexes
         # reference (e.g. owner_sub). Create tables first, heal columns via
         # _migrate, then create indexes — so upgrades never fail on index
         # creation against a stale column set.
         statements = _split_statements(schema)
-        tables = [s for s in statements if s.upper().startswith("CREATE TABLE")]
+        tables = [s for s in statements if _code_without_comments(s).upper().startswith("CREATE TABLE")]
         indexes = [s for s in statements if s.upper().startswith("CREATE")]
         indexes = [s for s in indexes if s not in tables]
         for statement in tables:

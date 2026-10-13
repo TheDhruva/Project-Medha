@@ -1,7 +1,9 @@
 # Real Execution Runbook (isolated Docker runtime)
 
 This is the operator guide for MEDHA's real application deployment path.
-Demo mode and the controlled BusyBox path need none of this.
+The demo engine is disabled by default (isolated tests only) and there is
+no simulated fallback: unconfigured execution fails closed with
+`EXECUTION_NOT_CONFIGURED`, never a substituted success.
 
 ## 1. What "real" means here
 
@@ -23,7 +25,7 @@ Readiness: loopback HTTP probe of the profile health endpoint (`/`) until
 
 - A Docker daemon reachable from the backend host (`docker version` works).
 - A **non-production** host (`MEDHA_ENV` anything but `production`; the
-  hosted control plane rejects real execution and stays simulator-only).
+  hosted control plane refuses execution with `EXECUTION_DISABLED_HOSTED`).
 - The daemon must allow image builds and container runs with the flags MEDHA
   enforces: `--cap-drop ALL`, `no-new-privileges`, memory/CPU/pids limits,
   loopback-only port publishing. Rootless Docker is fine.
@@ -77,7 +79,9 @@ installation can access the requested repo, and passes it to git via
 | `REAL_BUILDER_UNAVAILABLE` | no daemon / wrong host | run `docker version` on the backend host |
 | `REAL_EXECUTION_NOT_ENABLED` | flags missing | set both `MEDHA_EXECUTOR_MODE=real` and `MEDHA_DOCKER_EXECUTE=true` |
 | `REAL_EXECUTION_DISABLED_HOSTED` | `MEDHA_ENV=production` | real runs are control-plane-forbidden; use a separate builder host |
-| `UNSUPPORTED_STACK` | manifests not recognized | add `package.json` / requirements+entrypoint / `index.html`, or use demo |
+| `UNSUPPORTED_STACK` | manifests not recognized | add `package.json` / requirements+entrypoint / `index.html` |
+| `EXECUTION_NOT_CONFIGURED` | no executor configured | set simulator explicitly (test-only) or real+DOCKER_EXECUTE with a builder |
+| `EXECUTION_DISABLED_HOSTED` | `MEDHA_ENV=production` | execution is control-plane-forbidden; use a separate builder host |
 | `BUILD_FAILED` | deps or Dockerfile error | tail in the result message; fix the app, not the policy |
 | `READINESS_FAILED` / timed out | app crashed or wrong port | check `runtime_logs.stderr`; confirm the app listens on the target port |
 | `STALE_SOURCE` / `SHA_MISMATCH` | ref moved mid-flight | re-plan against the new SHA (by design, never auto-follow) |

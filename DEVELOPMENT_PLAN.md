@@ -438,7 +438,7 @@ Align docs with reality; polish UI copy; freeze V1 claims; viva + demo scripts.
 ### Components
 - README walkthrough + honest Implemented/Measured/Not supported
 - Architecture + research Mermaid diagrams
-- `docs/VIVA_GUIDE.md`, `docs/DEMO_SCRIPT.md`
+- `docs/VIVA_GUIDE.md`, `docs/archive/DEMO_SCRIPT.md`
 - Evaluation page honesty + loading/empty states
 - Env example cleanup; stale LangGraph/phase claims removed
 

@@ -29,6 +29,25 @@ SAFE_DEFAULT_IMAGE = "busybox:1.36"
 SAFE_DEFAULT_COMMAND = ["sleep", "3600"]
 
 
+class DemoDisabledError(RuntimeError):
+    """Raised when a demo run is requested while MEDHA_ENABLE_DEMO=false."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Demo runs are disabled. Demo scenarios are isolated test fixtures; "
+            "use a verified repository analysis for real work."
+        )
+        self.code = "DEMO_DISABLED"
+
+
+class ExecutionUnavailableError(RuntimeError):
+    """Raised when no real executor is configured and silent simulation is refused."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "EXECUTION_NOT_CONFIGURED"
+
+
 class Executor(ABC):
     @abstractmethod
     async def execute(
@@ -397,16 +416,32 @@ class DockerExecutor(Executor):
 
 
 def choose_executor(*, is_demo: bool, prefer_docker: bool = True) -> Executor:
-    if is_demo:
-        return SimulatorExecutor(name="demo")
+    """Select an executor without ever silently substituting simulation.
+
+    - Demo runs require MEDHA_ENABLE_DEMO=true (isolated tests only).
+    - The simulator runs only when MEDHA_EXECUTOR_MODE=simulator is set
+      explicitly (development/tests); results are labelled test-only and can
+      never be reported as healthy production deployments.
+    - Hosted production has no executor: callers fail closed instead.
+    - Anything else returns the controlled Docker test executor; callers that
+      need genuine application deployment must use the isolated RealExecutor
+      path (verified source + supported profile + readiness gate).
+    """
     from app.core.config import get_settings
 
     settings = get_settings()
-    # Hosted services are simulator-only by construction: even a misconfigured
+    if is_demo:
+        if not bool(getattr(settings, "enable_demo", False)):
+            raise DemoDisabledError()
+        return SimulatorExecutor(name="demo")
+    # Hosted services never execute: even a misconfigured
     # MEDHA_DOCKER_EXECUTE / MEDHA_EXECUTOR_MODE must not enable Docker
     # mutation outside the operator's own machine (no daemon exists there).
     if (settings.medha_env or "").strip().lower() == "production":
-        return SimulatorExecutor(name="simulator")
+        raise ExecutionUnavailableError(
+            "Execution is disabled on the hosted control plane. "
+            "Run analysis locally with an isolated builder."
+        )
     mode = (settings.executor_mode or "auto").lower()
     if mode == "simulator" or not prefer_docker:
         return SimulatorExecutor(name="simulator")
@@ -537,14 +572,25 @@ def _probe_service_readiness(ports: list[str] | None) -> dict[str, Any]:
 def _resolve_runtime_spec(
     plan: ExecutionPlan, service: str
 ) -> tuple[str, list[str], list[str] | None, dict[str, str] | None]:
-    """Map verified plan service to safe local runtime (busybox by default)."""
+    """Map verified plan service to its declared runtime.
+
+    Never substitutes a different image: placeholder or unapproved images
+    fail the service honestly (UNSUPPORTED_IMAGE) instead of silently running
+    BusyBox in place of the target application.
+    """
     compose = plan.compose or {}
     services = compose.get("services") or {}
     spec = services.get(service) or {}
-    image = str(spec.get("image") or SAFE_DEFAULT_IMAGE)
-    # Force known-safe images for mutate path — avoid building untrusted Dockerfiles.
-    if image.startswith("medha/") or not docker_ops._safe_image(image):
-        image = SAFE_DEFAULT_IMAGE
+    image = str(spec.get("image") or "")
+    # Placeholder plan images (medha/*:local) and anything outside the safe
+    # charset are rejected — the caller marks the service failed honestly.
+    if not image or image.startswith("medha/") or not docker_ops._safe_image(image):
+        raise docker_ops.DockerOpsError(
+            f"Service '{service}' has no runnable image in the verified plan "
+            "(placeholder image; genuine deployment requires the isolated "
+            "RealExecutor with a supported profile).",
+            code="UNSUPPORTED_IMAGE",
+        )
     command = spec.get("command")
     if isinstance(command, str):
         command = command.split()

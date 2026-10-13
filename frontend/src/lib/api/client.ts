@@ -46,8 +46,8 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 
 export interface DeployApiRequest {
   repository_url: string;
-  mode: "demo" | "real";
-  scenario?: ScenarioId | null;
+  mode: "real";
+  scenario?: null;
   target: { host: string; port: number };
   intent?: string;
   base_revision?: string | null;
@@ -541,16 +541,6 @@ export async function fetchChangeImpact(
   return data;
 }
 
-export async function fetchDemoChangeImpact(): Promise<ChangeImpactResponse> {
-  const response = await apiFetch(`/api/change-impact/demo/fixture`, {
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-  return response.json();
-}
-
 // --- Phase 3 Product API (runs list, artifacts, timeline) ---
 
 export interface RunSummary {
@@ -558,7 +548,14 @@ export interface RunSummary {
   status: string;
   mode: string;
   is_demo: boolean;
+  execution_mode?: string | null;
   label: string | null;
+  // Stored-state health (advisory). `healthy` appears only for real runs
+  // whose recorded readiness gate passed; live truth comes from fetchRunHealth.
+  health_status?: string | null;
+  health_checked_at?: string | null;
+  health_source?: string | null;
+  project_id?: string | null;
   scenario: ScenarioId | null;
   repository_url: string;
   intent: string | null;
@@ -580,13 +577,14 @@ export interface RunsListResponse {
   total: number;
   limit: number;
   offset: number;
-  filters: { status: string | null; mode: string | null; repository: string | null };
+  filters: { status: string | null; mode: string | null; repository: string | null; project_id?: string | null };
 }
 
 export async function fetchRunsList(params?: {
   status?: string;
   mode?: string;
   repository?: string;
+  project_id?: string;
   limit?: number;
   offset?: number;
 }): Promise<RunsListResponse> {
@@ -594,10 +592,54 @@ export async function fetchRunsList(params?: {
   if (params?.status) query.set("status", params.status);
   if (params?.mode) query.set("mode", params.mode);
   if (params?.repository) query.set("repository", params.repository);
+  if (params?.project_id) query.set("project_id", params.project_id);
   if (params?.limit != null) query.set("limit", String(params.limit));
   if (params?.offset != null) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return cachedGet<RunsListResponse>(`/api/deploys${suffix}`);
+}
+
+export interface RunHealth {
+  deployment_id: string;
+  is_demo: boolean;
+  health_status: string;
+  checked_at: string | null;
+  source: string | null;
+  reason: string | null;
+  execution_mode: string | null;
+  container?: string | null;
+}
+
+/**
+ * Observed runtime health for one run. `healthy` is returned only when an
+ * actual probe establishes it; anything unobservable is `unknown` — never a
+ * retained healthy label. Null when the backend cannot be reached.
+ */
+export async function fetchRunHealth(deploymentId: string): Promise<RunHealth | null> {
+  return cachedGetOrNull<RunHealth>(
+    `/api/deploy/${encodeURIComponent(deploymentId)}/health`,
+  );
+}
+
+export interface ConfigStatus {
+  env: string;
+  auth_mode: string;
+  executor_mode: string;
+  docker_execute: boolean;
+  demo_enabled: boolean;
+  configured: Record<string, boolean>;
+  github_app_configured: boolean;
+  docker_cli: boolean;
+  docker_daemon: boolean;
+  database_mode: string;
+  execution: string;
+  execution_reason: string;
+  production_ready: boolean | null;
+}
+
+/** Presence-only environment diagnostics (booleans, never secret values). */
+export async function fetchConfigStatus(): Promise<ConfigStatus | null> {
+  return cachedGetOrNull<ConfigStatus>(`/api/config/status`);
 }
 
 export interface RunLogLine {
@@ -724,6 +766,96 @@ export async function fetchRunHydration(deploymentId: string): Promise<{
   };
 }
 
+// --- Product scores (Phase 6: versioned, evidence-backed, queryable) ---
+
+export interface ProductScore {
+  value: number | null;
+  version: string;
+  computed_at: string;
+  inputs_hash: string;
+  target_sha: string | null;
+  evidence: Record<string, unknown>;
+}
+
+export interface ScoresResponse {
+  deployment_id: string;
+  is_demo: boolean;
+  label: string | null;
+  scores: Record<string, ProductScore>;
+}
+
+export async function fetchScores(deploymentId: string): Promise<ScoresResponse> {
+  const response = await apiFetch(
+    `/api/deploy/${encodeURIComponent(deploymentId)}/scores`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+// --- Commit history (Phase 7: real Git ancestry, paginated) ---
+
+export interface HistoryCommit {
+  sha: string;
+  parents: string[];
+  author: string | null;
+  committed_at: string | null;
+  message: string | null;
+  branch: string;
+  github_url: string | null;
+}
+
+export interface HistoryResponse {
+  project_id: string;
+  commits: HistoryCommit[];
+  partial: boolean;
+  truncated: boolean;
+  shallow: boolean;
+}
+
+export async function fetchCommitHistory(
+  projectId: string,
+  params?: { limit?: number; since?: string },
+): Promise<HistoryResponse> {
+  const query = new URLSearchParams();
+  if (params?.limit != null) query.set("limit", String(params.limit));
+  if (params?.since) query.set("since", params.since);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/history${suffix}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export interface CommitDetail {
+  sha: string;
+  files: { path: string; added: number; deleted: number }[];
+  added: number;
+  deleted: number;
+  truncated: boolean;
+  github_url: string | null;
+}
+
+export async function fetchCommitDetail(
+  projectId: string,
+  sha: string,
+): Promise<CommitDetail> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/history/${encodeURIComponent(sha)}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
 // --- AI provider status (safe metadata only; never secrets) ---
 
 export interface AiProviderHealth {
@@ -787,12 +919,14 @@ export interface ProposalsListResponse {
 
 export async function fetchProposals(params?: {
   repository?: string;
+  project_id?: string;
   status?: string;
   limit?: number;
   offset?: number;
 }): Promise<ProposalsListResponse> {
   const query = new URLSearchParams();
   if (params?.repository) query.set("repository", params.repository);
+  if (params?.project_id) query.set("project_id", params.project_id);
   if (params?.status) query.set("status", params.status);
   if (params?.limit != null) query.set("limit", String(params.limit));
   if (params?.offset != null) query.set("offset", String(params.offset));

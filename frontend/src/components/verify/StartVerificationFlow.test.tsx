@@ -8,7 +8,10 @@ vi.mock("next/navigation", () => ({
   useParams: () => ({}),
 }));
 
-const { setFormMock } = vi.hoisted(() => ({ setFormMock: vi.fn() }));
+const { setFormMock, startDeploymentMock } = vi.hoisted(() => ({
+  setFormMock: vi.fn(),
+  startDeploymentMock: vi.fn(),
+}));
 
 vi.mock("@/context/DeploymentContext", () => ({
   DeploymentProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -20,12 +23,12 @@ vi.mock("@/context/DeploymentContext", () => ({
       targetPort: "8080",
       intent: "Deploy",
       scenario: "PORT_CONFLICT",
-      mode: "demo",
+      mode: "real",
       baseRevision: "",
       targetRevision: "",
     },
     setForm: setFormMock,
-    startDeployment: vi.fn(),
+    startDeployment: startDeploymentMock,
     isRunning: false,
     snapshot: { deploymentId: null, runStatus: "idle" },
     connectionError: null,
@@ -38,35 +41,30 @@ describe("StartVerificationFlow", () => {
   beforeEach(() => {
     push.mockClear();
     setFormMock.mockClear();
+    startDeploymentMock.mockClear();
   });
 
-  it("asks what to verify with two clear choices", () => {
+  it("renders the real-repository analysis form with no demo choice", () => {
     render(<StartVerificationFlow />);
-    expect(screen.getByText("What would you like to verify?")).toBeInTheDocument();
-    expect(screen.getByText("Demo scenario")).toBeInTheDocument();
-    expect(screen.getByText("Git change")).toBeInTheDocument();
-  });
-
-  it("opens the demo scenario picker without advanced host/port fields", () => {
-    render(<StartVerificationFlow />);
-    fireEvent.click(screen.getByText("Demo scenario"));
-    expect(screen.getByText("Choose scenario")).toBeInTheDocument();
-    expect(screen.getByText("Port Conflict")).toBeInTheDocument();
-    expect(screen.queryByLabelText(/Target host/)).not.toBeInTheDocument();
-  });
-
-  it("opens the git flow with collapsed advanced options", () => {
-    render(<StartVerificationFlow />);
-    fireEvent.click(screen.getByText("Git change"));
+    expect(screen.getByText("New analysis")).toBeInTheDocument();
     expect(screen.getByLabelText("Repository")).toBeInTheDocument();
     expect(screen.getByLabelText("Base revision")).toBeInTheDocument();
+    expect(screen.queryByText("Demo scenario")).not.toBeInTheDocument();
+  });
+
+  it("forces real mode on mount", () => {
+    render(<StartVerificationFlow />);
+    expect(setFormMock).toHaveBeenCalledWith({ mode: "real" });
+  });
+
+  it("keeps advanced options collapsed by default", () => {
+    render(<StartVerificationFlow />);
     expect(screen.getByText("Advanced options")).toBeInTheDocument();
     expect(screen.queryByLabelText(/Target host/)).not.toBeInTheDocument();
   });
 
   it("wires revision inputs into the deployment form", () => {
     render(<StartVerificationFlow />);
-    fireEvent.click(screen.getByText("Git change"));
     fireEvent.change(screen.getByLabelText("Base revision"), {
       target: { value: "main" },
     });
@@ -75,5 +73,11 @@ describe("StartVerificationFlow", () => {
     });
     expect(setFormMock).toHaveBeenCalledWith({ baseRevision: "main" });
     expect(setFormMock).toHaveBeenCalledWith({ targetRevision: "HEAD" });
+  });
+
+  it("starts a real analysis from the form", () => {
+    render(<StartVerificationFlow />);
+    fireEvent.click(screen.getByText("Analyze change"));
+    expect(startDeploymentMock).toHaveBeenCalled();
   });
 });

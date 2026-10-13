@@ -251,7 +251,9 @@ async def verify_project(project_id: str, subject: str = RequireSubject):
         {"project": updated.to_api() if updated else project.to_api(),
          "reachable": False,
          "reason": "Repository is unreachable or private. Private repositories "
-                   "require a GitHub App (not yet implemented)."}
+                   "require a configured GitHub App (GITHUB_APP_ID + "
+                   "GITHUB_APP_PRIVATE_KEY + GITHUB_APP_INSTALLATION_ID); see "
+                   "docs/REAL_EXECUTION_RUNBOOK.md."}
     )
 
 

@@ -94,7 +94,7 @@ export function VerificationPanel() {
               </span>
             </p>
           </div>
-          <p className="font-display text-3xl font-semibold text-medha-accent-ink">
+          <p className="font-display text-3xl font-semibold text-medha-accent">
             {critic && (critic.score > 0 || critic.findings.length > 0) ? `${critic.score}` : "—"}
             <span className="text-base font-medium text-medha-tertiary"> / 100</span>
           </p>

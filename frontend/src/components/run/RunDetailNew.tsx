@@ -22,8 +22,8 @@ const LiveSystemTrace = dynamic(
 import { WhatMedhaIsDoing } from "@/components/explainability/WhatMedhaIsDoing";
 import { ViewModeToggle } from "@/components/explainability/ViewModeToggle";
 import { AppShell } from "@/components/layout/AppShell";
+import { MedhaFace, faceStateFromRun } from "@/components/medha/MedhaFace";
 import { DeploymentProvider, useDeployment } from "@/context/DeploymentContext";
-import { scenarioById } from "@/lib/demo/scenarios";
 import type { DeploymentSnapshot } from "@/lib/demo/types";
 import {
   DecisionCard,
@@ -37,14 +37,8 @@ import { RuntimeLogsPanel } from "@/components/run-detail/RuntimeLogs";
 import { cn } from "@/lib/ui/cn";
 
 function runTitle(snapshot: DeploymentSnapshot, deploymentId: string): string {
-  if (snapshot.scenario) {
-    try {
-      return scenarioById(snapshot.scenario).name;
-    } catch {
-      /* fall through */
-    }
-  }
   if (snapshot.changeIntel?.label) return snapshot.changeIntel.label;
+  if (snapshot.deploymentId) return `Run ${snapshot.deploymentId}`;
   return "Verification run";
 }
 
@@ -514,15 +508,25 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
         </div>
       </div>
 
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-medha-text">
-          {runTitle(snapshot, deploymentId)}
-        </h1>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-          <StatusLine snapshot={snapshot} />
-          <span className="medha-mono truncate text-[11px] text-medha-tertiary">
-            {deploymentId}
-          </span>
+      <div className="flex items-start gap-3">
+        <MedhaFace
+          state={faceStateFromRun({
+            status: snapshot.runStatus,
+            stage: snapshot.explain.currentStage,
+            verificationPassed: snapshot.verification?.passed ?? null,
+          })}
+          size={44}
+        />
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight text-medha-text">
+            {runTitle(snapshot, deploymentId)}
+          </h1>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <StatusLine snapshot={snapshot} />
+            <span className="medha-mono truncate text-[11px] text-medha-tertiary">
+              {deploymentId}
+            </span>
+          </div>
         </div>
       </div>
 

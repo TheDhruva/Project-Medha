@@ -123,7 +123,13 @@ def _run_git(
 
     merged = {**os.environ, **_secure_git_env(env)}
     # Never let secret-bearing values reach argv/exceptions: scrub before use.
-    safe_args = [a if "://" not in a or "@" not in a.split("/")[2] else "<redacted-url>" for a in args]
+    # Handles both https://user@host/... URLs and scp-like git@host:... syntax.
+    def _scrub(arg: str) -> str:
+        if "@" in arg and ("://" in arg or ":" in arg):
+            return "<redacted-url>"
+        return arg
+
+    safe_args = [_scrub(a) for a in args]
     try:
         completed = subprocess.run(
             ["git", *args],
@@ -200,7 +206,11 @@ def checkout_commit(repo_path: Path, sha: str, *, timeout: int = _GIT_TIMEOUT_S,
                     env: dict[str, str] | None = None) -> str:
     """Fetch + detach-checkout an exact commit, then assert HEAD == sha."""
     wanted = _require_full_sha(sha)
-    _run_git(["-C", str(repo_path), "fetch", "--depth", "1", "origin", wanted], timeout=timeout, env=env)
+    _run_git(
+        ["-C", str(repo_path), "-c", "http.followRedirects=false",
+         "fetch", "--depth", "1", "--filter=blob:none", "origin", wanted],
+        timeout=timeout, env=env,
+    )
     _run_git(
         ["-C", str(repo_path), "checkout", "--detach", "--force", wanted],
         timeout=timeout, env=env,

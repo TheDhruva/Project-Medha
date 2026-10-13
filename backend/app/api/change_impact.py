@@ -2,7 +2,6 @@
 
 POST /api/change-impact/analyze          — deterministic live analysis over a local git repo
 GET  /api/deploy/{id}/change-impact      — persisted analysis attached to a deployment
-GET  /api/change-impact/demo/fixture     — canned demo fixture, clearly labelled DEMO/MOCK
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from app.core.events import utc_now_iso
 from app.core.logging import get_logger
 from app.core.repo_url import RepositoryUrlError, validate_repository_url
 from app.database.repositories import DeploymentRepository
-from app.demo.fixtures import change_intel_demo
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api")
@@ -41,6 +39,16 @@ class ChangeImpactRequest(BaseModel):
             return validate_repository_url(value)
         except RepositoryUrlError as exc:
             raise ValueError(f"{exc.code}: {exc.message}") from exc
+
+    @field_validator("base_revision", "target_revision")
+    @classmethod
+    def revision_must_be_nonempty(cls, value: str) -> str:
+        candidate = (value or "").strip()
+        if not candidate or len(candidate) > 256 or any(c in candidate for c in ["\x00", "\n", "\r"]):
+            raise ValueError("revision must be a non-empty ref or SHA (max 256 chars)")
+        if candidate.startswith("-"):
+            raise ValueError("revision must not start with '-'")
+        return candidate
 
 
 def _error(status_code: int, code: str, message: str, details: dict | None = None) -> JSONResponse:
@@ -147,23 +155,5 @@ async def get_change_impact(deployment_id: str, subject: str = RequireSubject):
             "is_demo": bool(change_intel.get("is_demo", False)),
             "label": "DEMO/MOCK" if change_intel.get("is_demo") else None,
             "analysis": analysis,
-        }
-    )
-
-
-@router.get("/change-impact/demo/fixture", response_model=None)
-async def change_impact_demo_fixture():
-    analysis = change_intel_demo()
-    return JSONResponse(
-        {
-            "deployment_id": None,
-            "is_demo": True,
-            "label": "DEMO/MOCK",
-            "generated_at": utc_now_iso(),
-            "note": (
-                "Demo fixture: canned change-impact results to illustrate the Phase 2 "
-                "Change Intelligence UI. Not derived from a real repository."
-            ),
-            "analysis": analysis.to_ui(),
         }
     )

@@ -24,7 +24,10 @@ services:
       - key: MEDHA_DEBUG
         value: "false"
       - key: MEDHA_EXECUTOR_MODE
-        value: simulator
+        value: disabled
+      # Demo engine removed from the product (isolated test fixtures only).
+      - key: MEDHA_ENABLE_DEMO
+        value: "false"
       - key: MEDHA_DOCKER_EXECUTE
         value: "false"
       - key: MEDHA_DATABASE_PATH

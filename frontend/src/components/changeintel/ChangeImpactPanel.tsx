@@ -14,7 +14,6 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { fetchDemoChangeImpact } from "@/lib/api/client";
 import { layoutCig } from "@/lib/changeintel/layout";
 import type {
   ChangeIntelAnalysis,
@@ -98,20 +97,16 @@ export function ChangeImpactPanel({
   analysis?: ChangeIntelAnalysis | null;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [demo, setDemo] = useState<ChangeIntelAnalysis | null>(analysis ?? null);
-  const [demoError, setDemoError] = useState<string | null>(null);
-  const [loadingDemo, setLoadingDemo] = useState(false);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
   useEffect(() => {
-    setDemo(analysis ?? null);
     setSelectedId(null);
   }, [analysis]);
 
-  const view = analysis ?? demo;
+  const view = analysis;
   const nodeById = useMemo(() => {
     const map = new Map<string, ChangeIntelNode>();
     for (const n of view?.graph.nodes ?? []) map.set(n.id, n);
@@ -177,20 +172,6 @@ export function ChangeImpactPanel({
     );
   }, [selectedId, view]);
 
-  async function loadDemo() {
-    setLoadingDemo(true);
-    setDemoError(null);
-    try {
-      const response = await fetchDemoChangeImpact();
-      setDemo(response.analysis);
-      setSelectedId(null);
-    } catch {
-      setDemoError("Could not load the demo fixture. Is the backend running on :8000?");
-    } finally {
-      setLoadingDemo(false);
-    }
-  }
-
   if (!view) {
     return (
       <section className="medha-panel animate-medha-in">
@@ -206,19 +187,9 @@ export function ChangeImpactPanel({
         </div>
         <div className="flex flex-col items-center justify-center gap-3 px-6 py-10 text-center">
           <p className="max-w-lg text-sm text-medha-secondary">
-            No change-intelligence analysis yet. It appears alongside live deployments
-            with git revisions, or load the canned fixture to explore the CIG, risk, and
-            verification requirements.
+            No change-intelligence analysis yet. Run a real analysis with git
+            revisions to see the impact graph, risk, and verification requirements.
           </p>
-          <button
-            className="medha-btn"
-            type="button"
-            onClick={() => void loadDemo()}
-            disabled={loadingDemo}
-          >
-            {loadingDemo ? "Loading…" : "Load demo fixture"}
-          </button>
-          {demoError ? <p className="text-sm text-medha-danger">{demoError}</p> : null}
         </div>
       </section>
     );
@@ -289,7 +260,7 @@ export function ChangeImpactPanel({
                 {edgeLabels.map((lbl) => (
                   <div
                     key={lbl.id}
-                    className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-medha-border bg-white/90 px-1.5 py-0.5 text-[9px] font-semibold text-medha-secondary shadow-sm"
+                    className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-medha-border bg-medha-surface px-1.5 py-0.5 text-[9px] font-semibold text-medha-secondary shadow-sm"
                     style={{ left: lbl.x, top: lbl.y }}
                   >
                     {lbl.relationship}

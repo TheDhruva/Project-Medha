@@ -4,10 +4,13 @@ import type { RunSummary } from "@/lib/api/client";
 import {
   deriveProjects,
   filterProjects,
+  filterProjectsByStatus,
+  projectCardStatus,
   projectHealth,
   projectIdForRepo,
   repoForProjectId,
   shortNameForRepo,
+  sortProjects,
 } from "@/lib/projects/projects";
 import { derivePipeline, summarizeVerification } from "@/lib/projects/useProjectData";
 
@@ -64,9 +67,11 @@ describe("deriveProjects", () => {
   });
 
   it("flags attention only from real backend state", () => {
-    const healthy = deriveProjects([run({ deployment_id: "dep_1" })]);
-    expect(healthy[0]?.attention).toEqual([]);
-    expect(projectHealth(healthy[0]!)).toBe("healthy");
+    const quiet = deriveProjects([run({ deployment_id: "dep_1" })]);
+    expect(quiet[0]?.attention).toEqual([]);
+    // Completed is not healthy: without observed health-check evidence a
+    // finished project is idle, never "healthy".
+    expect(projectHealth(quiet[0]!)).toBe("idle");
 
     const failed = deriveProjects([
       run({ deployment_id: "dep_1", status: "failed", error_summary: "gate failed" }),
@@ -87,8 +92,114 @@ describe("deriveProjects", () => {
     ]);
     expect(filterProjects(projects, "atlas", "all")).toHaveLength(1);
     expect(filterProjects(projects, "", "attention")).toHaveLength(1);
-    expect(filterProjects(projects, "", "healthy")).toHaveLength(1);
     expect(filterProjects(projects, "missing", "all")).toHaveLength(0);
+  });
+
+  it("reports running projects as idle-free in-flight state, and search composes with filters", () => {
+    const projects = deriveProjects([
+      run({ deployment_id: "dep_1", repository_url: "https://github.com/example/atlas", status: "running" }),
+      run({ deployment_id: "dep_2", repository_url: "https://github.com/example/bore", status: "failed" }),
+    ]);
+    expect(projectHealth(projects[0]!)).toBe("running");
+    expect(projectHealth(projects[1]!)).toBe("attention");
+    // "attention" shows only the failed project; search narrows further.
+    expect(filterProjects(projects, "", "attention")).toHaveLength(1);
+    expect(filterProjects(projects, "bore", "attention")).toHaveLength(1);
+    expect(filterProjects(projects, "atlas", "attention")).toHaveLength(0);
+  });
+});
+
+describe("deriveProjects canonical identity", () => {
+  const project = {
+    project_id: "prj_abc123",
+    name: "Demo Service",
+    provider: "github",
+    repo_owner: "octo",
+    repo_name: "demo",
+    repository: "octo/demo",
+    canonical_url: "https://github.com/octo/demo.git",
+    branch: "main",
+    visibility: "public",
+    connection_status: "connected",
+    created_at: "2026-10-01T10:00:00Z",
+    updated_at: "2026-10-01T10:00:00Z",
+  };
+
+  it("joins runs to their canonical project id", () => {
+    const runs = [
+      run({ deployment_id: "dep_1", repository_url: "https://github.com/octo/demo.git", project_id: "prj_abc123" }),
+      run({ deployment_id: "dep_2", repository_url: "https://github.com/octo/demo.git", project_id: "prj_abc123", status: "failed", error_summary: "x" }),
+    ];
+    const summaries = deriveProjects(runs, [project]);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.id).toBe("prj_abc123");
+    expect(summaries[0]?.projectId).toBe("prj_abc123");
+    expect(summaries[0]?.legacy).toBe(false);
+    expect(summaries[0]?.name).toBe("Demo Service");
+    expect(summaries[0]?.totalRuns).toBe(2);
+  });
+
+  it("keeps unclaimed runs as legacy URL groups without ownership", () => {
+    const runs = [
+      run({ deployment_id: "dep_1", repository_url: "https://github.com/octo/demo.git", project_id: "prj_abc123" }),
+      run({ deployment_id: "dep_9", repository_url: "https://github.com/octo/other.git" }),
+    ];
+    const summaries = deriveProjects(runs, [project]);
+    expect(summaries).toHaveLength(2);
+    const legacy = summaries.find((p) => p.id !== "prj_abc123");
+    expect(legacy?.legacy).toBe(true);
+    expect(legacy?.projectId).toBeNull();
+  });
+
+  it("lists canonical projects with no runs yet", () => {
+    const summaries = deriveProjects([], [project]);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.totalRuns).toBe(0);
+    expect(summaries[0]?.latest).toBeNull();
+  });
+});
+
+describe("projectCardStatus / filterProjectsByStatus / sortProjects", () => {
+  it("maps completed without implying health, and surfaces no-runs/running", () => {
+    const completed = deriveProjects([run({ deployment_id: "dep_1" })]);
+    expect(projectCardStatus(completed[0]!)).toBe("completed");
+    const running = deriveProjects([
+      run({ deployment_id: "dep_1", status: "running" }),
+    ]);
+    expect(projectCardStatus(running[0]!)).toBe("running");
+    const failed = deriveProjects([
+      run({ deployment_id: "dep_1", status: "failed", error_summary: "x" }),
+    ]);
+    expect(projectCardStatus(failed[0]!)).toBe("attention");
+    const cancelled = deriveProjects([
+      run({ deployment_id: "dep_1", status: "cancelled" }),
+    ]);
+    // Cancelled never reads as a quiet success.
+    expect(projectCardStatus(cancelled[0]!)).toBe("attention");
+  });
+
+  it("multi-selects statuses and composes with trimmed case-insensitive search", () => {
+    const projects = deriveProjects([
+      run({ deployment_id: "dep_1", repository_url: "https://github.com/example/atlas" }),
+      run({ deployment_id: "dep_2", repository_url: "https://github.com/example/bore", status: "failed", error_summary: "x" }),
+      run({ deployment_id: "dep_3", repository_url: "https://github.com/example/cirrus", status: "running" }),
+    ]);
+    expect(filterProjectsByStatus(projects, "", [])).toHaveLength(3);
+    expect(filterProjectsByStatus(projects, "", ["attention", "running"])).toHaveLength(2);
+    expect(filterProjectsByStatus(projects, "  ATLAS ", ["completed"])).toHaveLength(1);
+    expect(filterProjectsByStatus(projects, "bore", ["completed"])).toHaveLength(0);
+    expect(filterProjectsByStatus(projects, "missing", [])).toHaveLength(0);
+  });
+
+  it("sorts deterministically by recent, name, and status", () => {
+    const projects = deriveProjects([
+      run({ deployment_id: "dep_1", repository_url: "https://github.com/example/beta", updated_at: "2026-10-01T10:00:00Z" }),
+      run({ deployment_id: "dep_2", repository_url: "https://github.com/example/alpha", status: "failed", error_summary: "x", updated_at: "2026-10-02T10:00:00Z" }),
+    ]);
+    expect(sortProjects(projects, "recent")[0]?.repositoryUrl).toContain("alpha");
+    expect(sortProjects(projects, "name")[0]?.repositoryUrl).toContain("alpha");
+    // Attention sorts before completed regardless of recency.
+    expect(sortProjects(projects, "status")[0]?.repositoryUrl).toContain("alpha");
   });
 });
 

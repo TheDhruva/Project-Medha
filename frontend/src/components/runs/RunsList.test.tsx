@@ -3,6 +3,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { RunsList } from "@/components/runs/RunsList";
 import { fetchRunsList } from "@/lib/api/client";
 
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/runs",
+  useParams: () => ({}),
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 vi.mock("@/lib/api/client", async (importOriginal) => {
   const original = (await importOriginal()) as Record<string, unknown>;
   return {

@@ -10,8 +10,9 @@ of Clerk user sessions. Flow:
    revalidates the exact plan hash before executing anything.
 4. Stale proposals (newer push, hash mismatch, wrong state) can never execute.
 
-Hosted execution stays in simulator mode unless the repository explicitly
-opts into local Docker (MEDHA_DOCKER_EXECUTE) — webhooks never enable it.
+Hosted execution stays disabled unless the operator explicitly configures
+an isolated builder (MEDHA_EXECUTOR_MODE=real + MEDHA_DOCKER_EXECUTE on a
+non-production host) — webhooks never enable it.
 """
 
 from __future__ import annotations
@@ -190,11 +191,13 @@ async def github_webhook(request: Request):
         )
         return JSONResponse({"status": "ignored", "reason": "branch not watched"})
 
-    if not repository or not sha or len(sha) < 7:
+    import re as _re
+
+    if not repository or not _re.fullmatch(r"[0-9a-fA-F]{40}", sha or ""):
         proposals.record_delivery(
             delivery_id=delivery_id, repository=repository, ref=ref or None,
             sha=sha or None, event=event, status="ignored",
-            received_at=now, note="missing repository or commit",
+            received_at=now, note="missing repository or full 40-hex commit SHA",
         )
         return JSONResponse({"status": "ignored", "reason": "missing repository or commit"})
 
@@ -326,6 +329,18 @@ async def _start_proposal_analysis(
         updated_at=now,
         is_demo=False,
     )
+    try:
+        from app.jobs.worker import enqueue_job
+
+        enqueue_job(
+            repository=repository, branch=branch, target_sha=sha,
+            base_sha=base_sha,
+            project_id=project.project_id if project is not None else None,
+            delivery_id=f"github:{delivery_id}:{proposal_id}",
+            deployment_id=deployment_id,
+        )
+    except Exception:  # noqa: BLE001 - job row is advisory; proposal is truth
+        logger.warning("Job enqueue failed for proposal=%s", proposal_id)
     try:
         repo.create(record)
         created = make_event(

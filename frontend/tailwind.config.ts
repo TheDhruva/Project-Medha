@@ -12,6 +12,7 @@ const config: Config = {
         medha: {
           bg: "var(--medha-bg)",
           warm: "var(--medha-bg-warm)",
+          sidebar: "var(--medha-sidebar)",
           surface: "var(--medha-surface)",
           muted: "var(--medha-surface-muted)",
           text: "var(--medha-text)",
@@ -27,6 +28,7 @@ const config: Config = {
           "run-soft": "var(--medha-run-soft)",
           "run-ink": "var(--medha-run-ink)",
           success: "var(--medha-success)",
+          "success-ink": "var(--medha-success-ink)",
           "success-soft": "var(--medha-success-soft)",
           warning: "var(--medha-warning)",
           "warning-soft": "var(--medha-warning-soft)",

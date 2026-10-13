@@ -86,6 +86,19 @@ DeploymentRequest
 | `confidence` | float | O | 0–1 |
 | `manifests_examined` | string[] | R | Paths |
 | `notes` | string[] | O | Human-readable, not CoT |
+| `framework` / `framework_version` | string \| null | O | Detected framework + version hint |
+| `lockfiles` | string[] | O | Detected lockfiles |
+| `entry_points` | string[] | O | Build/start commands with provenance |
+| `env_names` | string[] | O | Variable names only, never values |
+| `health_hints` | string[] | O | HEALTHCHECK / health script hints |
+| `app_candidates` | string[] | O | Monorepo deployable candidates |
+| `ci_configs` | string[] | O | CI workflow files (bounded scan) |
+| `test_suites` | string[] | O | Detected test files (bounded scan) |
+| `auth_hints` | string[] | O | Auth-sensitive modules (names only) |
+| `openapi_hints` | string[] | O | OpenAPI/Swagger references |
+| `db_hints` | string[] | O | Migration/schema hints |
+| `perf_notes` | string[] | O | Explicit measurement gaps / scan caps |
+| `source_file_count` / `source_bytes_approx` | int \| null | O | Processing-budget accounting |
 
 `ServiceHint`: `{ name, role, evidence_paths[] }`
 
@@ -324,6 +337,12 @@ SQLite tables (Postgres mirrors in `schema_pg.sql`) map closely to:
 - `webhook_deliveries` (delivery-ID idempotency)
 - `proposals` (+ `project_id`, `push_json` push-evidence summary)
 - `projects` (owner-scoped repo connections; see below)
+- `jobs` (durable analysis jobs: delivery, repo/branch, base/target SHA,
+  branch `seq`, status `queued|running|succeeded|failed|cancelled|superseded|dead_letter`,
+  attempts/backoff; schema v8)
+- `commits` (commit history metadata per project + SHA)
+- `scores` (versioned score snapshots per run + score name, with inputs hash)
+- `analysis_cache` (incremental cache validity metadata)
 
 No Redis caches required for correctness.
 

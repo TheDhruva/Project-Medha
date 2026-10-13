@@ -50,7 +50,7 @@ export function LiveSystemTrace() {
               style={{ animationDelay: `${Math.min(index, 8) * 20}ms` }}
             >
               <span
-                className={`absolute -left-[5px] top-3.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-current ${toneClass[event.tone]}`}
+                className={`absolute -left-[5px] top-3.5 h-2.5 w-2.5 rounded-full border-2 border-medha-surface bg-current ${toneClass[event.tone]}`}
                 aria-hidden
               />
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">

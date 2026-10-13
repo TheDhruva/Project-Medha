@@ -175,15 +175,9 @@ class TestFixtureAnalysis:
 
 @requires_fixtures
 class TestChangeIntelApi:
-    def test_demo_fixture_labelled(self, client: TestClient):
+    def test_demo_fixture_route_removed(self, client: TestClient):
         r = client.get("/api/change-impact/demo/fixture")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["is_demo"] is True
-        assert body["label"] == "DEMO/MOCK"
-        assert body["analysis"]["is_demo"] is True
-        assert body["analysis"]["risk"]["level"] == "medium"
-        assert body["analysis"]["graph"]["nodes"]
+        assert r.status_code == 404
 
     def test_analyze_live(self, client: TestClient):
         r = client.post(
@@ -205,9 +199,9 @@ class TestChangeIntelApi:
         deploy = client.post(
             "/api/deploy",
             json={
-                "repository_url": "https://github.com/example/app",
-                "mode": "demo",
-                "scenario": "SUCCESSFUL_DEPLOYMENT",
+                "repository_url": str(FIXTURES / "verification_req"),
+                "mode": "real",
+                "scenario": None,
                 "target": {"host": "localhost", "port": 8080},
             },
         )

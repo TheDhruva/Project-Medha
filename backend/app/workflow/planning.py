@@ -276,6 +276,39 @@ class PlanningPipeline:
                         },
                     )
 
+            # Invariant: every remote real run is bound to exactly one
+            # immutable commit SHA before analysis. Runs without an explicit
+            # revision resolve the remote HEAD here; unresolvable remotes fail
+            # closed — branch-tip clones without a recorded SHA are refused.
+            if resolved_sha is None and resolve_local_repo_path(record.repository_url) is None:
+                try:
+                    resolved_sha = await asyncio.to_thread(
+                        resolve_ref_to_sha,
+                        record.repository_url,
+                        "HEAD",
+                        env=git_auth_env or None,
+                    )
+                except _GAE as exc:
+                    await self._fail(
+                        deployment_id,
+                        "Cannot verify repository access: "
+                        f"{exc.message} Run a verification check first, or use a local path.",
+                        technical=f"git.{exc.code}",
+                    )
+                    return
+                await self._emit(
+                    deployment_id,
+                    EventType.SYSTEM_MESSAGE,
+                    f"Source pinned to commit {resolved_sha[:12]} (remote HEAD).",
+                    stage=StageId.ANALYZE.value,
+                    metadata={
+                        "simple": "MEDHA pinned the remote HEAD to an immutable commit before analysis.",
+                        "technical": f"requested_ref=HEAD · resolved_sha={resolved_sha}",
+                        "requested_ref": "HEAD",
+                        "resolved_sha": resolved_sha,
+                    },
+                )
+
             # ANALYZE
             self._status(
                 deployment_id,
@@ -315,25 +348,46 @@ class PlanningPipeline:
             change_intel = await self._run_change_intel(
                 deployment_id, record, settings, delay
             )
+            # Tier 1 (docs-only / no-change) makes zero LLM calls: deterministic
+            # evidence is sufficient and budgets forbid model use at tier 1.
+            _tier_one = False
+            try:
+                _fresh_ci = self._fresh_change_intel(deployment_id)
+                _tier_one = isinstance(_fresh_ci, dict) and isinstance(
+                    _fresh_ci.get("tier"), dict) and _fresh_ci["tier"].get("tier") == 1
+            except Exception:
+                _tier_one = False
             # change_summary and repo_interpretation are independent payloads
             # (shared budget + semaphore bound them safely) — overlap them.
             # _ai_assist never raises, so gather is latency-only.
-            await asyncio.gather(
-                self._ai_assist(
+            if not _tier_one:
+                await asyncio.gather(
+                    self._ai_assist(
+                        deployment_id,
+                        "change_summary",
+                        {"change": self._fresh_change_intel(deployment_id)},
+                        ai_ctx,
+                        stage=StageId.ANALYZE.value,
+                    ),
+                    self._ai_assist(
+                        deployment_id,
+                        "repo_interpretation",
+                        {"profile": self._dump_profile(profile)},
+                        ai_ctx,
+                        stage=StageId.ANALYZE.value,
+                    ),
+                )
+            else:
+                await self._emit(
                     deployment_id,
-                    "change_summary",
-                    {"change": self._fresh_change_intel(deployment_id)},
-                    ai_ctx,
+                    EventType.SYSTEM_MESSAGE,
+                    "Tier 1 analysis: deterministic checks only (0 LLM calls).",
                     stage=StageId.ANALYZE.value,
-                ),
-                self._ai_assist(
-                    deployment_id,
-                    "repo_interpretation",
-                    {"profile": self._dump_profile(profile)},
-                    ai_ctx,
-                    stage=StageId.ANALYZE.value,
-                ),
-            )
+                    metadata={
+                        "simple": "Documentation-only change: no model calls needed.",
+                        "technical": "tier=1 · llm_budget=0 · skipped=ai_assist",
+                    },
+                )
             await self._emit(
                 deployment_id,
                 EventType.SYSTEM_MESSAGE,
@@ -520,7 +574,12 @@ class PlanningPipeline:
                     if delay:
                         await asyncio.sleep(delay)
 
-            negotiation = run_cnp(deployment_id, all_constraints, is_demo=False)
+            from app.core.perf import stage as _stage_timer
+
+            with _stage_timer("cnp", deployment_id=deployment_id):
+                negotiation = run_cnp(deployment_id, all_constraints, is_demo=False)
+            ui_constraints = [c.to_ui() for c in negotiation.final_constraints]
+            ui_negotiation = negotiation.to_ui()
             ui_constraints = [c.to_ui() for c in negotiation.final_constraints]
             ui_negotiation = negotiation.to_ui()
 
@@ -786,6 +845,33 @@ class PlanningPipeline:
         risk_value = info.risk.level.value
         stored = info.model_dump(mode="json")
         stored["deployment_id"] = deployment_id
+        try:
+            from app.changeintel.tiers import inputs_hash as _inputs_hash
+            from app.changeintel.tiers import route as _route
+
+            _decision = _route(
+                [f.path for f in info.changeset.files],
+                risk_level=risk_value,
+                unresolved=len(info.unresolved),
+                blast_radius=len(info.graph.nodes),
+            )
+            stored["tier"] = {
+                "tier": _decision.tier,
+                "reason": _decision.reason,
+                "scope": _decision.scope,
+                "llm_budget": _decision.llm_budget,
+                "skipped": _decision.skipped,
+                "cache_hit": False,
+            }
+            stored["inputs_hash"] = _inputs_hash(
+                base_sha=info.changeset.base_sha,
+                target_sha=info.changeset.target_sha,
+                file_hashes={},
+                tool_version="changeintel-v1",
+                config={},
+            )
+        except Exception:
+            pass
         self.repo.save_artifacts(
             deployment_id, change_intel=stored, updated_at=utc_now_iso()
         )
@@ -981,18 +1067,21 @@ class PlanningPipeline:
                 },
             )
 
-            verification = run_verifier(
-                deployment_id=deployment_id,
-                profile=profile,
-                constraints=final_constraints,
-                negotiation=negotiation,
-                config_fragments=config_fragments,
-                replan_count=replan_count,
-                force_fail_env=force_fail_env and replan_count == 0,
-                is_demo=False,
-                change_requirements=change_requirements,
-                change_risk=change_risk,
-            )
+            from app.core.perf import stage as _verify_timer
+
+            with _verify_timer("verify", deployment_id=deployment_id):
+                verification = run_verifier(
+                    deployment_id=deployment_id,
+                    profile=profile,
+                    constraints=final_constraints,
+                    negotiation=negotiation,
+                    config_fragments=config_fragments,
+                    replan_count=replan_count,
+                    force_fail_env=force_fail_env and replan_count == 0,
+                    is_demo=False,
+                    change_requirements=change_requirements,
+                    change_risk=change_risk,
+                )
             ui_verification = verification.to_ui()
             self.repo.save_artifacts(
                 deployment_id,
@@ -1134,14 +1223,15 @@ class PlanningPipeline:
                 stage=StageId.VERIFY.value,
                 metadata={"simple": "MEDHA critic is scoring the negotiated plan."},
             )
-            critic = run_critic(
-                deployment_id=deployment_id,
-                profile=profile,
-                constraints=final_constraints,
-                negotiation=negotiation,
-                verification=verification,
-                config_fragments=config_fragments,
-            )
+            with _verify_timer("critic", deployment_id=deployment_id):
+                critic = run_critic(
+                    deployment_id=deployment_id,
+                    profile=profile,
+                    constraints=final_constraints,
+                    negotiation=negotiation,
+                    verification=verification,
+                    config_fragments=config_fragments,
+                )
             ui_critic = critic.to_ui()
             self.repo.save_artifacts(
                 deployment_id, critic=ui_critic, verification=ui_verification, updated_at=utc_now_iso()
@@ -1228,7 +1318,8 @@ class PlanningPipeline:
             )
             break
 
-        # EXECUTE
+        # EXECUTE — real topology only. No synthetic services are ever
+        # injected: the plan reflects the actual discovered service topology.
         exec_plan = build_execution_plan(
             deployment_id=deployment_id,
             profile=profile,
@@ -1237,42 +1328,8 @@ class PlanningPipeline:
             fail_service=fail_service,
             is_demo=False,
         )
-        # Canonical research-graph expansion for CEG demo quality. The
-        # repository's detected services are preserved in the profile; the
-        # added services are SYNTHETIC demonstration scaffolding and are
-        # labelled as such in events/results — never presented as detected.
-        services = {a.service for a in exec_plan.actions}
-        required = {"network", "database", "backend", "frontend", "analytics"}
-        synthetic_services: list[str] = sorted(required - services)
-        expanded_to_canonical = bool(synthetic_services)
-        if expanded_to_canonical:
-            from app.models.domain import InferredStack, ServiceHint
-
-            profile.inferred_stack = InferredStack(
-                services=[
-                    ServiceHint(name="network", role="network"),
-                    ServiceHint(name="database", role="database"),
-                    ServiceHint(name="backend", role="api", suggested_port=profile.target_port),
-                    ServiceHint(name="frontend", role="web"),
-                    ServiceHint(name="analytics", role="service"),
-                ],
-                language_runtime=profile.inferred_stack.language_runtime,
-                has_dockerfile=profile.inferred_stack.has_dockerfile,
-                has_compose=profile.inferred_stack.has_compose,
-                package_managers=profile.inferred_stack.package_managers,
-                suggested_ports=profile.inferred_stack.suggested_ports,
-                confidence=profile.inferred_stack.confidence,
-                manifests_examined=profile.inferred_stack.manifests_examined,
-                notes=[*profile.inferred_stack.notes, "Expanded to canonical CEG services"],
-            )
-            exec_plan = build_execution_plan(
-                deployment_id=deployment_id,
-                profile=profile,
-                constraints=final_constraints,
-                config_fragments=config_fragments,
-                fail_service=fail_service,
-                is_demo=False,
-            )
+        synthetic_services: list[str] = []
+        expanded_to_canonical = False
 
         ceg = build_ceg_from_plan(exec_plan)
 
@@ -1311,27 +1368,11 @@ class PlanningPipeline:
             "Causal execution graph created from ExecutionPlan.",
             stage=StageId.EXECUTE.value,
             metadata={
-                "simple": (
-                    "MEDHA built the causal execution graph before running actions."
-                    + (
-                        f" Demonstration scaffolding added synthetic services: "
-                        f"{', '.join(synthetic_services)}."
-                        if expanded_to_canonical
-                        else ""
-                    )
-                ),
-                "technical": (
-                    f"nodes={len(ceg.nodes)} · edges={len(ceg.edges)}"
-                    + (
-                        f" · expanded_to_canonical=true "
-                        f"synthetic_services={synthetic_services}"
-                        if expanded_to_canonical
-                        else " · expanded_to_canonical=false"
-                    )
-                ),
+                "simple": ("MEDHA built the causal execution graph before running actions."),
+                "technical": (f"nodes={len(ceg.nodes)} · edges={len(ceg.edges)}"),
                 "graph": ceg.to_ui(),
-                "synthetic_services": synthetic_services,
-                "expanded_to_canonical": expanded_to_canonical,
+                "synthetic_services": [],
+                "expanded_to_canonical": False,
             },
         )
         self.repo.save_artifacts(deployment_id, graph=ceg.to_ui(), updated_at=utc_now_iso())
@@ -1457,7 +1498,73 @@ class PlanningPipeline:
             },
         )
 
-        executor = choose_executor(is_demo=False, prefer_docker=True)
+        # Execution routing: never silently simulate. The simulator runs only
+        # when MEDHA_EXECUTOR_MODE=simulator is set explicitly (isolated
+        # development/tests); its results are labelled test-only and can never
+        # be reported as healthy. Anything else without the isolated real
+        # runtime fails closed with actionable guidance.
+        _env = (get_settings().medha_env or "").strip().lower()
+        _mode = (get_settings().executor_mode or "auto").strip().lower()
+        if _env == "production":
+            await self._fail(
+                deployment_id,
+                "Execution is disabled on the hosted control plane. "
+                "Run analysis locally with an isolated builder.",
+                technical="EXECUTION_DISABLED_HOSTED",
+                result={
+                    "kind": "failed",
+                    "title": "EXECUTION_DISABLED_HOSTED",
+                    "final_status": "failed",
+                    "message": "Execution is disabled on the hosted control plane.",
+                    "durationLabel": "verify",
+                    "servicesLabel": "0 / 0 started",
+                    "verificationScore": critic.score if critic else None,
+                    "constraintsResolved": constraints_resolved,
+                    "rollbackScope": None,
+                    "phase": PHASE_LABEL,
+                    "is_demo": False,
+                    "code": "EXECUTION_DISABLED_HOSTED",
+                    "execution_mode": "unconfigured",
+                    "repository_url": _sha_record.repository_url if _sha_record else None,
+                    "target_sha": resolved_sha,
+                    "requested_ref": requested_ref,
+                    "plan": canonical_plan,
+                    "plan_hash": plan_digest,
+                },
+            )
+            return
+        if _mode != "simulator":
+            await self._fail(
+                deployment_id,
+                "Execution is not configured: set MEDHA_EXECUTOR_MODE=simulator "
+                "for explicit test-only runs, or MEDHA_EXECUTOR_MODE=real with "
+                "MEDHA_DOCKER_EXECUTE=true and an isolated Docker builder for "
+                "genuine deployment. MEDHA does not substitute simulation for "
+                "real execution.",
+                technical="EXECUTION_NOT_CONFIGURED",
+                result={
+                    "kind": "failed",
+                    "title": "EXECUTION_NOT_CONFIGURED",
+                    "final_status": "failed",
+                    "message": "Execution is not configured for genuine deployment.",
+                    "durationLabel": "verify",
+                    "servicesLabel": "0 / 0 started",
+                    "verificationScore": critic.score if critic else None,
+                    "constraintsResolved": constraints_resolved,
+                    "rollbackScope": None,
+                    "phase": PHASE_LABEL,
+                    "is_demo": False,
+                    "code": "EXECUTION_NOT_CONFIGURED",
+                    "execution_mode": "unconfigured",
+                    "repository_url": _sha_record.repository_url if _sha_record else None,
+                    "target_sha": resolved_sha,
+                    "requested_ref": requested_ref,
+                    "plan": canonical_plan,
+                    "plan_hash": plan_digest,
+                },
+            )
+            return
+        executor = choose_executor(is_demo=False, prefer_docker=False)
 
         async def on_event(etype: str, message: str, meta: dict) -> None:
             mapping = {
@@ -1487,7 +1594,8 @@ class PlanningPipeline:
                     deployment_id, graph=meta["graph"], updated_at=utc_now_iso()
                 )
 
-        graph, exec_result, scope = await executor.execute(exec_plan, ceg, on_event=on_event)
+        with _verify_timer("execute", deployment_id=deployment_id):
+            graph, exec_result, scope = await executor.execute(exec_plan, ceg, on_event=on_event)
 
         if scope is None and exec_result.status not in {"SUCCESS", "PARTIAL_FAILURE"}:
             message = "; ".join(exec_result.errors) or f"Execution failed ({exec_result.status})"
@@ -1646,8 +1754,8 @@ class PlanningPipeline:
         )
         result["phase"] = PHASE_LABEL
         result["execution_mode"] = "controlled_test" if exec_result.executor == "docker" else exec_result.executor
-        result["synthetic_services"] = synthetic_services
-        result["expanded_to_canonical"] = expanded_to_canonical
+        result["synthetic_services"] = []
+        result["expanded_to_canonical"] = False
         result["repository_url"] = _sha_record.repository_url if _sha_record else None
         result["target_sha"] = resolved_sha or _exact_sha_or_none(
             _sha_record.target_revision if _sha_record else None
@@ -1655,12 +1763,6 @@ class PlanningPipeline:
         result["requested_ref"] = requested_ref
         result["plan"] = canonical_plan
         result["plan_hash"] = plan_digest
-        if expanded_to_canonical:
-            result["message"] = (
-                f"{message} Demonstration scaffolding added synthetic services "
-                f"({', '.join(synthetic_services)}); detected repository services "
-                "are unchanged in the stored profile."
-            )
         self.repo.save_artifacts(
             deployment_id,
             graph=graph.to_ui(),

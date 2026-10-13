@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { Show, UserButton, SignInButton, SignUpButton } from "@clerk/nextjs";
-import { useOptionalDeployment } from "@/context/DeploymentContext";
-import { cn } from "@/lib/ui/cn";
+import { Show, UserButton, SignInButton } from "@clerk/nextjs";
+import { useParams, usePathname } from "next/navigation";
+import { repoForProjectId, shortNameForRepo } from "@/lib/projects/projects";
 
 // Inlined at build time: keyless builds (Render before Clerk secrets are set)
 // have no ClerkProvider, and Clerk components throw without one — even at
@@ -11,75 +11,37 @@ import { cn } from "@/lib/ui/cn";
 const CLERK_ON = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
 export function Header() {
-  const deployment = useOptionalDeployment();
-  const snapshot = deployment?.snapshot;
-  const form = deployment?.form;
-  const isDemo = (form?.mode === "demo" || snapshot?.isDemo) ?? true;
-  const isRunning = snapshot?.runStatus === "running";
+  const pathname = usePathname() ?? "";
+  const params = useParams<{ id?: string }>();
+  const activeId = params?.id ?? null;
 
-  // Project name: use the deployment form's repository URL context, or fall
-  // back to the demo project name.
-  const projectLabel = isDemo
-    ? "Atlas Commerce"
-    : snapshot?.explain?.technicalText
-      ? `${snapshot.explain.technicalText.slice(0, 30)}…`
-      : "My Project";
+  // Current project context only: never fixture branding, never demo badges.
+  const repo =
+    activeId && pathname.startsWith("/projects/") ? repoForProjectId(activeId) : null;
+  const projectName = repo ? shortNameForRepo(repo) : null;
 
   return (
-    <header
-      className="flex min-h-[64px] items-center justify-between border-b border-medha-border bg-medha-surface px-4 sm:px-6"
-    >
-      <div className="flex items-center gap-2 max-w-7xl w-full mx-auto">
-        <div className="flex items-center gap-2">
+    <header className="sticky top-0 z-40 h-16 shrink-0 border-b border-medha-border bg-medha-surface">
+      <div className="mx-auto flex h-full w-full max-w-[1600px] items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
+        <div className="flex min-w-0 items-center gap-2">
           <Link
-            href={isDemo ? "/" : "/projects"}
-            className="rounded-md px-3 py-1.5 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+            href="/projects"
+            className="shrink-0 rounded-md px-2 py-1.5 font-display text-[15px] font-bold tracking-tight text-medha-text transition hover:text-medha-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
           >
-            <span className="text-[15px] font-bold tracking-tight text-medha-text">
-              MEDHA
-            </span>
+            MEDHA
           </Link>
 
-          {isDemo ? (
-            <span className="text-[12px] text-medha-secondary truncate">Atlas Commerce</span>
-          ) : (
-            <span className="text-[12px] text-medha-secondary truncate">{projectLabel}</span>
-          )}
+          {projectName ? (
+            <span className="flex min-w-0 items-center gap-2">
+              <span aria-hidden className="h-4 w-px shrink-0 bg-medha-border" />
+              <span className="max-w-[38vw] truncate text-[12.5px] font-medium text-medha-secondary sm:max-w-none">
+                {projectName}
+              </span>
+            </span>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 items-center gap-3">
-          <span
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold",
-              isDemo ? "border-medha-border bg-medha-surface-muted text-medha-secondary" : "border-medha-border bg-medha-surface-soft text-medha-secondary",
-            )}
-            title={
-              deployment
-                ? isDemo
-                  ? "Demo Mode uses labelled fixtures"
-                  : "Real Mode local pipeline"
-                  : "Default environment"
-            }
-          >
-            <span
-              className={cn("status-dot", isDemo ? "bg-medha-tertiary" : "bg-medha-tertiary")}
-              aria-hidden
-            />
-            {isDemo ? "DEMO" : "LIVE"}
-          </span>
-
-          {/* Primary new-run action — only in demo mode when no run is actively open */}
-          {isDemo && !isRunning && (
-            <button
-              type="button"
-              onClick={() => window.location.pathname = "/runs/new"}
-              className="rounded-md px-3 py-1.5 text-[10px] font-medium text-medha-accent hover:bg-medha-accent-soft transition-colors"
-              title="Start new DEMO run"
-            >
-              New run
-            </button>
-          )}
-
           {/* Account controls (hidden without Clerk keys — guest mode) */}
           {CLERK_ON && (
             <Show when="signed-out">

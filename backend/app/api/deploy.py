@@ -20,8 +20,6 @@ from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
 from app.core.redact import redact_mapping, redact_text
 from app.database.repositories import DeploymentRepository, ProjectRepository
-from app.demo.runner import schedule_demo_runner
-from app.demo.scenarios import list_scenarios
 from app.models.deployment import DeploymentRecord, DeploymentRequest, DeploymentResponse
 from app.workflow.planning import schedule_planning_pipeline
 
@@ -84,6 +82,7 @@ def _run_summary(record: DeploymentRecord) -> dict:
         risk = change_intel["risk"].get("level")
     result = record.result or {}
     ai = record.ai if isinstance(record.ai, dict) else {}
+    health = _stored_health(record)
     return {
         "deployment_id": record.deployment_id,
         "status": record.status.value,
@@ -96,6 +95,9 @@ def _run_summary(record: DeploymentRecord) -> dict:
         )
         or ("demo" if record.is_demo else "controlled_test"),
         "label": "DEMO/MOCK" if record.is_demo else None,
+        "health_status": health["status"],
+        "health_checked_at": health.get("checked_at"),
+        "health_source": health.get("source"),
         "scenario": record.scenario.value if record.scenario else None,
         "repository_url": record.repository_url,
         "intent": record.intent,
@@ -113,19 +115,48 @@ def _run_summary(record: DeploymentRecord) -> dict:
     }
 
 
-@router.get("/demo/scenarios")
-async def demo_scenarios():
-    return JSONResponse(
-        {
-            "is_demo": True,
-            "label": "DEMO/MOCK",
-            "scenarios": list_scenarios(),
-            "note": (
-                "Demo Mode simulates deployment behavior and is not evidence of real "
-                "infrastructure execution."
-            ),
-        }
-    )
+def _stored_health(record: DeploymentRecord) -> dict:
+    """Honest stored-state health derived from persisted artifacts only.
+
+    Never equates workflow completion with application health: only a real
+    execution whose recorded readiness gate passed reports `healthy`.
+    Simulator, controlled-test, and demo runs report `test_only`/`demo` and
+    must never be displayed as healthy production state. Anything without a
+    finished real result is `unknown`.
+    """
+    if record.is_demo:
+        return {"status": "demo", "checked_at": record.updated_at,
+                "source": "stored",
+                "reason": "Demo fixture; not a real deployment."}
+    result = record.result if isinstance(record.result, dict) else None
+    if result is None:
+        return {"status": "unknown", "checked_at": record.updated_at,
+                "source": "stored", "reason": "No execution result recorded yet."}
+    mode = result.get("execution_mode")
+    if mode in {"simulator", "simulator_fallback", "demo"}:
+        return {"status": "test_only", "checked_at": record.updated_at,
+                "source": "stored",
+                "reason": "Simulator/test execution; not application health."}
+    if mode in {"controlled_test", "docker", "docker_unavailable"}:
+        return {"status": "test_only", "checked_at": record.updated_at,
+                "source": "stored",
+                "reason": "Controlled-test execution (placeholder services); not application health."}
+    if mode == "real":
+        readiness = result.get("readiness") if isinstance(result.get("readiness"), dict) else {}
+        kind = result.get("kind")
+        if kind == "success" and readiness.get("status") == "ready":
+            return {"status": "healthy", "checked_at": record.updated_at,
+                    "source": "stored",
+                    "reason": "Recorded readiness gate passed at execution time; re-probe via /health for liveness."}
+        if kind == "failed":
+            return {"status": "unhealthy", "checked_at": record.updated_at,
+                    "source": "stored",
+                    "reason": result.get("message") or "Real execution failed."}
+        return {"status": "unknown", "checked_at": record.updated_at,
+                "source": "stored",
+                "reason": "Real execution finished without a conclusive readiness record."}
+    return {"status": "unknown", "checked_at": record.updated_at,
+            "source": "stored", "reason": "Unrecognized execution record."}
 
 
 @router.get("/deploys")
@@ -187,16 +218,17 @@ async def create_deployment(
         limit_per_minute=get_settings().rate_limit_per_minute,
     ):
         return _error(429, "RATE_LIMITED", "Too many deployment requests; retry later.")
-    if payload.mode == DeployMode.DEMO and payload.scenario is None:
+    if payload.mode == DeployMode.DEMO:
         return _error(
-            400,
-            "SCENARIO_REQUIRED",
-            "scenario is required when mode=demo",
+            410,
+            "DEMO_REMOVED",
+            "Demo mode has been removed from the product. Connect a repository "
+            "for a verified real analysis instead.",
         )
 
     deployment_id = f"dep_{uuid4().hex[:16]}"
     now = utc_now_iso()
-    is_demo = payload.mode == DeployMode.DEMO
+    is_demo = False
 
     if not is_demo:
         from app.core.deploy_lock import DeployBusyError, try_acquire_real_deploy
@@ -215,22 +247,14 @@ async def create_deployment(
                 },
             )
 
-    if is_demo:
-        explain_simple = "Deployment accepted. DEMO pipeline is starting."
-        explain_technical = (
-            f"deployment_id={deployment_id} · workflow=demo · "
-            f"scenario={payload.scenario.value if payload.scenario else None} · is_demo=true"
-        )
-        created_message = "DEMO deployment created."
-    else:
-        explain_simple = (
-            "Deployment accepted. Real pipeline starting "
-            "(analyze → CNP → verify → local execute)."
-        )
-        explain_technical = (
-            f"deployment_id={deployment_id} · workflow=planning · phases=10-12 · is_demo=false"
-        )
-        created_message = "Real-mode deployment created."
+    explain_simple = (
+        "Deployment accepted. Real pipeline starting "
+        "(analyze → CNP → verify → local execute)."
+    )
+    explain_technical = (
+        f"deployment_id={deployment_id} · workflow=planning · phases=10-12 · is_demo=false"
+    )
+    created_message = "Real-mode deployment created."
 
     record = DeploymentRecord(
         deployment_id=deployment_id,
@@ -272,18 +296,12 @@ async def create_deployment(
         await asyncio.to_thread(repo.add_event, created)
         await event_bus.publish(created)
 
-        if is_demo:
-            assert payload.scenario is not None
-            schedule_demo_runner(deployment_id, payload.scenario, repo=repo)
-            logger.info("Created demo deployment_id=%s scenario=%s", deployment_id, payload.scenario)
-        else:
-            schedule_planning_pipeline(deployment_id, repo=repo)
-            logger.info("Created real planning deployment_id=%s", deployment_id)
+        schedule_planning_pipeline(deployment_id, repo=repo)
+        logger.info("Created real planning deployment_id=%s", deployment_id)
     except Exception:
-        if not is_demo:
-            from app.core.deploy_lock import release_real_deploy
+        from app.core.deploy_lock import release_real_deploy
 
-            release_real_deploy(deployment_id)
+        release_real_deploy(deployment_id)
         raise
 
     return DeploymentResponse(
@@ -447,6 +465,75 @@ async def get_execution(deployment_id: str, subject: str = RequireSubject):
             "result": record.result,
             "graph": record.graph or {"nodes": [], "edges": []},
             "rollback": record.rollback,
+        }
+    )
+
+
+@router.get("/deploy/{deployment_id}/health", response_model=None)
+async def deployment_health(deployment_id: str, subject: str = RequireSubject):
+    """Observed runtime health for one deployment (live probe, bounded).
+
+    `Healthy` is reported only when an actual recent probe establishes it.
+    Simulator/demo/controlled-test runs always report non-healthy states.
+    When the runtime cannot be observed, the status is `unknown` — never a
+    retained healthy label.
+    """
+    record = await _owned_record(deployment_id, subject)
+    if record is None:
+        return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
+    stored = _stored_health(record)
+    result = record.result if isinstance(record.result, dict) else {}
+    if stored["status"] != "healthy" or result.get("execution_mode") != "real":
+        return JSONResponse(
+            {
+                "deployment_id": deployment_id,
+                "is_demo": record.is_demo,
+                "health_status": stored["status"],
+                "checked_at": stored.get("checked_at"),
+                "source": stored.get("source"),
+                "reason": stored.get("reason"),
+                "execution_mode": result.get("execution_mode"),
+            }
+        )
+    container = result.get("container")
+    if not container:
+        return JSONResponse(
+            {
+                "deployment_id": deployment_id,
+                "is_demo": False,
+                "health_status": "unknown",
+                "checked_at": utc_now_iso(),
+                "source": "live-probe",
+                "reason": "Real execution succeeded but no container identity was recorded.",
+                "execution_mode": "real",
+            }
+        )
+    from app.execution import docker_ops
+
+    running = await asyncio.to_thread(docker_ops.container_running, container)
+    if running:
+        return JSONResponse(
+            {
+                "deployment_id": deployment_id,
+                "is_demo": False,
+                "health_status": "healthy",
+                "checked_at": utc_now_iso(),
+                "source": "live-probe",
+                "reason": f"Container '{container}' observed running.",
+                "execution_mode": "real",
+                "container": container,
+            }
+        )
+    return JSONResponse(
+        {
+            "deployment_id": deployment_id,
+            "is_demo": False,
+            "health_status": "unhealthy",
+            "checked_at": utc_now_iso(),
+            "source": "live-probe",
+            "reason": f"Container '{container}' is not running.",
+            "execution_mode": "real",
+            "container": container,
         }
     )
 

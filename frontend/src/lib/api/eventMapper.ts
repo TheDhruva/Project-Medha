@@ -51,25 +51,23 @@ function toneForEvent(type: string, level: string): TraceEvent["tone"] {
 export function createRunningSnapshot(
   deploymentId: string,
   scenario: ScenarioId | null,
-  isDemo = true,
+  isDemo = false,
 ): DeploymentSnapshot {
   return {
     deploymentId,
-    isDemo,
-    executionMode: isDemo ? "demo" : "simulator",
+    isDemo: false,
+    executionMode: "controlled_test",
     runtimeLogs: null,
-    scenario: isDemo ? scenario : null,
+    scenario: null,
     runStatus: "running",
     explain: {
       currentStage: null,
       round: null,
       statusLabel: "Started",
-      simpleText: isDemo
-        ? "Deployment accepted by MEDHA backend. Waiting for DEMO pipeline events…"
-        : "Deployment accepted. Waiting for real analysis / CNP events…",
-      technicalText: isDemo
-        ? `deployment_id=${deploymentId} · source=api+sse · workflow=demo · is_demo=true`
-        : `deployment_id=${deploymentId} · source=api+sse · workflow=planning · phases=10-12`,
+      simpleText:
+        "Deployment accepted. Waiting for real analysis / CNP events…",
+      technicalText:
+        `deployment_id=${deploymentId} · source=api+sse · workflow=planning · phases=10-12`,
     },
     pipeline: initialPipeline(),
     agents: initialAgents(),

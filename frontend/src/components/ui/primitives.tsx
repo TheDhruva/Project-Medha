@@ -126,7 +126,7 @@ export function Breadcrumbs({ items }: { items: { label: string; href?: string }
 
 export function Badge({ tone = "neutral", children }: { tone?: "success" | "warning" | "error" | "info" | "neutral"; children: ReactNode }) {
   const cls =
-    tone === "success" ? "border-medha-success/30 bg-medha-success-soft text-medha-success"
+    tone === "success" ? "border-medha-success/30 bg-medha-success-soft text-medha-success-ink"
     : tone === "warning" ? "border-medha-warning/30 bg-medha-warning-soft text-medha-warning"
     : tone === "error" ? "border-medha-danger/30 bg-medha-danger-soft text-medha-danger"
     : tone === "info" ? "border-medha-run/25 bg-medha-run-soft text-medha-run-ink"
@@ -193,7 +193,7 @@ export function ErrorBox({ message, onRetry }: { message: string; onRetry?: () =
       <p className="font-semibold">Something went wrong.</p>
       <p className="mt-1">{message}</p>
       {onRetry ? (
-        <button type="button" onClick={onRetry} className="mt-3 rounded-lg border border-medha-danger/30 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-white/70">
+        <button type="button" onClick={onRetry} className="mt-3 rounded-lg border border-medha-danger/30 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-medha-danger-soft">
           Retry
         </button>
       ) : null}
@@ -236,7 +236,7 @@ export function Dialog({ title, body, confirmLabel, cancelLabel = "Cancel", onCo
   }, [onCancel]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="absolute inset-0 bg-medha-text/30" onClick={onCancel} aria-hidden />
+      <div className="absolute inset-0" style={{ backgroundColor: "rgba(36, 39, 43, 0.35)" }} onClick={onCancel} aria-hidden />
       <div className="relative w-full max-w-md rounded-xl border border-medha-border bg-white p-5 shadow-medha">
         <h2 className="text-[16px] font-semibold text-medha-text">{title}</h2>
         <div className="mt-2 text-sm leading-relaxed text-medha-secondary">{body}</div>

@@ -22,7 +22,7 @@ def test_create_deployment(client):
     body = response.json()
     assert body["deployment_id"].startswith("dep_")
     assert body["status"] == "started"
-    assert body["is_demo"] is True
+    assert body["is_demo"] is False
 
 
 def test_get_deployment(client):
@@ -32,7 +32,7 @@ def test_get_deployment(client):
     assert response.status_code == 200
     body = response.json()
     assert body["deployment_id"] == deployment_id
-    assert body["scenario"] == "PORT_CONFLICT"
+    assert body["scenario"] is None
     assert body["target"]["port"] == 8080
 
 
@@ -42,9 +42,20 @@ def test_deployment_not_found(client):
     assert response.json()["error"]["code"] == "NOT_FOUND"
 
 
-def test_validation_error_missing_scenario(client):
-    payload = _deploy_payload()
-    payload.pop("scenario")
+def test_demo_mode_removed_from_product(client):
+    payload = _deploy_payload(mode="demo", scenario="PORT_CONFLICT")
+    response = client.post("/api/deploy", json=payload)
+    assert response.status_code in {410, 422}
+    if response.status_code == 410:
+        assert response.json()["error"]["code"] == "DEMO_REMOVED"
+
+
+def test_demo_scenarios_route_gone(client):
+    assert client.get("/api/demo/scenarios").status_code == 404
+
+
+def test_validation_error_bad_revision(client):
+    payload = _deploy_payload(target_revision="main")
     response = client.post("/api/deploy", json=payload)
     assert response.status_code == 422
 
@@ -70,8 +81,8 @@ def test_events_and_logs_generated(client):
     created = client.post("/api/deploy", json=_deploy_payload()).json()
     deployment_id = created["deployment_id"]
 
-    # Wait for demo workflow to finish.
-    deadline = time.time() + 15
+    # Wait for the real pipeline (explicit-simulator executor) to finish.
+    deadline = time.time() + 30
     status = "started"
     while time.time() < deadline:
         status = client.get(f"/api/deploy/{deployment_id}").json()["status"]
@@ -95,7 +106,7 @@ def test_constraints_and_graph_populated_after_demo(client):
     created = client.post("/api/deploy", json=_deploy_payload()).json()
     deployment_id = created["deployment_id"]
 
-    deadline = time.time() + 10
+    deadline = time.time() + 30
     status = "started"
     while time.time() < deadline:
         status = client.get(f"/api/deploy/{deployment_id}").json()["status"]
@@ -106,10 +117,14 @@ def test_constraints_and_graph_populated_after_demo(client):
     assert status == "completed"
     constraints = client.get(f"/api/deploy/{deployment_id}/constraints").json()
     graph = client.get(f"/api/deploy/{deployment_id}/graph").json()
-    assert len(constraints["constraints"]) >= 2
-    assert constraints["negotiation"]["status"] == "resolved"
-    assert len(graph["graph"]["nodes"]) >= 5
-    assert len(graph["graph"]["edges"]) >= 4
+    # Real topology only: single-service fixture yields network + app nodes,
+    # never synthetic canonical services.
+    assert isinstance(constraints["constraints"], list)
+    assert constraints["negotiation"]["status"] in {"resolved", "none"}
+    assert len(graph["graph"]["nodes"]) >= 2
+    assert len(graph["graph"]["edges"]) >= 1
+    services = {n["service"] for n in graph["graph"]["nodes"]}
+    assert "analytics" not in services
 
 
 def test_real_mode_accepted_for_planning(client):
@@ -180,7 +195,7 @@ def test_events_stream_replays_then_ends_on_terminal(client):
     types = [event["type"] for event in events]
     assert "deployment.created" in types
     assert "deployment.completed" in types
-    assert any(event.get("is_demo") is True for event in events)
+    assert all(event.get("is_demo") is False for event in events)
     # Terminal event is included and the stream ends (no ping block).
     assert events[-1]["type"] == "deployment.completed"
 
@@ -216,11 +231,10 @@ def test_list_deployments_returns_completed_run_summary(client):
     assert body["total"] >= 1
     run = next(r for r in body["runs"] if r["deployment_id"] == deployment_id)
     assert run["status"] == "completed"
-    assert run["mode"] == "demo"
-    assert run["is_demo"] is True
-    assert run["label"] == "DEMO/MOCK"
-    assert run["repository_url"] == "https://github.com/example/app"
-    assert run["scenario"] == "PORT_CONFLICT"
+    assert run["mode"] == "real"
+    assert run["is_demo"] is False
+    assert run["label"] is None
+    assert run["scenario"] is None
     assert run["duration_seconds"] is not None
     assert run["duration_seconds"] >= 0.0
     assert run["risk"] in {"high", "medium", "low", "none", None}
@@ -231,18 +245,15 @@ def test_list_deployments_filters(client):
     deployment_id = created["deployment_id"]
     assert _wait_completed(client, deployment_id) in {"completed", "failed", "partial_recovery"}
 
-    demo = client.get("/api/deploys", params={"mode": "demo"}).json()
-    assert demo["total"] >= 1
-    assert all(r["mode"] == "demo" for r in demo["runs"])
-
     real = client.get("/api/deploys", params={"mode": "real"}).json()
-    assert real["total"] == 0
+    assert real["total"] >= 1
+    assert all(r["mode"] == "real" for r in real["runs"])
 
     by_repo = client.get(
-        "/api/deploys", params={"repository": "github.com/example/app"}
+        "/api/deploys", params={"repository": "node_api"}
     ).json()
     assert by_repo["total"] >= 1
-    assert all("github.com/example/app" in r["repository_url"] for r in by_repo["runs"])
+    assert all("node_api" in r["repository_url"] for r in by_repo["runs"])
 
     by_status = client.get("/api/deploys", params={"status": "completed"}).json()
     assert by_status["total"] >= 1

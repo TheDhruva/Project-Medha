@@ -5,6 +5,8 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowLeft, CheckCircle2, XCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { RunDetailView } from "@/components/run/RunDetailNew";
+import { CommitGraph } from "@/components/history/CommitGraph";
+import { ScoresPanel } from "@/components/scores/ScoresPanel";
 import {
   Badge, Breadcrumbs, Button, DemoBadge, EmptyState, ErrorBox,
   PageHeader, Panel, Skeleton,
@@ -20,7 +22,7 @@ import { cn } from "@/lib/ui/cn";
 /* ================= shared ================= */
 
 function crumbs(projectId: string, name: string, tail: string) {
-  return <Breadcrumbs items={[{ label: "Projects", href: "/" }, { label: name, href: `/projects/${projectId}` }, { label: tail }]} />;
+  return <Breadcrumbs items={[{ label: "Projects", href: "/projects" }, { label: name, href: `/projects/${projectId}` }, { label: tail }]} />;
 }
 
 function NotFound({ what }: { what: string }) {
@@ -29,7 +31,7 @@ function NotFound({ what }: { what: string }) {
       <EmptyState
         title="Project not found"
         body={what}
-        action={<Link href="/" className="rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white">Back to hub</Link>}
+        action={<Link href="/projects" className="rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white">Back to projects</Link>}
       />
     </AppShell>
   );
@@ -330,7 +332,7 @@ export function OrchestrationView({ projectId }: { projectId: string }) {
                     {agents.map((a) => (
                       <li key={a.id} className="rounded-lg border border-medha-border bg-white px-2.5 py-1.5 text-[13px]">
                         <p className="flex items-center gap-2 font-medium text-medha-text">
-                          <span className={cn("status-dot", a.state === "done" ? "bg-medha-success" : a.state === "active" ? "bg-medha-run animate-medha-pulse" : a.state === "blocked" ? "bg-medha-danger" : "bg-medha-border-strong")} aria-hidden />
+                          <span className={cn("status-dot", a.state === "done" ? "bg-medha-success" : a.state === "active" ? "bg-medha-run" : a.state === "blocked" ? "bg-medha-danger" : "bg-medha-border-strong")} aria-hidden />
                           {a.label} <span className="font-normal text-medha-tertiary">· {a.state}</span>
                         </p>
                         <p className="mt-0.5 truncate text-medha-secondary" title={a.detail}>{a.detail}</p>
@@ -550,6 +552,13 @@ export function VerificationView({ projectId }: { projectId: string }) {
                     </>
                   )}
                 </Panel>
+                <Panel
+                  title="Evidence-backed scores"
+                  eyebrow="Versioned · reproducible from stored evidence"
+                  description="Deployment readiness, performance, optimization, and security. Missing evidence shows as unmeasured — never as success."
+                >
+                  <ScoresPanel runId={selected.deployment_id} />
+                </Panel>
               </>
             )}
           </>
@@ -594,6 +603,13 @@ export function GraphsView({ projectId }: { projectId: string }) {
             />
             {hydrating || !hydration ? <LoadingGrid /> : (
               <>
+                <Panel
+                  title="Git commit history"
+                  eyebrow="Real ancestry — click a node for detail"
+                  description="Actual Git parents, merges, authors, and diff summaries. CIG/CEG graphs below describe dependencies and execution, not ancestry."
+                >
+                  <CommitGraph projectId={projectId} />
+                </Panel>
                 <Panel
                   title={`Causal Execution Graph (${nodes.length} nodes, ${edges.length} edges)`}
                   eyebrow="Runtime causality — every meaningful execution action"
@@ -997,7 +1013,7 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
               <div className="flex flex-wrap gap-2">
                 <Link href={`/projects/${projectId}/runs`} className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">Runs & Executions</Link>
                 <Link href="/verify" className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">New analysis</Link>
-                <Link href="/" className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">Back to hub</Link>
+                <Link href="/projects" className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">All projects</Link>
               </div>
             </Panel>
           </>

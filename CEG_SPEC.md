@@ -90,9 +90,10 @@ Non-reversible actions → recorded as `not_rollbackable` / `NOT_ROLLBACKABLE`. 
 
 | Executor | Behavior |
 |----------|----------|
-| `SimulatorExecutor` | Deterministic in-process; default for tests + real mode unless opted in |
-| `DockerExecutor` | Local Docker only; mutates only when `MEDHA_DOCKER_EXECUTE=true`; otherwise falls back to simulator |
-| Demo Mode | Phase 3 `DemoRunner` fixtures (DEMO/MOCK labelled); does not use Docker |
+| `SimulatorExecutor` | Deterministic in-process; explicit test-only mode (`MEDHA_EXECUTOR_MODE=simulator`), never healthy |
+| `DockerExecutor` | Controlled-test placeholders; unapproved images fail honestly (`UNSUPPORTED_IMAGE`); never silently simulates when real mutation is requested |
+| `RealExecutor` | Genuine builds of supported profiles (`static`, `python`, `node`) behind a blocking readiness gate |
+| Demo | Removed from the product (isolated test fixtures only; historical records labelled) |
 
 Never execute arbitrary repo scripts / Makefiles / npm scripts outside a verified plan.
 

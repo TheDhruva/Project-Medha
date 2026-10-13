@@ -16,6 +16,22 @@ def _clear_deploy_lock():
     release_real_deploy()
 
 
+@pytest.fixture(autouse=True)
+def _explicit_test_execution(monkeypatch):
+    """Suite-wide isolated-test declarations (never production defaults).
+
+    The demo engine is explicitly enabled and the simulator explicitly
+    selected for every test. Production defaults are MEDHA_ENABLE_DEMO=false
+    and fail-closed execution (no silent simulator). Tests that pin other
+    modes override these via their own monkeypatch (applied after autouse).
+    """
+    monkeypatch.setenv("MEDHA_ENABLE_DEMO", "true")
+    monkeypatch.setenv("MEDHA_EXECUTOR_MODE", "simulator")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     db_path = tmp_path / "test_medha.db"
@@ -26,6 +42,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("MEDHA_DATABASE_URL", "")
     monkeypatch.setenv("MEDHA_CORS_ORIGINS", "http://localhost:3000")
     monkeypatch.setenv("MEDHA_WORKFLOW_STEP_DELAY_SECONDS", "0")
+    # Isolated-test declarations (never production defaults): the demo engine
+    # is explicitly enabled here, and the simulator is explicitly selected.
+    # Production defaults are MEDHA_ENABLE_DEMO=false and fail-closed
+    # execution (no silent simulator). See ADR-037.
+    monkeypatch.setenv("MEDHA_ENABLE_DEMO", "true")
+    monkeypatch.setenv("MEDHA_EXECUTOR_MODE", "simulator")
     get_settings.cache_clear()
     init_db(db_path)
     app = create_app()
@@ -35,10 +57,15 @@ def client(tmp_path, monkeypatch):
 
 
 def _deploy_payload(**overrides):
+    from pathlib import Path as _Path
+
+    _fixture_repo = str(
+        (_Path(__file__).resolve().parent / "fixtures" / "repos" / "node_api").resolve()
+    )
     payload = {
-        "repository_url": "https://github.com/example/app",
-        "mode": "demo",
-        "scenario": "PORT_CONFLICT",
+        "repository_url": _fixture_repo,
+        "mode": "real",
+        "scenario": None,
         "target": {"host": "localhost", "port": 8080},
         "intent": "Deploy securely",
     }

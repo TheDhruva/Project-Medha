@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     max_verify_rounds: int = Field(default=3, alias="MEDHA_MAX_VERIFY_ROUNDS")
     executor_mode: str = Field(default="auto", alias="MEDHA_EXECUTOR_MODE")
     api_token: str = Field(default="", alias="MEDHA_API_TOKEN")
+    # Demo/scenario engine: disabled by default. The deterministic DemoRunner
+    # stays available for isolated automated tests (MEDHA_ENABLE_DEMO=true),
+    # but demo runs must never be reachable as successful production runs.
+    enable_demo: bool = Field(default=False, alias="MEDHA_ENABLE_DEMO")
 
     # --- AI provider integration (Groq primary, Gemini fallback) ---
     # Disabled by default: the deterministic pipeline always works without keys.
@@ -106,7 +110,7 @@ class Settings(BaseSettings):
         if (self.executor_mode or "auto").strip().lower() in {"real", "docker"}:
             return (
                 "MEDHA_EXECUTOR_MODE must not be 'real'/'docker' on the hosted "
-                "control plane (simulator-only). Run the isolated builder separately."
+                "control plane (execution-disabled). Run the isolated builder separately."
             )
         return None
 

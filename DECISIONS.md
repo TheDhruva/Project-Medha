@@ -440,3 +440,76 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
   secrets, permission grants) — code + dashboard steps to be added with an
   explicit founder action, never fabricated credentials.
 - **Status:** Accepted
+
+## ADR-037 — No simulated production success (real-execution hardening)
+
+- **Decision:** (a) The demo engine is disabled by default
+  (`MEDHA_ENABLE_DEMO=false`; `POST /api/deploy` with `mode=demo` returns
+  `403 DEMO_DISABLED`). It remains for isolated automated tests only and must
+  never be reachable as a successful production run. (b) The simulator runs
+  only with `MEDHA_EXECUTOR_MODE=simulator` set explicitly; results are
+  labelled test-only (`execution_mode: simulator`, health `test_only`) and can
+  never be reported healthy. Unconfigured or hosted execution fails closed
+  (`EXECUTION_NOT_CONFIGURED` / `EXECUTION_DISABLED_HOSTED`). (c) The legacy
+  controlled-test Docker path no longer substitutes BusyBox for placeholder
+  plan images — unapproved images fail the service honestly
+  (`UNSUPPORTED_IMAGE`). (d) Every remote real run resolves exactly one commit
+  SHA (explicit revision or remote HEAD) before analysis and records it
+  (`resolved_sha`, `target_sha`, `plan_hash` binding). (e) `Healthy` requires
+  observed runtime evidence: stored results distinguish `healthy` (real +
+  readiness passed) from `test_only`/`demo`/`unknown`, and
+  `GET /api/deploy/{id}/health` live-probes the recorded container; unknown
+  runtimes report `unknown`, never a retained healthy label. (f) Low-confidence
+  manifest analysis requires explicit review (`PLAN_REQUIRES_REVIEW` below
+  0.5); ambiguous multi-application repositories are rejected
+  (`MULTIPLE_APPS_REQUIRE_TARGET`).
+- **Why:** The readiness audit (F-001–F-013) showed invalid URLs reaching
+  `Healthy` via demo-default creation, workflow completion equated with health,
+  and silent simulator substitution. Each is a false-success vector.
+- **Consequences:** Local runs without an isolated builder end at a verified
+  plan with an honest configuration error instead of a fake deployment. The
+  full backend suite declares its test-only execution explicitly
+  (`tests/conftest.py` autouse fixture). Production refuses execution outright.
+- **Status:** Accepted
+
+## ADR-038 — Demo execution removed from the product (supersedes ADR-007)
+
+- **Decision:** `POST /api/deploy` with `mode=demo` returns `410 DEMO_REMOVED`;
+  `GET /api/demo/scenarios` and `GET /api/change-impact/demo/fixture` return
+  404. `backend/app/demo/*` remains as isolated test fixtures only, unreachable
+  from any product route. Synthetic canonical-service expansion is removed
+  from both `workflow/planning.py` and `execution/plan_builder.py`: real plans
+  contain exactly the discovered topology. Hosted execution is
+  explicitly disabled (`MEDHA_EXECUTOR_MODE=disabled`), not simulator-pinned.
+- **Why:** Product demo behavior and synthetic topology are false-success
+  vectors: they can be mistaken for real analysis, scores, and health.
+  Historical DEMO/MOCK records keep their labels; nothing is relabelled.
+- **Consequences:** Empty workspaces render no seeded projects. Docs
+  `DEMO_MODE.md` retired; presenter script archived at
+  `docs/archive/DEMO_SCRIPT.md`. Isolated demo-engine unit tests remain.
+- **Status:** Accepted
+
+## ADR-039 — Durable commit-aware jobs, incremental tiers, versioned scores
+
+- **Decision:** (a) `jobs` table (v8 schema) is the source of truth for
+  push-triggered analysis; a single in-process worker claims jobs with bounded
+  retries (exponential backoff) and `dead_letter` terminal state. Older queued
+  jobs are superseded by newer pushes; branch `seq` guards ordering. (b)
+  Three-tier incremental analysis (`changeintel/tiers.py`): Tier 1
+  deterministic with 0 LLM calls (docs-only), Tier 2 targeted (≤2 calls),
+  Tier 3 expanded (≤6 calls, existing AI budget). Tier 1 skips `_ai_assist`
+  entirely. Cache keys hash all inputs (`inputs_hash`). (c) Four versioned
+  scores (`scores-v1`: deployment_readiness, performance, optimization,
+  security) computed deterministically from stored evidence; missing evidence
+  yields `null`, never success. Snapshots persist in `scores` table with
+  history API. (d) Real Git history service (`history_service.py`, bounded
+  `git log`) backs `GET /projects/{id}/history` + commit detail; frontend
+  `CommitGraph.tsx` renders actual ancestry, distinct from CIG/CEG.
+- **Why:** The readiness audit required durable push processing, no repeated
+  full analysis per small commit, evidence-backed scores, and a genuine
+  commit graph — without new infrastructure (no Redis/workers).
+- **Consequences:** V1 remains single-process (one backend replica for
+  webhook analysis). Postgres compatibility is best-effort for job claiming
+  (`strftime` backoff is SQLite-dialect). Score history and commit metadata
+  persist in `scores`/`commits` tables.
+- **Status:** Accepted

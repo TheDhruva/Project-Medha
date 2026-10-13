@@ -154,7 +154,7 @@ export function ExecutionModeBadge({
         "inline-flex items-center gap-1.5 rounded-full border font-semibold",
         size === "sm" ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
         hot
-          ? "border-medha-success/30 bg-medha-success-soft text-medha-success"
+          ? "border-medha-success/30 bg-medha-success-soft text-medha-success-ink"
           : "border-medha-border bg-medha-muted text-medha-secondary",
       )}
       title={
@@ -187,7 +187,7 @@ export function StatusBadge({
 }) {
   const cls =
     tone === "success"
-      ? "border-medha-success/30 bg-medha-success-soft text-medha-success"
+      ? "border-medha-success/30 bg-medha-success-soft text-medha-success-ink"
       : tone === "warning"
         ? "border-medha-warning/30 bg-medha-warning-soft text-medha-warning"
         : tone === "error"

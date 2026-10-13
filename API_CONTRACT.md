@@ -1,6 +1,6 @@
 # API_CONTRACT.md — MEDHA V1 HTTP API
 
-Status: **Phases 10–11 IMPLEMENTED/TESTED**. Demo Mode + real local pipeline + evaluation endpoints. Docker mutate opt-in (`MEDHA_DOCKER_EXECUTE`).
+Status: **Phases 12–14 IMPLEMENTED/TESTED**. Real local pipeline (SHA-pinned source → CNP → verify → genuine execution) + durable jobs + incremental tiers + versioned scores + real commit history + evaluation endpoints. Demo execution removed from the product (410/404; isolated test fixtures only). Docker mutate opt-in (`MEDHA_DOCKER_EXECUTE`).
 
 Base URL (dev): `http://127.0.0.1:8000`
 
@@ -14,8 +14,8 @@ Content type: `application/json` unless noted (SSE is `text/event-stream`).
 
 | `mode` | Meaning |
 |--------|---------|
-| `demo` | Deterministic offline engine; all results labelled DEMO/MOCK |
-| `real` | Uses git/Docker (and optional LLM mediation) |
+| `demo` | **Removed from the product.** `POST /api/deploy` with `mode=demo` returns `410 DEMO_REMOVED`. Historical records keep `is_demo`/`DEMO/MOCK` labels; `backend/app/demo/*` survives as isolated test fixtures only |
+| `real` | Verified source analysis → CNP → verify → genuine execution (explicit simulator only in tests, isolated Docker builder otherwise) |
 
 ### 1.2 Common error shape
 
@@ -74,8 +74,8 @@ Start a deployment pipeline.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `repository_url` | string (URI) | yes* | *May be ignored/fixture-driven in some demo scenarios; still accepted |
-| `mode` | `"demo"` \| `"real"` | yes | |
+| `repository_url` | string (URI) | yes* | *Demo runs (when enabled) treat this as fixture metadata only; real runs verify readability, resolve exactly one commit SHA, and analyze that snapshot |
+| `mode` | `"demo"` \| `"real"` | yes | demo requires `MEDHA_ENABLE_DEMO=true`, else `403 DEMO_DISABLED` |
 | `scenario` | string \| null | demo: yes | See `DEMO_MODE.md`. Ignored or null in real mode |
 | `target.host` | string | yes | V1: `localhost` / `127.0.0.1` only |
 | `target.port` | integer | yes | Desired primary publish port |
@@ -104,11 +104,12 @@ API may accept case-insensitive aliases (`port_conflict` → `PORT_CONFLICT`).
 
 ### Errors
 
-- `400` unknown scenario in demo mode
+- `410 DEMO_REMOVED` for `mode=demo` (demo execution removed from the product)
+- `422` for malformed `base_revision`/`target_revision` (must be 40-hex SHA or omitted)
 - `400` real mode with non-local target host
 - `503` real mode without Docker (when executor would be required immediately — may instead start and fail later with honest events; prefer fail-fast preflight)
-- Phase 10–12: real mode runs analyze → CNP → verify → execute (simulator default; Docker opt-in).
-  Unsupported repositories may end with `DEPLOYMENT_UNSUPPORTED`. Demo Mode remains offline fixtures.
+- Real mode runs analyze → CNP → verify → execute (explicit simulator in tests only, otherwise `EXECUTION_NOT_CONFIGURED` without an isolated builder; Docker opt-in).
+  Unsupported repositories end with `DEPLOYMENT_UNSUPPORTED`. `base_revision`/`target_revision` accept only exact 40-hex SHAs or null (server resolves HEAD).
 
 ---
 
@@ -266,7 +267,6 @@ Return aggregated structured log lines (not raw Docker multiplex blobs by defaul
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Liveness (includes DB reachability) |
-| GET | `/api/demo/scenarios` | List demo scenarios |
 | GET | `/api/evaluation` | Latest measured evaluation artifacts (null if not run) |
 | POST | `/api/evaluation/run/cnp` | Execute CNP evaluation runner (token-guarded) |
 | POST | `/api/evaluation/run/ceg` | Execute CEG evaluation runner (token-guarded) |
@@ -275,8 +275,13 @@ Return aggregated structured log lines (not raw Docker multiplex blobs by defaul
 | GET | `/api/deploy/{id}/verification` | Stored verification + critic artifacts |
 | GET | `/api/deploy/{id}/rollback` | Stored rollback scope |
 | GET | `/api/deploy/{id}/execution` | Stored result + graph + rollback |
+| GET | `/api/deploy/{id}/scores` | Four versioned evidence-backed scores (`scores-v1`; §18) |
+| GET | `/api/scores/history` | Score history by `run_id` or `project_id` (§18) |
+| GET | `/api/deploy/{id}/health` | Observed runtime health (live probe; `healthy` only on evidence, else `unhealthy`/`unknown`/`test_only`/`demo`) |
+| GET | `/api/config/status` | Presence-only environment diagnostics (booleans, never secret values) |
+| GET | `/api/metrics` | Safe operational counters + LLM budgets (no secrets/source) |
 | GET | `/api/ai/status` | Safe AI provider status (no secrets; §11) |
-| POST | `/api/webhooks/github` | GitHub push receiver (HMAC-SHA256; §12) |
+| POST | `/api/webhooks/github` | GitHub push receiver (HMAC-SHA256; full 40-hex SHA required; §12) |
 | GET | `/api/proposals` | List approval proposals (§12) |
 | GET | `/api/proposals/{id}` | One proposal with plan + hash |
 | POST | `/api/proposals/{id}/approve` | Approve + revalidated execution (token-guarded; §12) |
@@ -286,6 +291,8 @@ Return aggregated structured log lines (not raw Docker multiplex blobs by defaul
 | GET | `/api/projects/{id}` | One project (owner only; §13) |
 | PATCH | `/api/projects/{id}` | Rename / change watched branch (§13) |
 | POST | `/api/projects/{id}/verify` | Prove readability via `git ls-remote` (§13) |
+| GET | `/api/projects/{id}/history` | Real Git commit ancestry, paginated (§19) |
+| GET | `/api/projects/{id}/history/{sha}` | Commit diff summary + GitHub link (§19) |
 | POST | `/api/projects/{id}/disconnect` | Stop routing webhooks/runs (§13) |
 | DELETE | `/api/projects/{id}` | Remove the mapping; history preserved (§13) |
 | POST | `/api/projects/{id}/runs` | Start a project-bound real analysis (§13) |
@@ -469,21 +476,43 @@ Clerk subject (or the legacy single-operator subject); all rows carry
 
 ---
 
-## 10. Demo labelling rule
+## 16. Historical demo labelling rule
 
-Whenever `mode=demo` or synthetic data is used:
+Demo execution is removed from the product, but historical records keep
+their provenance:
 
-- JSON includes `"is_demo": true` where a deployment context exists.
-- SSE events include `"is_demo": true`.
-- UI must render **DEMO MODE** (see `UI_SPEC.md`).
+- Historical JSON includes `"is_demo": true` + `"label": "DEMO/MOCK"`.
+- Historical SSE payloads include `"is_demo": true`.
+- UI renders historical runs with DEMO badges (see `UI_SPEC.md`); it never
+  creates new demo runs.
 
 ---
 
-## 10. Implementation note
+## 17. Implementation note
 
-- **Demo Mode:** deterministic Phase 3 scenarios via `DemoRunner` (DEMO/MOCK labelled).
-- **Real Mode:** analyze → specialists → CNP → verify → critic → bounded replan → execute (simulator by default) → CEG → scoped rollback on failure.
+- **Demo:** removed from product routes (`410 DEMO_REMOVED` / 404).
+  `backend/app/demo/*` survives as isolated test fixtures only.
+- **Real Mode:** analyze (SHA-pinned source) → specialists → CNP → verify → critic → bounded replan → execute (explicit simulator in tests, isolated `RealExecutor` with supported profiles otherwise; unconfigured execution fails closed) → CEG → scoped rollback on failure. Plans contain exactly the discovered topology — no synthetic services.
 - Do **not** claim real Docker mutation unless `MEDHA_DOCKER_EXECUTE=true` and a verified plan ran against the local Docker host.
 - No Redis, Kubernetes, remote deploy, or mandatory paid LLM. PostgreSQL
   (Supabase) is the configured persistent backend when `MEDHA_DATABASE_URL`
   is set; SQLite remains the zero-config fallback.
+
+---
+
+## 18. Scores (`scores-v1`)
+
+`GET /api/deploy/{id}/scores` computes four deterministic scores from stored
+evidence and persists snapshots: `deployment_readiness`, `performance`,
+`optimization`, `security`. Higher always means better. Missing evidence
+yields `value: null` (unmeasured), never success. Each entry carries
+`version`, `computed_at`, `inputs_hash`, `target_sha`, and `evidence`.
+`GET /api/scores/history?run_id=…&project_id=…` queries snapshots.
+
+## 19. Commit history
+
+`GET /api/projects/{id}/history?limit=&since=` returns real Git ancestry
+(`sha`, `parents`, `author`, `committed_at`, `message`, `github_url`),
+`partial`/`shallow` flags when history is bounded. Detail endpoint adds
+per-file added/deleted counts. CIG (dependency impact) and CEG (execution
+causality) remain distinct graphs with their own evidence.

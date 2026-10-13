@@ -902,3 +902,250 @@ class ProjectRepository:
 
 class ProjectConflictError(ValueError):
     """Duplicate (owner, repository) connection attempt (maps to 409)."""
+
+
+_JOB_SEQ_SQL = "COALESCE((SELECT MAX(seq) FROM jobs WHERE repository = ? AND branch = ?), -1) + 1"
+
+
+class JobRepository:
+    """Durable commit-aware analysis jobs. The DB is the source of truth."""
+
+    VALID = {"queued", "running", "succeeded", "failed", "cancelled", "superseded", "dead_letter"}
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path
+
+    def create(
+        self, *, job_id: str, repository: str, branch: str, target_sha: str,
+        base_sha: str | None = None, project_id: str | None = None,
+        delivery_id: str | None = None, deployment_id: str | None = None,
+        created_at: str,
+    ) -> dict[str, Any] | None:
+        """Idempotent insert. Returns the job dict, or None on duplicate delivery."""
+        with get_connection(self.db_path) as conn:
+            try:
+                seq_row = conn.execute(
+                    f"SELECT {_JOB_SEQ_SQL} AS seq", (repository, branch)
+                ).fetchone()
+                seq = int(seq_row["seq"] if seq_row else 0)
+                conn.execute(
+                    """INSERT INTO jobs (job_id, delivery_id, project_id, repository,
+                        branch, base_sha, target_sha, seq, status, attempts,
+                        max_attempts, deployment_id, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 3, ?, ?, ?)""",
+                    (job_id, delivery_id, project_id, repository, branch,
+                     base_sha, target_sha, seq, deployment_id, created_at, created_at),
+                )
+                conn.commit()
+            except Exception as exc:
+                if _is_unique_violation(exc):
+                    return None
+                raise
+        return self.get(job_id)
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+    def claim_next(self) -> dict[str, Any] | None:
+        """Atomically claim the oldest queued job whose backoff has expired."""
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                """SELECT * FROM jobs WHERE status = 'queued'
+                   AND (not_before IS NULL OR not_before <= strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                   ORDER BY created_at ASC LIMIT 1"""
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                    "UPDATE jobs SET status='running', attempts=attempts+1,"
+                    " updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE job_id=? AND status='queued'",
+                    (row["job_id"],),
+                )
+            conn.commit()
+            updated = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (row["job_id"],)).fetchone()
+        return dict(updated) if updated else None
+
+    def finish(self, job_id: str, *, ok: bool, error: str | None = None,
+               updated_at: str) -> None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute("SELECT attempts, max_attempts FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if row is None:
+                return
+            if ok:
+                conn.execute(
+                    "UPDATE jobs SET status='succeeded', last_error=NULL, updated_at=? WHERE job_id=?",
+                    (updated_at, job_id),
+                )
+            elif int(row["attempts"]) >= int(row["max_attempts"]):
+                conn.execute(
+                    "UPDATE jobs SET status='dead_letter', last_error=?, updated_at=? WHERE job_id=?",
+                    (error, updated_at, job_id),
+                )
+            else:
+                backoff_min = min(2 ** int(row["attempts"]), 30)
+                conn.execute(
+                    "UPDATE jobs SET status='queued', last_error=?,"
+                    " not_before=strftime('%Y-%m-%dT%H:%M:%fZ','now', ?), updated_at=? WHERE job_id=?",
+                    (error, f"+{backoff_min} minutes", updated_at, job_id),
+                )
+            conn.commit()
+
+    def cancel_queued_superseded(self, *, repository: str, branch: str, keep_seq: int) -> int:
+        """Mark older queued jobs superseded when a newer push arrives."""
+        with get_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET status='superseded' WHERE repository=? AND branch=?"
+                " AND seq < ? AND status='queued'",
+                (repository, branch, keep_seq),
+            )
+            conn.commit()
+            try:
+                return int(cursor.rowcount or 0)
+            except (TypeError, ValueError):
+                return 0
+
+    def latest_for_branch(self, repository: str, branch: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE repository=? AND branch=? ORDER BY seq DESC LIMIT 1",
+                (repository, branch),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def recover_interrupted(self, *, updated_at: str, error: str) -> int:
+        """Requeue running jobs after a worker/backend restart (bounded retry)."""
+        with get_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET status='queued', last_error=? , updated_at=? WHERE status='running'",
+                (error, updated_at),
+            )
+            conn.commit()
+            try:
+                return int(cursor.rowcount or 0)
+            except (TypeError, ValueError):
+                return 0
+
+
+class ScoreRepository:
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path
+
+    def save(self, *, run_id: str, score_name: str, value: float | None,
+             version: str, computed_at: str, inputs_hash: str,
+             target_sha: str, project_id: str | None,
+             evidence: dict[str, Any]) -> None:
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scores (run_id, score_name, value, value_null, version,
+                    computed_at, inputs_hash, target_sha, project_id, evidence_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id, score_name) DO UPDATE SET
+                    value=excluded.value, value_null=excluded.value_null,
+                    version=excluded.version, computed_at=excluded.computed_at,
+                    inputs_hash=excluded.inputs_hash, target_sha=excluded.target_sha,
+                    project_id=excluded.project_id, evidence_json=excluded.evidence_json""",
+                (run_id, score_name, value, 1 if value is None else 0, version,
+                 computed_at, inputs_hash, target_sha, project_id, json.dumps(evidence)),
+            )
+            conn.commit()
+
+    def history(self, *, project_id: str | None = None, run_id: str | None = None,
+                limit: int = 50) -> list[dict[str, Any]]:
+        with get_connection(self.db_path) as conn:
+            if run_id:
+                rows = conn.execute(
+                    "SELECT * FROM scores WHERE run_id=? ORDER BY score_name ASC", (run_id,)
+                ).fetchall()
+            elif project_id:
+                rows = conn.execute(
+                    "SELECT * FROM scores WHERE project_id=? ORDER BY computed_at DESC LIMIT ?",
+                    (project_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM scores ORDER BY computed_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["evidence"] = _loads(item.pop("evidence_json", "{}"), {})
+            item["value"] = None if item.get("value_null") else item.get("value")
+            out.append(item)
+        return out
+
+
+class CommitRepository:
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path
+
+    def upsert(self, *, project_id: str, sha: str, parents: list[str],
+               author: str | None, committed_at: str | None,
+               message: str | None, branch: str | None, recorded_at: str) -> None:
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO commits (project_id, sha, parents_json, author,
+                    committed_at, message, branch, recorded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(project_id, sha) DO UPDATE SET
+                    parents_json=excluded.parents_json, author=excluded.author,
+                    committed_at=excluded.committed_at, message=excluded.message,
+                    branch=excluded.branch, recorded_at=excluded.recorded_at""",
+                (project_id, sha, json.dumps(parents), author, committed_at,
+                 message, branch, recorded_at),
+            )
+            conn.commit()
+
+    def history(self, *, project_id: str, since: str | None = None,
+                limit: int = 50) -> list[dict[str, Any]]:
+        with get_connection(self.db_path) as conn:
+            if since:
+                rows = conn.execute(
+                    "SELECT * FROM commits WHERE project_id=? AND committed_at > ?"
+                    " ORDER BY committed_at DESC LIMIT ?",
+                    (project_id, since, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM commits WHERE project_id=? ORDER BY committed_at DESC LIMIT ?",
+                    (project_id, limit),
+                ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["parents"] = _loads(item.pop("parents_json", "[]"), [])
+            out.append(item)
+        return out
+
+
+class AnalysisCacheRepository:
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path
+
+    def get(self, cache_key: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_cache WHERE cache_key=?", (cache_key,)
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["payload"] = _loads(item.pop("payload_json", "{}"), {})
+        return item
+
+    def put(self, *, cache_key: str, project_id: str | None, kind: str,
+            inputs_hash: str, target_sha: str, created_at: str,
+            payload: dict[str, Any]) -> None:
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO analysis_cache (cache_key, project_id, kind, inputs_hash,
+                    target_sha, created_at, payload_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(cache_key) DO UPDATE SET inputs_hash=excluded.inputs_hash,
+                    target_sha=excluded.target_sha, created_at=excluded.created_at,
+                    payload_json=excluded.payload_json""",
+                (cache_key, project_id, kind, inputs_hash, target_sha, created_at,
+                 json.dumps(payload)),
+            )
+            conn.commit()

@@ -33,6 +33,7 @@ export function ConnectRepoDialog({ onClose, onDone }: {
   const [runId, setRunId] = useState<string | null>(null);
 
   async function connect() {
+    if (saving) return;
     if (name.trim().length < 1) {
       setError("Give the connection a name.");
       return;
@@ -79,7 +80,8 @@ export function ConnectRepoDialog({ onClose, onDone }: {
     <Dialog
       title="Connect GitHub repository"
       confirmLabel={saving ? "Connecting…" : project ? "Done" : "Connect + verify"}
-      onConfirm={() => void (project ? onClose() : connect())}
+      confirmDisabled={saving || running}
+      onConfirm={() => void (project || saving ? onClose() : connect())}
       onCancel={onClose}
       body={
         <div className="space-y-3">
@@ -129,7 +131,7 @@ export function ConnectRepoDialog({ onClose, onDone }: {
             </div>
           ) : null}
           {project && verified?.reachable && !runId ? (
-            <Button variant="secondary" onClick={() => void startFirstRun()}>
+            <Button variant="secondary" onClick={() => void startFirstRun()} loading={running}>
               {running ? "Starting…" : "Start first analysis now"}
             </Button>
           ) : null}

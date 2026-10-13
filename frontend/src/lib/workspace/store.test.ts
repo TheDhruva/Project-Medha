@@ -14,28 +14,15 @@ function proposal(over: Partial<ChangeProposal>): ChangeProposal {
   };
 }
 
-describe("workspace demo layer", () => {
-  it("covers all ten required demo scenarios exactly once", () => {
-    const keys = SEED_PROJECTS.map((p) => p.scenarioKey).sort();
-    expect(keys).toEqual([
-      "empty-evaluations", "empty-workspace", "failed-scoped-recovery",
-      "interrupted-run", "populated-multi-run", "proposal-blocked",
-      "proposal-ready", "simulated-success", "superseded-proposal",
-      "verification-failure",
-    ].sort());
-    // every run belongs to a known project
-    const ids = new Set(SEED_PROJECTS.map((p) => p.id));
-    for (const run of SEED_RUNS) {
-      expect(ids.has(run.projectId)).toBe(true);
-      expect(run.summary.length).toBeGreaterThan(10);
-    }
+describe("workspace (no seeded fixtures)", () => {
+  it("starts empty: no fabricated projects, proposals, or runs", () => {
+    expect(SEED_PROJECTS).toEqual([]);
+    expect(SEED_PROPOSALS).toEqual([]);
+    expect(SEED_RUNS).toEqual([]);
   });
 
-  it("never mixes projects: proposals reference existing projects", () => {
-    const ids = new Set(SEED_PROJECTS.map((p) => p.id));
-    for (const p of SEED_PROPOSALS) {
-      expect(ids.has(p.projectId)).toBe(true);
-    }
+  it("evaluation fixture reports empty honestly", () => {
+    expect(evalFor("proj-evalempty").status).toBe("empty");
   });
 
   it("blocks approval for stale/superseded proposals with an explanation", () => {
@@ -58,13 +45,5 @@ describe("workspace demo layer", () => {
     for (const p of BOARD_PANELS) {
       expect(DEFAULT_BOARD_LAYOUT.visible[p.id]).toBe(true);
     }
-  });
-
-  it("evaluation fixtures stay honest: empty vs populated", () => {
-    expect(evalFor("proj-evalempty").status).toBe("empty");
-    const metro = evalFor("proj-metro");
-    expect(metro.status).toBe("complete");
-    expect(metro.results.length).toBeGreaterThanOrEqual(2);
-    expect(metro.note).toMatch(/same|comparable|definitions/i);
   });
 });

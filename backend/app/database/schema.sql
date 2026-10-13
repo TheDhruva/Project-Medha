@@ -122,6 +122,80 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_owner_repo
     ON projects (owner_sub, repository);
-
 CREATE INDEX IF NOT EXISTS idx_projects_repository
     ON projects (repository);
+
+-- Durable analysis jobs (Phase 4). The database is the source of truth;
+-- any in-process queue only wakes workers. Status: queued | running |
+-- succeeded | failed | cancelled | superseded | dead_letter.
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    delivery_id TEXT UNIQUE,
+    project_id TEXT,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL DEFAULT 'main',
+    base_sha TEXT,
+    target_sha TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    deployment_id TEXT,
+    last_error TEXT,
+    not_before TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_repo_branch_seq
+    ON jobs (repository, branch, seq);
+CREATE INDEX IF NOT EXISTS idx_jobs_status
+    ON jobs (status);
+
+-- Commit history metadata (Phase 7). Enough to render the graph without
+-- re-cloning; diff summaries attach per commit on demand.
+CREATE TABLE IF NOT EXISTS commits (
+    project_id TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    parents_json TEXT NOT NULL DEFAULT '[]',
+    author TEXT,
+    committed_at TEXT,
+    message TEXT,
+    branch TEXT,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, sha)
+);
+
+CREATE INDEX IF NOT EXISTS idx_commits_project_time
+    ON commits (project_id, committed_at);
+
+-- Versioned score snapshots (Phase 6). One row per (run, score_name).
+-- value_null means unavailable/insufficient evidence — never success.
+CREATE TABLE IF NOT EXISTS scores (
+    run_id TEXT NOT NULL,
+    score_name TEXT NOT NULL,
+    value REAL,
+    value_null INTEGER NOT NULL DEFAULT 0,
+    version TEXT NOT NULL DEFAULT 'v1',
+    computed_at TEXT NOT NULL,
+    inputs_hash TEXT NOT NULL,
+    target_sha TEXT NOT NULL,
+    project_id TEXT,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (run_id, score_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scores_project_sha
+    ON scores (project_id, target_sha);
+
+-- Incremental analysis cache metadata (Phase 5). Payloads stay in the
+-- existing artifact blobs; this table tracks validity for reuse.
+CREATE TABLE IF NOT EXISTS analysis_cache (
+    cache_key TEXT PRIMARY KEY,
+    project_id TEXT,
+    kind TEXT NOT NULL,
+    inputs_hash TEXT NOT NULL,
+    target_sha TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);

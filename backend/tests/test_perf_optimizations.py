@@ -85,7 +85,7 @@ def test_list_events_after_cursor_returns_only_newer(client):
 
 
 def test_cancel_emits_terminal_event_and_stream_would_close(client):
-    # Seed a still-running deployment directly: the demo runner finishes in
+    # Seed a still-running deployment directly: the pipeline finishes in
     # milliseconds with STEP_DELAY=0, so POST /api/deploy would already be
     # terminal (cancel returns duplicate without emitting).
     repo = DeploymentRepository()
@@ -110,7 +110,7 @@ def test_health_cached_and_responsive(client):
 
 
 def test_request_id_header_on_api(client):
-    response = client.get("/api/demo/scenarios")
+    response = client.get("/api/config/status")
     assert response.status_code == 200
     assert response.headers.get("X-Request-ID", "").startswith("req_")
 

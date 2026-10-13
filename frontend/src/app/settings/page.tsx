@@ -10,7 +10,6 @@ import {
   type AiStatus,
 } from "@/lib/api/client";
 
-const THEME_KEY = "medha.prefs.theme.v1";
 const MOTION_KEY = "medha.prefs.reduceMotion.v1";
 
 export default function SettingsPage() {
@@ -18,7 +17,6 @@ export default function SettingsPage() {
   const [detail, setDetail] = useState<string>("");
   const [ai, setAi] = useState<AiStatus | null>(null);
   const [aiError, setAiError] = useState<string>("");
-  const [theme, setTheme] = useState<"bright" | "dark">("bright");
   const [reduceMotion, setReduceMotion] = useState(false);
 
   const refresh = useCallback(() => {
@@ -41,22 +39,11 @@ export default function SettingsPage() {
   useEffect(() => {
     refresh();
     try {
-      const t = window.localStorage.getItem(THEME_KEY);
-      if (t === "dark" || t === "bright") setTheme(t);
       setReduceMotion(window.localStorage.getItem(MOTION_KEY) === "1");
     } catch {
       /* prefs unavailable */
     }
   }, [refresh]);
-
-  function saveTheme(next: "bright" | "dark") {
-    setTheme(next);
-    try {
-      window.localStorage.setItem(THEME_KEY, next);
-    } catch {
-      /* noop */
-    }
-  }
 
   function saveMotion(next: boolean) {
     setReduceMotion(next);
@@ -162,12 +149,12 @@ export default function SettingsPage() {
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div className="rounded-medha-sm border border-medha-border bg-medha-muted p-3">
               <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-medha-secondary">
-                DEMO / MOCK
+                DEMO / MOCK (removed)
               </p>
               <p className="mt-1 text-xs leading-relaxed text-medha-text">
-                Simulated pipeline for a college demonstration. Every payload, event, and UI
-                element is explicitly labelled DEMO/MOCK. Values are fixtures, never presented as
-                real execution evidence.
+                Demo execution was removed from the product. Historical
+                DEMO/MOCK records keep their labels; no new demo runs can be
+                created.
               </p>
             </div>
             <div className="rounded-medha-sm border border-medha-run/25 bg-medha-run-soft p-3">
@@ -204,28 +191,14 @@ export default function SettingsPage() {
             Appearance & accessibility
           </h2>
           <div className="mt-3 space-y-3">
-            <fieldset>
-              <legend className="medha-label">Theme preference (bright is the default)</legend>
-              <div className="mt-1.5 flex gap-2" role="radiogroup" aria-label="Theme">
-                {(["bright", "dark"] as const).map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    role="radio"
-                    aria-checked={theme === t}
-                    onClick={() => saveTheme(t)}
-                    className={`rounded-lg border px-3 py-2 text-sm font-medium ${theme === t ? "border-medha-accent bg-medha-accent-soft text-medha-accent-ink" : "border-medha-border bg-white text-medha-secondary hover:text-medha-text"}`}
-                  >
-                    {t === "bright" ? "Bright (default)" : "Dark (preview)"}
-                  </button>
-                ))}
-              </div>
-              <p className="mt-1 text-xs text-medha-tertiary">V1 ships bright-first; dark is a local preview preference only.</p>
-            </fieldset>
+            <div className="rounded-lg border border-medha-border px-3 py-2.5">
+              <p className="text-sm font-medium text-medha-text">Bright theme</p>
+              <p className="text-xs text-medha-secondary">MEDHA V1 ships bright-only; there is no dark mode.</p>
+            </div>
             <div className="flex items-center justify-between gap-3 rounded-lg border border-medha-border px-3 py-2.5">
               <div>
                 <p className="text-sm font-medium text-medha-text">Reduce motion</p>
-                <p className="text-xs text-medha-secondary">Disables smooth scrolling and pulse indicators.</p>
+                <p className="text-xs text-medha-secondary">Disables smooth scrolling and entrance motion.</p>
               </div>
               <button
                 type="button"
@@ -247,7 +220,7 @@ export default function SettingsPage() {
           </h2>
           <dl className="mt-3 space-y-1.5 text-sm text-medha-secondary">
             <div className="flex justify-between gap-3"><dt>Product</dt><dd className="text-medha-text">MEDHA V1 research prototype</dd></div>
-            <div className="flex justify-between gap-3"><dt>Workspaces</dt><dd><Link href="/" className="text-medha-accent hover:underline">Open Project Hub →</Link></dd></div>
+            <div className="flex justify-between gap-3"><dt>Workspaces</dt><dd><Link href="/projects" className="text-medha-accent hover:underline">Open Projects →</Link></dd></div>
             <div className="flex justify-between gap-3"><dt>Scope</dt><dd className="text-right">Local Docker · SQLite/PG · no cloud/K8s/Redis</dd></div>
           </dl>
         </section>

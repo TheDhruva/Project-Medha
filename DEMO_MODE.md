@@ -1,6 +1,12 @@
-# DEMO_MODE.md — Deterministic Demo Contract
+# DEMO_MODE.md — Deterministic Demo Contract (RETIRED from the product)
 
-Status: **IMPLEMENTED (Phase 3)** and **regression-tested through Phases 7–9**. Demo Mode remains labelled DEMO/MOCK. Real mode also runs verify/execute/CEG via `SimulatorExecutor` (separate from this fixture engine).
+> **Retired.** Demo execution was removed from all product routes (see
+> DECISIONS.md ADR superseding ADR-007). `backend/app/demo/*` remains as
+> isolated test fixtures only — unreachable from any product API. Historical
+> DEMO/MOCK records keep their labels. The presenter script is archived at
+> `docs/archive/DEMO_SCRIPT.md`.
+
+Status: **RETIRED**. Former contract retained below for historical reference.
 
 Demo Mode is **mandatory** (ADR-007). It guarantees MEDHA can be demonstrated when external dependencies are unavailable.
 

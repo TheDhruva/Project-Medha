@@ -106,7 +106,7 @@ export function RunsList() {
           </div>
           <Link
             href="/verify"
-            className="rounded-md border border-medha-primary bg-medha-primary-soft text-medha-primary px-4 py-2 text-sm font-semibold text-white transition hover:bg-medha-primary-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-primary"
+            className="inline-flex items-center gap-1.5 rounded-md bg-medha-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
           >
             <Plus className="h-4 w-4" aria-hidden /> New verification
           </Link>
@@ -140,7 +140,7 @@ export function RunsList() {
             </p>
             <Link
               href="/verify"
-              className="mt-4 rounded-md bg-medha-primary px-4 py-2 text-sm font-semibold text-white hover:bg-medha-primary-soft"
+              className="mt-4 rounded-md bg-medha-accent px-4 py-2 text-sm font-semibold text-white hover:bg-medha-accent-hover"
             >
               Start verification
             </Link>

@@ -30,7 +30,7 @@ Infrastructure agents can produce conflicting decisions about ports, mounts, sec
 2. Collect typed constraints from specialist agents.
 3. Resolve conflicts with the Constraint Negotiation Protocol (CNP).
 4. Verify and critique the plan before any host mutation.
-5. Execute with a simulator by default, or opt into local Docker.
+5. Execute only with an explicitly configured executor (test-only simulator in tests, isolated Docker builder otherwise), or fail closed with an honest configuration error.
 6. Record actions in a Causal Execution Graph (CEG).
 7. Roll back only failed downstream dependents while preserving independent successes.
 
@@ -46,7 +46,7 @@ flowchart LR
     WF --> AG[Specialist agents]
     AG --> CNP[Constraint negotiation]
     CNP --> V[Verification and critic]
-    V --> E[Simulator or local Docker]
+    V --> E[Isolated real runtime]
     E --> CEG[Causal execution graph]
     CEG --> RB[Scoped rollback]
     API --> DB[(SQLite)]
@@ -58,14 +58,14 @@ The backend is one FastAPI process. Logical agents are in-process Python compone
 
 - Deterministic CNP with typed constraints, priority resolution, alternatives, and a maximum of three rounds.
 - Verification and critic gates that block unverified execution.
-- Simulator-first execution with opt-in local Docker mutation.
-- Controlled Docker execution uses pinned `busybox:1.36` images (ADR-015): it validates ordering, labels, health, and rollback — it never runs `docker build` on repository Dockerfiles or executes untrusted repo code.
-- Thin repository profiles may be expanded to the canonical `network/database/backend/frontend/analytics` research graph for CEG demonstration; expanded services are labelled synthetic in CEG events and results, never presented as detected.
+- Genuine execution only: the isolated `RealExecutor` builds supported profiles (`static`, `python`, `node`) from MEDHA-authored Dockerfiles behind a blocking readiness gate — repository Dockerfiles are never executed, and nothing is simulated as success. Unconfigured execution fails closed; the simulator runs only with `MEDHA_EXECUTOR_MODE=simulator` set explicitly (test-only, never healthy).
+- Demo execution removed from the product (`410 DEMO_REMOVED` / 404; `backend/app/demo/*` survives as isolated test fixtures only). Historical DEMO/MOCK records keep their labels.
+- Plans contain exactly the discovered service topology — no synthetic services are ever injected into CNP, CEG, execution, or rollback.
 - CEG action history and dependency-aware rollback.
 - Change Intelligence (CIG) for local Git revisions, wired into verification as an advisory `change_impact` check: *"these changes require verification of these deployment properties."*
 - HTTP readiness probes for host-mapped service ports (bounded, advisory; falls back to the container-running check, and records `skipped` for simulator/busybox services).
-- CIG analysis for local Git repositories with file and symbol evidence.
-- Demo Mode with deterministic offline scenarios labelled `DEMO/MOCK`.
+- CIG analysis for local Git revisions with file and symbol evidence.
+- Durable push-triggered jobs, three-tier incremental analysis, four versioned evidence-backed scores, and a real Git commit graph.
 - FastAPI REST endpoints and Server-Sent Events for observable workflow state.
 - SQLite persistence with no mandatory cloud services or API keys.
 - Offline evaluation runners for CNP and CEG comparisons.
@@ -113,7 +113,7 @@ clone (no `frontend/.next`), the first start runs a one-time `next build`
 (~1 minute) to generate the routes manifest that `next dev` needs; later
 starts skip it.
 
-Open [http://localhost:3000](http://localhost:3000): visitors land on a public page with **Try Demo** (registration-free simulated runs at `/demo`, always labelled `DEMO/MOCK`) and **Sign In** (Clerk; authenticated users get a backend-backed project hub at `/`, with projects grouped by repository). The API is available at [http://127.0.0.1:8000](http://127.0.0.1:8000); its health endpoint is `/health`. Local frontend API calls use same-origin rewrites (`/api/*`, `/health` → FastAPI), so no extra proxy setup is needed.
+Open [http://localhost:3000](http://localhost:3000): visitors land on a public page with **Sign In** (Clerk; authenticated users get a backend-backed project hub at `/`, with projects grouped by repository). Connect a repository to start a real, evidence-backed analysis — empty workspaces show no seeded projects. The API is available at [http://127.0.0.1:8000](http://127.0.0.1:8000); its health endpoint is `/health`. Local frontend API calls use same-origin rewrites (`/api/*`, `/health` → FastAPI), so no extra proxy setup is needed.
 
 Two-terminal alternative (equivalent, no root runner):
 
@@ -154,8 +154,9 @@ Troubleshooting:
 | --- | --- | --- |
 | `MEDHA_DATABASE_PATH` | `./data/medha.db` | SQLite database location (used when `MEDHA_DATABASE_URL` is unset) |
 | `MEDHA_DATABASE_URL` | *(unset)* | Main backend database (Supabase Postgres, ADR-029). When set, takes precedence over SQLite; `sslmode=require` auto-added for Supabase TLS |
-| `MEDHA_EXECUTOR_MODE` | `auto` | `auto`, `simulator`, or `docker` |
-| `MEDHA_DOCKER_EXECUTE` | `false` | Allow local Docker mutation |
+| `MEDHA_EXECUTOR_MODE` | `auto` | `simulator` (explicit test-only), `real`/`docker` (isolated builder), `disabled` (no execution), or `auto` (fail closed without a builder) |
+| `MEDHA_DOCKER_EXECUTE` | `false` | Allow isolated Docker builds (requires real/docker mode + daemon; never on hosted plane) |
+| `MEDHA_ENABLE_DEMO` | `false` | Removed from the product (`410 DEMO_REMOVED`); fixtures remain for isolated tests only |
 | `MEDHA_DOCKER_CLEANUP` | `true` | Clean up Docker resources |
 | `MEDHA_MAX_VERIFY_ROUNDS` | `3` | Maximum verification/replan rounds |
 | `MEDHA_CORS_ORIGINS` | `http://localhost:3000` | Allowed frontend origin |
@@ -227,14 +228,14 @@ docs/           Demo, validation, evaluation, and viva material
 | [API_CONTRACT.md](API_CONTRACT.md) | REST and SSE contracts |
 | [DATA_MODEL.md](DATA_MODEL.md) | Persisted data model |
 | [EVALUATION.md](EVALUATION.md) | Evaluation methodology and results |
-| [DEMO_MODE.md](DEMO_MODE.md) | Offline demo scenarios |
-| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Demonstration walkthrough |
+| [DEMO_MODE.md](DEMO_MODE.md) | Retired demo contract (historical reference) |
+| [docs/archive/DEMO_SCRIPT.md](docs/archive/DEMO_SCRIPT.md) | Archived demonstration walkthrough |
 | [docs/VIVA_GUIDE.md](docs/VIVA_GUIDE.md) | Project presentation guide |
 | [DECISIONS.md](DECISIONS.md) | Architecture decision records |
 
 ## Scope and limitations
 
-MEDHA supports local targets and one real deployment at a time. Docker mutation is opt-in. Demo results are simulated and labelled. Local-git CIG accepts local repositories; remote pushes use payload-derived change intelligence verified against the exact-SHA checkout (`source_method=webhook_push`), while `/api/deploy` may shallow-clone remotes for manifest analysis. Repository URLs are validated at the API boundary (scheme allowlist, no embedded credentials on http(s), blocked metadata/private-network literal IPs; hostname checks are static — no DNS resolution — which is documented in `backend/app/core/repo_url.py`). Private GitHub repositories are unsupported pending a GitHub App (ADR-036). The project intentionally excludes cloud deployment, multi-host orchestration, Kubernetes, DNS automation, CI/CD automation, SSH, Redis, Kafka, Celery, and Terraform. PostgreSQL (Supabase) is the configured persistent backend when `MEDHA_DATABASE_URL` is set (ADR-029).
+MEDHA supports local targets and one real deployment at a time. Genuine execution requires an isolated Docker builder (see `docs/REAL_EXECUTION_RUNBOOK.md`); without one, verified plans end with an honest configuration error instead of a simulated deployment. Every remote run resolves exactly one commit SHA before analysis. `Healthy` is reported only on observed runtime evidence (`GET /api/deploy/{id}/health`); finished workflows without it are `completed`, `failed`, or `unknown` — never healthy. Repository URLs are validated at the API boundary (scheme allowlist, no embedded credentials on http(s), blocked metadata/private-network literal IPs; hostname checks are static — no DNS resolution — which is documented in `backend/app/core/repo_url.py`). Private GitHub repositories are unsupported pending a GitHub App (ADR-036). The project intentionally excludes cloud deployment, multi-host orchestration, Kubernetes, DNS automation, CI/CD automation, SSH, Redis, Kafka, Celery, and Terraform. PostgreSQL (Supabase) is the configured persistent backend when `MEDHA_DATABASE_URL` is set (ADR-029).
 
 Evaluation values are project-defined prototype measurements on seeded fixtures. They are not evidence of universal optimality, production readiness, or superiority over existing platforms.
 

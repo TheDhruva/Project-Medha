@@ -36,13 +36,8 @@ def build_execution_plan(
     if "analytics" not in ordered and any(n == "analytics" for n in names):
         ordered.append("analytics")
 
-    # Minimal controlled fixture shape for demos/tests when services are sparse.
-    # NOTE: this is synthetic demonstration scaffolding, not detected
-    # architecture. The pipeline (workflow/planning.py) labels expanded
-    # services explicitly in CEG events and results.
-    if len(ordered) < 2:
-        ordered = ["network", "database", "backend", "frontend", "analytics"]
-
+    # Real topology only: sparse service sets stay sparse. A single-service
+    # repository yields a single-service plan — never synthetic scaffolding.
     # Always include network as first action
     if "network" not in ordered:
         ordered = ["network", *ordered]

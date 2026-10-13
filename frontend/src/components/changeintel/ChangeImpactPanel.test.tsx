@@ -178,6 +178,7 @@ describe("ChangeImpactPanel", () => {
 
   it("renders an idle state when no analysis is available", () => {
     render(<ChangeImpactPanel analysis={null} />);
-    expect(screen.getByText("Load demo fixture")).toBeInTheDocument();
+    expect(screen.getByText(/No change-intelligence analysis yet/)).toBeInTheDocument();
+    expect(screen.queryByText("Load demo fixture")).toBeNull();
   });
 });

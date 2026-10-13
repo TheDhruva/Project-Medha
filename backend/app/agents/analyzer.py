@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,12 +31,22 @@ def analyze_repository(
 ) -> tuple[ApplicationProfile, AgentResult]:
     started = _now()
     root = workspace_path
+    # Honest failure instead of an empty successful profile: without a
+    # readable workspace there is nothing to infer from.
+    if not root.is_dir():
+        raise RuntimeError(f"Analysis workspace is not available: {root}")
     examined: list[str] = []
     notes: list[str] = []
     package_managers: list[str] = []
     ports: list[int] = []
     services: list[ServiceHint] = []
     language: str | None = None
+    lockfiles: list[str] = []
+    entry_points: list[str] = []
+    env_names: list[str] = []
+    health_hints: list[str] = []
+    framework: str | None = None
+    framework_version: str | None = None
 
     dockerfile = _find_first(root, ["Dockerfile", "dockerfile"])
     compose = _find_first(
@@ -102,6 +113,42 @@ def analyze_repository(
         package_managers.append("go")
         language = language or "go"
 
+    evidence = _gather_evidence(root, examined)
+    lockfiles = evidence["lockfiles"]
+    entry_points = evidence["entry_points"]
+    env_names = evidence["env_names"]
+    health_hints = evidence["health_hints"]
+    if evidence["framework"] is not None:
+        framework, framework_version = evidence["framework"]
+        notes.append(
+            f"Framework evidence: {framework}"
+            f"{(' ' + framework_version) if framework_version else ''} "
+            f"({evidence['framework_source']})."
+        )
+    if evidence["framework_conflict"]:
+        notes.append(
+            f"Conflicting framework evidence ({evidence['framework_conflict']}); "
+            "no framework assumed."
+        )
+    for hint in evidence.get("perf_notes", []):
+        notes.append(hint)
+    if evidence.get("ci_configs"):
+        notes.append(f"CI configuration: {', '.join(evidence['ci_configs'][:3])}.")
+    if evidence.get("test_suites"):
+        notes.append(f"Test suites: {len(evidence['test_suites'])} file(s) detected.")
+    if evidence.get("auth_hints"):
+        notes.append(f"Auth-sensitive modules: {', '.join(evidence['auth_hints'][:3])}.")
+    if evidence.get("db_hints"):
+        notes.append(f"DB/migration hints: {', '.join(evidence['db_hints'][:3])}.")
+    if evidence.get("openapi_hints"):
+        notes.append(f"OpenAPI hints: {', '.join(evidence['openapi_hints'][:3])}.")
+    app_candidates = _detect_app_candidates(root)
+    if len(app_candidates) > 1:
+        notes.append(
+            "Multiple applications detected "
+            f"({', '.join(app_candidates)}); automatic selection is ambiguous."
+        )
+
     # Always ensure network + primary app services for planning.
     if not any(s.name == "network" for s in services):
         services.insert(
@@ -133,7 +180,14 @@ def analyze_repository(
         confidence += 0.25
     if package_managers:
         confidence += 0.1
-    confidence = min(0.95, confidence)
+    if lockfiles:
+        confidence += 0.05
+    if entry_points:
+        confidence += 0.05
+    if len(app_candidates) > 1:
+        # Ambiguity must reduce confidence so the supportability gate blocks.
+        confidence -= 0.2
+    confidence = min(0.95, max(0.1, confidence))
 
     if not examined:
         notes.append("No known manifests found; inference is low confidence.")
@@ -149,6 +203,21 @@ def analyze_repository(
         confidence=confidence,
         manifests_examined=examined,
         notes=notes,
+        framework=framework,
+        framework_version=framework_version,
+        lockfiles=sorted(set(lockfiles)),
+        entry_points=entry_points[:10],
+        env_names=sorted(set(env_names))[:30],
+        health_hints=health_hints[:10],
+        app_candidates=app_candidates[:10],
+        ci_configs=evidence.get("ci_configs", []),
+        test_suites=evidence.get("test_suites", []),
+        auth_hints=evidence.get("auth_hints", []),
+        openapi_hints=evidence.get("openapi_hints", []),
+        db_hints=evidence.get("db_hints", []),
+        perf_notes=evidence.get("perf_notes", []),
+        source_file_count=evidence.get("source_file_count"),
+        source_bytes_approx=evidence.get("source_bytes_approx"),
     )
     profile = ApplicationProfile(
         deployment_id=deployment_id,
@@ -286,3 +355,281 @@ def _parse_compose_lightweight(path: Path) -> tuple[list[ServiceHint], list[int]
                             svc.suggested_port = host_port
 
     return services, ports
+
+
+# --- Evidence gathering (read-only, bounded; never executes repo code) ---
+
+_MAX_READ_BYTES = 256 * 1024
+_MAX_SCAN_FILES = 2000
+_MAX_SCAN_BYTES = 50 * 1024 * 1024
+_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", "dist", "build"}
+
+
+def _read_text(path: Path) -> str:
+    try:
+        if path.stat().st_size > _MAX_READ_BYTES:
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _gather_evidence(root: Path, examined: list[str]) -> dict:
+    """Collect lockfiles, frameworks, entry points, env names, health hints.
+
+    Only names and versions are recorded — never secret values. Files are
+    read with a size cap and never executed.
+    """
+    lockfiles: list[str] = []
+    entry_points: list[str] = []
+    env_names: list[str] = []
+    health_hints: list[str] = []
+    framework: tuple[str, str | None] | None = None
+    framework_source = ""
+    framework_conflict = ""
+
+    for name in (
+        "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+        "poetry.lock", "Pipfile.lock", "go.sum",
+    ):
+        if (root / name).is_file():
+            lockfiles.append(name)
+            examined.append(name)
+
+    pkg_path = root / "package.json"
+    if pkg_path.is_file():
+        try:
+            data = json.loads(_read_text(pkg_path) or "{}")
+        except ValueError:
+            data = {}
+        deps = {}
+        for key in ("dependencies", "devDependencies"):
+            section = data.get(key)
+            if isinstance(section, dict):
+                deps.update(section)
+        for cand, source in (
+            ("next", "package.json:dependencies"),
+            ("nuxt", "package.json:dependencies"),
+            ("@nestjs/core", "package.json:dependencies"),
+            ("express", "package.json:dependencies"),
+            ("fastify", "package.json:dependencies"),
+            ("koa", "package.json:dependencies"),
+        ):
+            if cand in deps:
+                framework = (cand.lstrip("@").split("/")[0], str(deps[cand])[:24])
+                framework_source = source
+                break
+        if framework is None and any(k in deps for k in ("react", "vue", "@angular/core")):
+            lib = next(k for k in ("react", "vue", "@angular/core") if k in deps)
+            framework = (lib.lstrip("@").split("/")[0], str(deps[lib])[:24])
+            framework_source = "package.json:dependencies (client library; server entrypoint unresolved)"
+        scripts = data.get("scripts")
+        if isinstance(scripts, dict):
+            if scripts.get("start"):
+                entry_points.append(f"package.json:scripts.start={str(scripts['start'])[:120]}")
+            for key in scripts:
+                if "health" in str(key).lower():
+                    health_hints.append(f"package.json:scripts.{key}")
+        main = data.get("main")
+        if isinstance(main, str) and main:
+            entry_points.append(f"package.json:main={main[:120]}")
+
+    req_text = _read_text(root / "requirements.txt")
+    pyproject_text = _read_text(root / "pyproject.toml")
+    combined_py = f"{req_text}\n{pyproject_text}".lower()
+    if req_text or pyproject_text:
+        found = [name for name in ("fastapi", "django", "flask") if name in combined_py]
+        if len(found) == 1:
+            framework = (found[0], _version_hint(combined_py, found[0]))
+            framework_source = "requirements.txt/pyproject.toml"
+        elif len(found) > 1:
+            framework_conflict = ", ".join(sorted(found))
+        try:
+            import re as _re
+
+            scripts = _re.findall(r"\[project\.scripts\](.*?)(?:^\[|\Z)", pyproject_text,
+                                  flags=_re.MULTILINE | _re.DOTALL)
+            for block in scripts:
+                for line in block.splitlines():
+                    if "=" in line and not line.strip().startswith("#"):
+                        entry_points.append(f"pyproject:[project.scripts] {line.strip()[:120]}")
+        except (OSError, ValueError):
+            pass
+
+    go_text = _read_text(root / "go.mod")
+    if go_text and framework is None and not framework_conflict:
+        import re as _re
+
+        mod = _re.search(r"^module\s+(\S+)", go_text, flags=_re.MULTILINE)
+        gov = _re.search(r"^go\s+(\S+)", go_text, flags=_re.MULTILINE)
+        if mod:
+            framework = ("go-module", gov.group(1) if gov else None)
+            framework_source = "go.mod"
+
+    dockerfile = _find_first(root, ["Dockerfile", "dockerfile"])
+    if dockerfile is not None:
+        text = _read_text(dockerfile)
+        import re as _re
+
+        for match in _re.finditer(r"^\s*(?:CMD|ENTRYPOINT)\s+(.+)$", text,
+                                  flags=_re.MULTILINE | re.IGNORECASE):
+            entry_points.append(f"Dockerfile:{match.group(0).strip()[:120]}")
+        for match in _re.finditer(r"^\s*ENV\s+([A-Za-z_][A-Za-z0-9_]*)", text,
+                                  flags=_re.MULTILINE):
+            env_names.append(match.group(1))
+        if _re.search(r"^\s*HEALTHCHECK\s+", text, flags=_re.MULTILINE | re.IGNORECASE):
+            health_hints.append("Dockerfile:HEALTHCHECK")
+
+    compose = _find_first(
+        root,
+        ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"],
+    )
+    if compose is not None:
+        text = _read_text(compose)
+        import re as _re
+
+        if _re.search(r"healthcheck\s*:", text, flags=_re.IGNORECASE):
+            health_hints.append(f"{compose.name}:healthcheck")
+        in_env = False
+        for raw_line in text.splitlines()[:400]:
+            stripped = raw_line.strip()
+            if _re.match(r"(?i)^environment\s*:", stripped):
+                in_env = True
+                continue
+            if in_env:
+                if not stripped or stripped.startswith("#"):
+                    continue
+                item = _re.match(r"^-\s*([A-Za-z_][A-Za-z0-9_]*)\s*[=:]", stripped)
+                plain = _re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:", stripped)
+                if item:
+                    env_names.append(item.group(1))
+                    continue
+                if plain and not stripped.startswith("-"):
+                    env_names.append(plain.group(1))
+                    continue
+                if stripped and not raw_line.startswith((" ", "\t")):
+                    in_env = False
+
+    procfile = root / "Procfile"
+    if procfile.is_file():
+        for line in _read_text(procfile).splitlines()[:20]:
+            if line.strip().lower().startswith("web:"):
+                entry_points.append(f"Procfile:{line.strip()[:120]}")
+
+    # --- Bounded supplemental evidence (CI, tests, auth, OpenAPI, DB, budgets) ---
+    ci_configs: list[str] = []
+    test_suites: list[str] = []
+    auth_hints: list[str] = []
+    openapi_hints: list[str] = []
+    db_hints: list[str] = []
+    perf_notes: list[str] = []
+    file_count = 0
+    byte_total = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            # Keep depth shallow (root + 2 levels) for the budget scan.
+            try:
+                depth = len(Path(dirpath).relative_to(root).parts)
+            except ValueError:
+                depth = 0
+            if depth > 2:
+                dirnames[:] = []
+                continue
+            for fn in filenames:
+                if file_count >= _MAX_SCAN_FILES or byte_total >= _MAX_SCAN_BYTES:
+                    break
+                file_count += 1
+                fpath = Path(dirpath) / fn
+                try:
+                    byte_total += fpath.stat().st_size
+                except OSError:
+                    continue
+                rel = str(fpath.relative_to(root))
+                low = rel.lower()
+                if low in (".github/workflows/ci.yml", ".github/workflows/ci.yaml") or low.startswith(".github/workflows/"):
+                    if fn.endswith((".yml", ".yaml")) and "workflow" in low:
+                        ci_configs.append(rel[:160])
+                elif low in ("jenkinsfile", ".gitlab-ci.yml", "azure-pipelines.yml"):
+                    ci_configs.append(rel[:160])
+                elif low in ("openapi.json", "openapi.yaml", "openapi.yml", "swagger.json", "swagger.yaml"):
+                    openapi_hints.append(rel[:160])
+                elif low.startswith("migrations/") or low.startswith("migrate/") or "alembic" in low:
+                    db_hints.append(rel[:160])
+                if fn in ("pytest.ini", "tox.ini") or low.startswith("tests/") or low.startswith("test/") or fn.startswith("test_") and fn.endswith(".py"):
+                    if rel not in test_suites:
+                        test_suites.append(rel[:160])
+                if fn == "package.json":
+                    pass  # already examined
+                elif "auth" in low and fn.endswith((".py", ".ts", ".js")):
+                    auth_hints.append(rel[:160])
+            if file_count >= _MAX_SCAN_FILES or byte_total >= _MAX_SCAN_BYTES:
+                break
+    except OSError:
+        pass
+    # Auth-sensitive filenames at root level (bounded, names only).
+    for name in ("auth.py", "auth.ts", "users.py", "login.py", "session.py", "oauth.py"):
+        if (root / name).is_file() and f"{name}" not in auth_hints:
+            auth_hints.append(name)
+    # OpenAPI references inside package manifests (names only).
+    if "swagger" in combined_py or "openapi" in combined_py:
+        openapi_hints.append("requirements.txt/pyproject.toml:openapi-reference")
+    for marker in ("alembic", "migrate", "schema.sql", "prisma"):
+        if marker in combined_py and marker not in " ".join(db_hints):
+            db_hints.append(f"python-deps:{marker}")
+    if file_count >= _MAX_SCAN_FILES:
+        perf_notes.append(f"Source scan capped at {_MAX_SCAN_FILES} files; results are partial.")
+    if byte_total >= _MAX_SCAN_BYTES:
+        perf_notes.append("Source scan capped at ~50MB; results are partial.")
+
+    return {
+        "lockfiles": lockfiles,
+        "entry_points": entry_points,
+        "env_names": env_names,
+        "health_hints": health_hints,
+        "framework": framework,
+        "framework_source": framework_source,
+        "framework_conflict": framework_conflict,
+        "ci_configs": sorted(set(ci_configs))[:10],
+        "test_suites": sorted(set(test_suites))[:20],
+        "auth_hints": sorted(set(auth_hints))[:20],
+        "openapi_hints": sorted(set(openapi_hints))[:10],
+        "db_hints": sorted(set(db_hints))[:10],
+        "perf_notes": perf_notes[:5],
+        "source_file_count": file_count,
+        "source_bytes_approx": byte_total,
+    }
+
+
+def _version_hint(text: str, name: str) -> str | None:
+    import re as _re
+
+    match = _re.search(rf"{re.escape(name)}\s*([=<>!~]+\s*[^,;\s]+)?", text, flags=_re.IGNORECASE)
+    if match and match.group(1):
+        return match.group(1).strip()[:24]
+    return None
+
+
+def _detect_app_candidates(root: Path) -> list[str]:
+    """Find directories that look like independent applications (max depth 1)."""
+    candidates: list[str] = []
+    search_roots = [root]
+    try:
+        children = [c for c in root.iterdir() if c.is_dir() and c.name not in _SKIP_DIRS]
+    except OSError:
+        children = []
+    search_roots.extend(children[:20])
+    for base in search_roots:
+        label = "." if base == root else base.name
+        try:
+            has_pkg = (base / "package.json").is_file()
+            has_py = ((base / "requirements.txt").is_file() or (base / "pyproject.toml").is_file()) and any(
+                (base / f"{n}.py").is_file() for n in ("app", "main", "wsgi", "asgi", "server")
+            )
+            has_static = (base / "index.html").is_file()
+            has_go = (base / "go.mod").is_file()
+        except OSError:
+            continue
+        if has_pkg or has_py or has_static or has_go:
+            candidates.append(label)
+    return sorted(set(candidates))[:10]

@@ -428,8 +428,8 @@ export interface DeployFormState {
   targetHost: string;
   targetPort: string;
   intent: string;
-  scenario: ScenarioId;
-  mode: "demo" | "real";
+  scenario: null;
+  mode: "real";
   baseRevision: string;
   targetRevision: string;
 }

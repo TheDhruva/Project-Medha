@@ -11,8 +11,10 @@ from app.api.change_impact import router as change_intel_router
 from app.api.deploy import router as deploy_router
 from app.api.evaluation import router as evaluation_router
 from app.api.health import router as health_router
+from app.api.history import router as history_router
 from app.api.ai import router as ai_router
 from app.api.projects import router as projects_router
+from app.api.scores import router as scores_router
 from app.api.webhooks import router as webhooks_router
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
@@ -51,7 +53,19 @@ async def lifespan(_app: FastAPI):
         pruned,
         recovery_summary(recovered) if recovered else "none",
     )
+    try:
+        from app.jobs.worker import start_worker
+
+        start_worker()
+    except Exception:  # noqa: BLE001 - worker must never block startup
+        logger.exception("Job worker failed to start")
     yield
+    try:
+        from app.jobs.worker import stop_worker
+
+        await stop_worker()
+    except Exception:  # noqa: BLE001 - shutdown must not raise
+        logger.exception("Job worker failed to stop")
     logger.info("MEDHA backend shutting down")
 
 
@@ -128,11 +142,13 @@ def create_app() -> FastAPI:
         )
 
     application.include_router(health_router)
+    application.include_router(history_router)
     application.include_router(deploy_router)
     application.include_router(evaluation_router)
     application.include_router(change_intel_router)
     application.include_router(ai_router)
     application.include_router(projects_router)
+    application.include_router(scores_router)
     application.include_router(webhooks_router)
     return application
 

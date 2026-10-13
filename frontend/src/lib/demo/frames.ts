@@ -1479,26 +1479,15 @@ function buildPartialFailure(): DemoFrame[] {
 }
 
 export function framesForScenario(scenario: ScenarioId): DemoFrame[] {
-  switch (scenario) {
-    case "PORT_CONFLICT":
-      return buildPortConflict();
-    case "SECURITY_CONFLICT":
-      return buildSecurityConflict();
-    case "VERIFICATION_FAILURE":
-      return buildVerificationFailure();
-    case "PARTIAL_FAILURE":
-      return buildPartialFailure();
-    case "SUCCESSFUL_DEPLOYMENT":
-    default:
-      return buildSuccessPath("SUCCESSFUL_DEPLOYMENT");
-  }
+  void scenario;
+  return [];
 }
 
 export function createIdleSnapshot(): DeploymentSnapshot {
   return {
     deploymentId: null,
-    isDemo: true,
-    executionMode: "demo",
+    isDemo: false,
+    executionMode: null,
     runtimeLogs: null,
     scenario: null,
     runStatus: "idle",
@@ -1507,16 +1496,16 @@ export function createIdleSnapshot(): DeploymentSnapshot {
       round: null,
       statusLabel: "Idle",
       simpleText:
-        "Choose a demo scenario and start a deployment. MEDHA will walk through analysis, negotiation, verification, and recovery using labelled DEMO data.",
+        "Connect a repository and start a real analysis. No demo data is shown.",
       technicalText:
-        "runStatus=idle · mode=demo · backend=SSE · data_source=demo_engine",
+        "runStatus=idle · mode=real · backend=SSE · data_source=none",
     },
     pipeline: initialPipeline(),
     agents: initialAgents(),
     constraints: [],
     negotiation: null,
-    verification: emptyVerification(),
-    critic: emptyCritic(),
+    verification: null,
+    critic: null,
     graph: emptyGraph(),
     selectedNodeId: null,
     rollback: null,

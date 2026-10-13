@@ -103,11 +103,16 @@ def test_deploy_rejects_dangerous_repository_urls(client):
 
 
 def test_deploy_accepts_github_and_local_urls(client):
+    from app.core.deploy_lock import release_real_deploy
+
     response = client.post(
         "/api/deploy",
         json=_deploy_payload(repository_url="https://github.com/example/app"),
     )
     assert response.status_code == 202
+    # V1 allows one real deployment at a time; release the in-flight lock
+    # before asserting the second creation path (contract, not concurrency).
+    release_real_deploy()
     response = client.post(
         "/api/deploy",
         json=_deploy_payload(
@@ -129,7 +134,7 @@ def test_change_impact_rejects_dangerous_url(client):
     assert response.status_code == 422
 
 
-def test_real_pipeline_labels_synthetic_services(client):
+def test_real_pipeline_has_no_synthetic_services(client):
     response = client.post(
         "/api/deploy",
         json=_deploy_payload(
@@ -144,13 +149,13 @@ def test_real_pipeline_labels_synthetic_services(client):
     final = _wait_terminal(client, deployment_id)
     assert final["status"] == "completed"
     result = final["result"]
-    # compose_app fixture detects fewer than the canonical five services, so
-    # the pipeline must label the expansion explicitly.
-    assert result["expanded_to_canonical"] is True
-    assert isinstance(result["synthetic_services"], list)
-    assert result["synthetic_services"], "expected synthetic services to be listed"
-    assert "synthetic" in result["message"].lower()
+    # compose_app fixture detects database/backend/frontend: the plan must
+    # reflect exactly the discovered topology, with no injected services.
+    assert result["expanded_to_canonical"] is False
+    assert result["synthetic_services"] == []
+    assert "synthetic" not in (result["message"] or "").lower()
 
-    logs = client.get(f"/api/deploy/{deployment_id}/logs").json()["lines"]
-    ceg_lines = [line for line in logs if line["type"] == "ceg.created"]
-    assert ceg_lines, "expected a ceg.created event"
+    graph = client.get(f"/api/deploy/{deployment_id}/graph").json()
+    services = {str(n["service"]).lower() for n in graph["graph"]["nodes"]}
+    assert "analytics" not in services
+    assert {"network", "database", "backend", "frontend"} <= services

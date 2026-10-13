@@ -12,6 +12,27 @@ from pathlib import Path
 
 SUPPORTED_PROFILES = ("static", "python", "node")
 
+# Explicit support matrix (V1): profile → detection, readiness, limits.
+# Anything outside this matrix fails with UNSUPPORTED_STACK — MEDHA never
+# builds or executes an arbitrary repository Dockerfile on the backend host.
+SUPPORT_MATRIX = {
+    "static": {
+        "detects": "index.html at checkout root",
+        "readiness": "GET / → 200 via loopback probe",
+        "base": "nginx:1.27-alpine",
+    },
+    "python": {
+        "detects": "requirements.txt/pyproject.toml + app.py|main.py|wsgi.py|asgi.py|server.py",
+        "readiness": "GET / → 200 via loopback probe",
+        "base": "python:3.12-slim",
+    },
+    "node": {
+        "detects": "package.json with scripts.start",
+        "readiness": "GET / → 200 via loopback probe",
+        "base": "node:22-alpine",
+    },
+}
+
 # Pinned, minimal base images (immutable tags where practical).
 BASE_IMAGES = {
     "static": "nginx:1.27-alpine",

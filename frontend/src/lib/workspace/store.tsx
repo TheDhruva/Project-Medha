@@ -26,7 +26,7 @@ function save(key: string, value: unknown) {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    /* storage full/blocked — demo state stays in memory */
+    /* storage full/blocked — state stays in memory */
   }
 }
 
@@ -60,17 +60,18 @@ interface WorkspaceValue {
 const WorkspaceContext = createContext<WorkspaceValue | null>(null);
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const [projects, setProjects] = useState<Project[]>(SEED_PROJECTS);
-  const [proposals, setProposals] = useState<ChangeProposal[]>(SEED_PROPOSALS);
-  const [runs] = useState<RunRecord[]>(SEED_RUNS);
+  // Production state starts empty. No seeded projects are ever injected.
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [proposals, setProposals] = useState<ChangeProposal[]>([]);
+  const [runs] = useState<RunRecord[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [recentIds, setRecentIds] = useState<string[]>([]);
   const [boards, setBoards] = useState<Record<string, BoardLayout>>({});
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    setProjects(load(PROJECTS_KEY, SEED_PROJECTS));
-    setProposals(load(PROPOSALS_KEY, SEED_PROPOSALS));
+    setProjects(load(PROJECTS_KEY, [] as Project[]));
+    setProposals(load(PROPOSALS_KEY, [] as ChangeProposal[]));
     setBoards(load(BOARD_KEY, {}));
     setActiveProjectId(load(ACTIVE_KEY, null));
     setRecentIds(load(RECENT_KEY, []));
@@ -117,7 +118,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       status: "never_run",
       lastActivity: new Date().toISOString().slice(0, 16).replace("T", " "),
       latestRunId: null,
-      executionMode: "simulator",
+      executionMode: "controlled-local",
       createdAt: new Date().toISOString().slice(0, 16).replace("T", " "),
     };
     setProjects((prev) => [project, ...prev]);
@@ -150,10 +151,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             result = { ok: false, message: gate.reason ?? "Approval blocked." };
             return p;
           }
-          result = { ok: true, message: `Approved revision ${p.sourceRevision}. Demo approval only — no real deployment was triggered.` };
+          result = { ok: true, message: `Approved revision ${p.sourceRevision}. Recorded locally; backend approval governs real execution.` };
           return {
             ...p, state: "approved" as const,
-            history: [...p.history, { at: new Date().toISOString().slice(0, 16).replace("T", " "), actor: "reviewer (demo)", action: `Approved revision ${p.sourceRevision}${note ? ` — ${note}` : ""}` }],
+            history: [...p.history, { at: new Date().toISOString().slice(0, 16).replace("T", " "), actor: "reviewer", action: `Approved revision ${p.sourceRevision}${note ? ` — ${note}` : ""}` }],
           };
         }
         if (action === "reject") {
@@ -164,13 +165,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           result = { ok: true, message: `Rejected revision ${p.sourceRevision}. The proposal stays inspectable.` };
           return {
             ...p, state: "rejected" as const,
-            history: [...p.history, { at: new Date().toISOString().slice(0, 16).replace("T", " "), actor: "reviewer (demo)", action: `Rejected${note ? ` — ${note}` : ""}` }],
+            history: [...p.history, { at: new Date().toISOString().slice(0, 16).replace("T", " "), actor: "reviewer", action: `Rejected${note ? ` — ${note}` : ""}` }],
           };
         }
         result = { ok: true, message: "Changes requested. The proposal is marked needs-analysis; re-analysis is required before approval." };
         return {
           ...p, state: "changes_requested" as const,
-          history: [...p.history, { at: new Date().toISOString().slice(0, 16).replace("T", " "), actor: "reviewer (demo)", action: `Requested changes${note ? ` — ${note}` : ""}` }],
+          history: [...p.history, { at: new Date().toISOString().slice(0, 16).replace("T", " "), actor: "reviewer", action: `Requested changes${note ? ` — ${note}` : ""}` }],
         };
       }),
     );
@@ -183,8 +184,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const resetDemo = useCallback(() => {
-    setProjects(SEED_PROJECTS);
-    setProposals(SEED_PROPOSALS);
+    setProjects([]);
+    setProposals([]);
     setBoards({});
     setActiveProjectId(null);
     setRecentIds([]);

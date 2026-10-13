@@ -2,10 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  fetchProject,
   fetchProposals,
+  fetchRunHealth,
   fetchRunHydration,
   fetchRunsList,
+  type Project,
   type Proposal,
+  type RunHealth,
   type RunLogLine,
   type RunSummary,
 } from "@/lib/api/client";
@@ -21,6 +25,8 @@ import { repoForProjectId, shortNameForRepo } from "./projects";
 
 export interface RunHydration {
   logs: RunLogLine[];
+  /** How the selected run actually executed (real / simulator / controlled_test / demo); null when unknown. */
+  executionMode: string | null;
   constraints: ConstraintView[];
   negotiation: NegotiationView | null;
   verification: Record<string, unknown> | null;
@@ -30,10 +36,14 @@ export interface RunHydration {
   changeImpact: ChangeIntelAnalysis | null;
   changeImpactLabel: string | null;
   changeImpactIsDemo: boolean;
+  /** Observed runtime health (live probe at hydration time); null when unobservable. */
+  health: RunHealth | null;
 }
 
 export interface ProjectData {
   projectId: string;
+  /** Canonical DB-backed project when the id is a `prj_*` identity; null on legacy URL routes. */
+  project: Project | null;
   repo: string | null;
   name: string;
   runs: RunSummary[];
@@ -52,6 +62,7 @@ export interface ProjectData {
 
 const EMPTY_HYDRATION: RunHydration = {
   logs: [],
+  executionMode: null,
   constraints: [],
   negotiation: null,
   verification: null,
@@ -61,13 +72,20 @@ const EMPTY_HYDRATION: RunHydration = {
   changeImpact: null,
   changeImpactLabel: null,
   changeImpactIsDemo: false,
+  health: null,
 };
 
 export function useProjectData(projectId: string, initialRunId?: string | null): ProjectData {
-  const repo = useMemo(() => repoForProjectId(projectId), [projectId]);
+  const canonicalId = projectId.startsWith("prj_") ? projectId : null;
+  const legacyRepo = useMemo(
+    () => (canonicalId ? null : repoForProjectId(projectId)),
+    [projectId, canonicalId],
+  );
+  const [project, setProject] = useState<Project | null>(null);
+  const repo = project?.canonical_url ?? legacyRepo;
   const name = useMemo(
-    () => (repo ? shortNameForRepo(repo) : "Unknown project"),
-    [repo],
+    () => project?.name ?? (repo ? shortNameForRepo(repo) : "Unknown project"),
+    [project, repo],
   );
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,6 +98,38 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
   const [proposalsLoading, setProposalsLoading] = useState(false);
 
   const load = useCallback(async () => {
+    if (canonicalId) {
+      // Canonical identity: one DB-backed project, runs joined by project_id.
+      setLoading(true);
+      setError(null);
+      setProposalsLoading(true);
+      try {
+        const proj = await fetchProject(canonicalId);
+        setProject(proj);
+        const [runsRes, proposalsRes] = await Promise.all([
+          fetchRunsList({ project_id: canonicalId, limit: 100, offset: 0 }),
+          fetchProposals({ project_id: canonicalId, limit: 50 }).catch(() => ({ proposals: [] as Proposal[] })),
+        ]);
+        setRuns(runsRes.runs);
+        setProposals(proposalsRes.proposals ?? []);
+        setBackendReachable(true);
+        setSelectedId((prev) => {
+          if (prev && runsRes.runs.some((r) => r.deployment_id === prev)) return prev;
+          return runsRes.runs[0]?.deployment_id ?? null;
+        });
+      } catch (err) {
+        const missing = err instanceof Error && /not found/i.test(err.message);
+        setBackendReachable(!missing ? false : true);
+        setError(err instanceof Error ? err.message : "Cannot reach MEDHA backend.");
+        setRuns([]);
+        setProposals([]);
+        if (missing) setProject(null);
+      } finally {
+        setLoading(false);
+        setProposalsLoading(false);
+      }
+      return;
+    }
     if (!repo) {
       setLoading(false);
       setError("This project id does not decode to a repository.");
@@ -111,7 +161,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
       setLoading(false);
       setProposalsLoading(false);
     }
-  }, [repo]);
+  }, [repo, canonicalId]);
 
   useEffect(() => {
     setSelectedId(initialRunId ?? null);
@@ -126,11 +176,12 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
     }
     let cancelled = false;
     setHydrating(true);
-    void fetchRunHydration(selectedId)
-      .then((h) => {
+    void Promise.all([fetchRunHydration(selectedId), fetchRunHealth(selectedId)])
+      .then(([h, health]) => {
         if (cancelled) return;
         setHydration({
           logs: h.logs,
+          executionMode: h.executionMode ?? null,
           constraints: h.constraints?.constraints ?? [],
           negotiation: h.constraints?.negotiation ?? null,
           verification: (h.verification?.verification as Record<string, unknown> | null) ?? null,
@@ -140,6 +191,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
           changeImpact: h.changeImpact?.analysis ?? null,
           changeImpactLabel: h.changeImpact?.label ?? null,
           changeImpactIsDemo: h.changeImpact?.is_demo ?? false,
+          health,
         });
       })
       .catch(() => {
@@ -161,6 +213,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
 
   return {
     projectId,
+    project,
     repo,
     name,
     runs,

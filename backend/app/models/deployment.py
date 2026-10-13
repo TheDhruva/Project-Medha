@@ -38,6 +38,29 @@ class DeploymentRequest(BaseModel):
         except RepositoryUrlError as exc:
             raise ValueError(f"{exc.code}: {exc.message}") from exc
 
+    @field_validator("base_revision", "target_revision")
+    @classmethod
+    def revision_must_be_sha_or_empty(cls, value: str | None) -> str | None:
+        """Remote runs are pinned to immutable 40-hex SHAs.
+
+        Accepts None/empty (resolved server-side to HEAD) or an exact
+        40-hex commit SHA. Moving refs, short SHAs, and arbitrary strings
+        are rejected so a run can never depend on a mutable ref identity.
+        """
+        if value is None:
+            return None
+        candidate = value.strip().lower()
+        if not candidate:
+            return None
+        import re as _re
+
+        if not _re.fullmatch(r"[0-9a-f]{40}", candidate):
+            raise ValueError(
+                "base_revision/target_revision must be a 40-character hex "
+                "commit SHA or omitted (server resolves HEAD)."
+            )
+        return candidate
+
     @field_validator("scenario", mode="before")
     @classmethod
     def normalize_scenario(cls, value: Any) -> Any:
@@ -49,8 +72,13 @@ class DeploymentRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_scenario_for_demo(self) -> Self:
+        # Demo mode was removed from the product (410 DEMO_REMOVED at the
+        # route). The model-level guard stays as defense-in-depth for any
+        # legacy caller that still constructs a demo request.
         if self.mode == DeployMode.DEMO and self.scenario is None:
             raise ValueError("scenario is required when mode=demo")
+        if self.mode == DeployMode.DEMO and self.scenario is not None:
+            raise ValueError("mode=demo has been removed from the product")
         return self
 
 class DeploymentResponse(BaseModel):

@@ -63,13 +63,18 @@ def test_real_mode_partial_failure_intent(client):
     assert result["title"] == "PARTIAL_FAILURE"
     assert "backend" in result["failed_services"]
     assert "frontend" in result["rolled_back_services"]
-    assert "analytics" in result["preserved_services"]
+    # Real topology only: the backend's upstream dependency is preserved,
+    # the downstream dependent is rolled back. No synthetic services exist.
+    assert "database" in result["preserved_services"]
+    assert "analytics" not in result.get("preserved_services", [])
+    assert "analytics" not in result.get("failed_services", [])
 
     graph = client.get(f"/api/deploy/{deployment_id}/graph").json()
     nodes = {n["id"]: n for n in graph["graph"]["nodes"]}
     assert nodes["n_backend"]["status"] == "failed"
     assert nodes["n_frontend"]["status"] == "rolled_back"
-    assert nodes["n_analytics"]["status"] == "preserved"
+    assert nodes["n_database"]["status"] == "preserved"
+    assert "n_analytics" not in nodes
     assert graph["rollback"]["failed_node_id"] == "n_backend"
 
 

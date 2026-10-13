@@ -4,7 +4,8 @@ import {
   analyzeChangeImpact,
   eventsUrl,
   fetchChangeImpact,
-  fetchDemoChangeImpact,
+  fetchConfigStatus,
+  fetchRunHealth,
   fetchRunHydration,
   fetchRunLogs,
 } from "@/lib/api/client";
@@ -82,20 +83,6 @@ describe("change intelligence client", () => {
     expect(lastUrl).toMatch(/\/api\/deploy\/dep_1\/change-impact$/);
   });
 
-  it("fetchDemoChangeImpact hits the demo fixture endpoint", async () => {
-    stubFetch(
-      jsonResponse({
-        is_demo: true,
-        label: "DEMO/MOCK",
-        analysis: { risk: { level: "high" } },
-      } as ChangeImpactResponse),
-    );
-    const r = await fetchDemoChangeImpact();
-    expect(lastUrl).toMatch(/\/api\/change-impact\/demo\/fixture$/);
-    expect(r.is_demo).toBe(true);
-    expect(r.label).toBe("DEMO/MOCK");
-  });
-
   it("encodes deployment ids in SSE and artifact URLs", async () => {
     expect(eventsUrl("dep_abc 123/..")).toContain(
       `/api/deploy/${encodeURIComponent("dep_abc 123/..")}/events`,
@@ -103,6 +90,54 @@ describe("change intelligence client", () => {
     stubFetch(jsonResponse({ deployment_id: "dep_1", analysis: {} } as ChangeImpactResponse));
     await fetchChangeImpact("dep_a/b");
     expect(lastUrl).toContain(`/api/deploy/${encodeURIComponent("dep_a/b")}/change-impact`);
+  });
+});
+
+describe("run health and config diagnostics", () => {
+  it("fetchRunHealth hits the per-run health endpoint", async () => {
+    stubFetch(
+      jsonResponse({
+        deployment_id: "dep_1",
+        is_demo: false,
+        health_status: "unknown",
+        checked_at: null,
+        source: "stored",
+        reason: "No execution result recorded yet.",
+        execution_mode: null,
+      }),
+    );
+    const r = await fetchRunHealth("dep_1");
+    expect(lastUrl).toMatch(/\/api\/deploy\/dep_1\/health$/);
+    expect(r?.health_status).toBe("unknown");
+  });
+
+  it("fetchRunHealth returns null when the backend is unreachable", async () => {
+    stubFetch(jsonResponse({ error: { code: "NOT_FOUND" } }, false, 404));
+    await expect(fetchRunHealth("dep_missing")).resolves.toBeNull();
+  });
+
+  it("fetchConfigStatus reports presence booleans only", async () => {
+    stubFetch(
+      jsonResponse({
+        env: "development",
+        auth_mode: "off",
+        executor_mode: "auto",
+        docker_execute: false,
+        demo_enabled: false,
+        configured: { MEDHA_API_TOKEN: false, GITHUB_APP_ID: false },
+        github_app_configured: false,
+        docker_cli: false,
+        docker_daemon: false,
+        database_mode: "sqlite",
+        execution: "unconfigured",
+        execution_reason: "Set ...",
+        production_ready: null,
+      }),
+    );
+    const r = await fetchConfigStatus();
+    expect(lastUrl).toMatch(/\/api\/config\/status$/);
+    expect(r?.demo_enabled).toBe(false);
+    expect(r?.configured).toMatchObject({ MEDHA_API_TOKEN: false });
   });
 });
 

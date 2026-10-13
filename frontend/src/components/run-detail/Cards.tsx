@@ -124,7 +124,7 @@ export function JourneyCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
                 s.done
                   ? "border-medha-success bg-medha-success"
                   : s.active
-                    ? "animate-medha-pulse border-medha-run bg-medha-run"
+                    ? "border-medha-run bg-medha-run"
                     : "border-medha-border bg-white",
               )}
               aria-hidden

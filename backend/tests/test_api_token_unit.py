@@ -1,8 +1,8 @@
-"""Mutation-token guard + production simulator pin (single-service hosting).
+"""Mutation-token guard + production execution refusal (single-service hosting).
 
 Covers backend/app/core/api_token.py (401 on bad token, 503 fail-closed in
 production without a token, permissive local default) and the production
-simulator pin in choose_executor.
+fail-closed behavior in choose_executor (no silent simulator on hosted plane).
 """
 
 from __future__ import annotations
@@ -41,10 +41,15 @@ def authed_client(tmp_path, monkeypatch):
 
 
 def _demo_payload(**overrides):
+    from pathlib import Path as _Path
+
+    _fixture_repo = str(
+        (_Path(__file__).resolve().parent / "fixtures" / "repos" / "node_api").resolve()
+    )
     payload = {
-        "repository_url": "https://github.com/example/app",
-        "mode": "demo",
-        "scenario": "PORT_CONFLICT",
+        "repository_url": _fixture_repo,
+        "mode": "real",
+        "scenario": None,
         "target": {"host": "localhost", "port": 8080},
     }
     payload.update(overrides)
@@ -98,13 +103,16 @@ def test_production_without_token_fails_closed(authed_client):
             pass
 
 
-def test_production_pins_simulator_executor(monkeypatch):
+def test_production_has_no_executor_fail_closed(monkeypatch):
+    from app.execution.executor import ExecutionUnavailableError
+
     monkeypatch.setenv("MEDHA_ENV", "production")
     monkeypatch.setenv("MEDHA_EXECUTOR_MODE", "docker")
     monkeypatch.setenv("MEDHA_DOCKER_EXECUTE", "true")
     get_settings.cache_clear()
     try:
-        assert isinstance(choose_executor(is_demo=False), SimulatorExecutor)
+        with pytest.raises(ExecutionUnavailableError):
+            choose_executor(is_demo=False)
     finally:
         get_settings.cache_clear()
 

@@ -12,34 +12,35 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/ui/cn";
+import { MedhaFace } from "@/components/medha/MedhaFace";
 
 function ArchNode({
   step,
   icon: Icon,
   title,
   detail,
-  accent,
+  featured,
   className,
 }: {
   step: string;
   icon: typeof Cpu;
   title: string;
   detail: string;
-  accent?: boolean;
+  featured?: boolean;
   className?: string;
 }) {
   return (
     <div
       className={cn(
-        "flex items-center gap-2.5 rounded-[10px] border bg-medha-surface-raised px-3 py-2 text-left",
-        accent ? "border-medha-accent/40 shadow-medha" : "border-medha-border",
+        "flex items-center gap-2.5 rounded-[10px] px-3 py-2 text-left",
+        featured ? "lp-stage-featured" : "lp-stage",
         className,
       )}
     >
       <span
         className={cn(
           "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-          accent ? "bg-medha-accent text-white" : "bg-medha-muted text-medha-text",
+          featured ? "lp-chip-featured" : "lp-surface lp-text border lp-border",
         )}
         aria-hidden
       >
@@ -47,10 +48,10 @@ function ArchNode({
       </span>
       <span className="min-w-0">
         <span className="flex items-center gap-1.5">
-          <span className="medha-mono text-[10px] font-medium text-medha-tertiary">{step}</span>
-          <span className="truncate text-[13px] font-semibold text-medha-text">{title}</span>
+          <span className="lp-mono text-[10px] font-medium lp-tertiary">{step}</span>
+          <span className="truncate text-[13px] font-semibold lp-text">{title}</span>
         </span>
-        <span className="medha-mono block truncate text-[11px] text-medha-secondary">{detail}</span>
+        <span className="lp-mono block truncate text-[11px] lp-secondary">{detail}</span>
       </span>
     </div>
   );
@@ -59,29 +60,40 @@ function ArchNode({
 function Connector({ className }: { className?: string }) {
   return (
     <div className={cn("flex justify-center", className)} aria-hidden>
-      <span className="block h-3.5 w-px bg-medha-border-strong sm:h-4" />
+      <span className="lp-connector block h-3.5 w-px sm:h-4" />
     </div>
   );
 }
 
 export function LandingPage({ signedIn }: { signedIn: boolean }) {
   return (
-    <div className="flex min-h-svh flex-col bg-medha-bg">
-      {/* Header — 64px, wordmark + product label only */}
-      <header className="h-16 shrink-0 border-b border-medha-border bg-medha-surface">
+    <div className="landing flex min-h-svh flex-col">
+      {/* Header — 64px, wordmark + descriptor + product links */}
+      <header className="h-16 shrink-0 border-b lp-border lp-surface">
         <div className="flex h-full w-full items-center justify-between px-[4.5%]">
           <div className="flex items-center gap-2.5">
-            <span className="font-display text-[19px] font-bold tracking-tight text-medha-text">
+            <span className="font-display text-[19px] font-bold tracking-tight lp-text">
               MEDHA
             </span>
-            <span aria-hidden className="h-4 w-px bg-medha-border-strong" />
-            <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-medha-tertiary">
+            <span aria-hidden className="lp-connector h-4 w-px" />
+            <span className="text-[11px] font-medium uppercase tracking-[0.14em] lp-tertiary">
               DevOps Orchestration
             </span>
           </div>
-          <p className="medha-mono hidden text-[11px] text-medha-tertiary sm:block">
+          <p className="lp-mono hidden text-[11px] lp-tertiary sm:block">
             local-first · evidence-traced
           </p>
+          <nav aria-label="Product" className="hidden items-center gap-1 md:flex">
+            {[
+              { href: "/projects", label: "Projects" },
+              { href: "/runs", label: "Runs" },
+              { href: "/settings", label: "Settings" },
+            ].map((l) => (
+              <Link key={l.href} href={l.href} className="lp-nav-link">
+                {l.label}
+              </Link>
+            ))}
+          </nav>
         </div>
       </header>
 
@@ -89,30 +101,30 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
       <main className="mx-auto grid w-full max-w-none flex-1 grid-cols-1 items-center gap-8 px-[4.5%] py-6 lg:h-[calc(100svh-4rem)] lg:grid-cols-[44%_56%] lg:gap-12 lg:overflow-hidden lg:py-4 xl:gap-16">
         {/* Left — entry */}
         <section aria-label="Enter MEDHA" className="min-w-0">
-          <p className="medha-mono flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.14em] text-medha-accent">
-            <span aria-hidden className="inline-block h-1.5 w-1.5 rounded-full bg-medha-accent" />
+          <p className="lp-mono lp-eyebrow flex items-center gap-2.5 text-[11px] font-medium uppercase tracking-[0.14em]">
+            <MedhaFace state="idle" size={30} />
             Constraint-aware DevOps automation
           </p>
-          <p className="font-display mt-2 text-[clamp(2.75rem,4.5vw,4.25rem)] font-bold leading-[0.95] tracking-tight text-medha-text">
+          <p className="font-display mt-2 text-[clamp(2.75rem,4.5vw,4.25rem)] font-bold leading-[0.95] tracking-tight lp-text">
             MEDHA
           </p>
-          <h1 className="mt-2 max-w-md text-[clamp(1.15rem,1.8vw,1.6rem)] font-semibold leading-snug tracking-tight text-medha-text">
+          <h1 className="mt-2 max-w-md text-[clamp(1.15rem,1.8vw,1.6rem)] font-semibold leading-snug tracking-tight lp-text">
             Infrastructure that reasons before it deploys.
           </h1>
-          <p className="mt-2 max-w-md text-[13.5px] leading-relaxed text-medha-secondary">
+          <p className="mt-2 max-w-md text-[13.5px] leading-relaxed lp-secondary">
             MEDHA coordinates specialized agents to analyze repositories, resolve
             infrastructure conflicts, verify deployment plans, and execute deployment
             workflows with traceable evidence.
           </p>
 
-          <h2 className="mt-5 text-[12px] font-semibold uppercase tracking-[0.1em] text-medha-text">
+          <h2 className="mt-5 text-[12px] font-semibold uppercase tracking-[0.1em] lp-text">
             Choose how to enter
           </h2>
           <div className="mt-2 flex max-w-md flex-col gap-2">
             {signedIn ? (
               <Link
                 href="/projects"
-                className="inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] bg-medha-accent px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                className="lp-btn lp-btn-primary"
                 aria-label="Start MEDHA"
               >
                 Start <ArrowRight className="h-4 w-4" aria-hidden />
@@ -120,15 +132,15 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
             ) : (
               <>
                 <Link
-                  href="/demo"
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] bg-medha-accent px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                  href="/projects"
+                  className="lp-btn lp-btn-primary"
                   aria-label="Continue as Guest"
                 >
                   Continue as Guest <ArrowRight className="h-4 w-4" aria-hidden />
                 </Link>
                 <Link
                   href="/sign-in"
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] border border-medha-border-strong bg-medha-surface-raised px-5 py-2.5 text-sm font-semibold text-medha-text transition hover:bg-medha-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                  className="lp-btn lp-btn-secondary"
                   aria-label="Sign In"
                 >
                   Sign In
@@ -136,20 +148,19 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
               </>
             )}
           </div>
-          <p className="mt-2 max-w-md text-[12px] leading-relaxed text-medha-tertiary">
-            Guest runs the labeled simulated demo — no registration. Sign in keeps
-            durable per-user projects.
+          <p className="mt-2 max-w-md text-[12px] leading-relaxed lp-tertiary">
+            No registration needed to explore. Sign in keeps durable per-user projects.
           </p>
         </section>
 
         {/* Right — illustrative architecture diagram */}
         <section
           aria-label="MEDHA orchestration architecture (illustrative)"
-          className="min-w-0 rounded-medha border border-medha-border bg-medha-surface p-4 shadow-medha sm:p-5 lg:max-h-full lg:overflow-hidden"
+          className="lp-panel min-w-0 rounded-[8px] p-4 sm:p-5 lg:max-h-full lg:overflow-hidden"
         >
           <div className="flex items-center justify-between gap-3">
-            <p className="medha-label">Pipeline architecture</p>
-            <span className="medha-mono rounded-full border border-medha-border bg-medha-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-medha-secondary">
+            <p className="lp-label">Pipeline architecture</p>
+            <span className="lp-mono rounded-full border lp-border lp-surface-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] lp-secondary">
               Illustrative
             </span>
           </div>
@@ -167,7 +178,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
               icon={Cpu}
               title="MEDHA Orchestrator"
               detail="constraint negotiation · ≤ 3 rounds"
-              accent
+              featured
             />
             <Connector />
             <div
@@ -181,16 +192,16 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
               ].map((a) => (
                 <div
                   key={a.title}
-                  className="flex flex-col items-center gap-1 rounded-[10px] border border-medha-border bg-medha-surface-raised px-2 py-2 text-center"
+                  className="lp-stage flex flex-col items-center gap-1 rounded-[10px] px-2 py-2 text-center"
                 >
                   <span
-                    className="flex h-7 w-7 items-center justify-center rounded-lg bg-medha-muted text-medha-text"
+                    className="lp-surface flex h-7 w-7 items-center justify-center rounded-lg border lp-border lp-text"
                     aria-hidden
                   >
                     <a.icon className="h-3.5 w-3.5" />
                   </span>
-                  <span className="text-[12px] font-semibold text-medha-text">{a.title}</span>
-                  <span className="medha-mono text-[10px] leading-tight text-medha-tertiary">
+                  <span className="text-[12px] font-semibold lp-text">{a.title}</span>
+                  <span className="lp-mono text-[10px] leading-tight lp-tertiary">
                     {a.detail}
                   </span>
                 </div>
@@ -212,7 +223,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
             />
           </div>
 
-          <p className="medha-mono mt-3 border-t border-medha-border pt-2 text-[10.5px] leading-relaxed text-medha-tertiary">
+          <p className="lp-mono mt-3 border-t lp-border pt-2 text-[10.5px] leading-relaxed lp-tertiary">
             analyze → negotiate → verify → execute → recover · every action traced
           </p>
         </section>

@@ -17,7 +17,7 @@ Define the system shape for MEDHA V1 so implementation and viva explanations sta
 3. Deterministic paths first; LLM only for bounded mediation (optional; unused by default).
 4. SQLite persistence; in-process event bus + SSE.
 5. Local Docker host as the only optional mutate target.
-6. Demo Mode exercises the same pipeline *shape* without external deps.
+6. Durable push-triggered jobs (SQLite `jobs` table + single in-process worker); three-tier incremental analysis; four versioned evidence-backed scores; real Git commit history.
 7. CNP and CEG are first-class research components.
 8. **CIG (Change Impact Graph)** — Phase 12/2 — is a third research component:
    deterministic repository-dependency impact from git revisions, formally

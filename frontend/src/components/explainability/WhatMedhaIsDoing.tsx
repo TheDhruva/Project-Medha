@@ -11,7 +11,7 @@ export function WhatMedhaIsDoing() {
   return (
     <section className="medha-panel animate-medha-in overflow-hidden border-medha-accent/20">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-medha-border bg-medha-accent-soft/50 px-5 py-3">
-        <h2 className="font-display text-sm font-semibold tracking-wide text-medha-accent-ink">
+        <h2 className="font-display text-sm font-semibold tracking-wide text-medha-accent-hover">
           WHAT MEDHA IS DOING
         </h2>
         <ViewModeToggle />

@@ -5,37 +5,48 @@
 @tailwind utilities;
 
 :root {
-  /* ——— Dark Slate DevOps Workspace ——— */
-  --medha-bg: #222B3A;
-  --medha-bg-warm: #252F40;
-  --medha-sidebar: #171E2B;
-  --medha-canvas: #222B3A;
-  --medha-surface: #2C3748;
-  --medha-surface-muted: #334054;
-  --medha-surface-soft: #303C4F;
-  --medha-surface-raised: #39465A;
-  --medha-border: #465368;
-  --medha-border-strong: #39465A;
-  --medha-text: #F1F5F9;
-  --medha-text-secondary: #B2BECE;
-  --medha-text-tertiary: #8796AA;
-  --medha-accent: #D93645;
-  --medha-accent-hover: #C82A3B;
-  --medha-accent-soft: #ED4A5E;
-  --medha-accent-ink: #F1F5F9;
-  --medha-run: #82B4FF;
-  --medha-run-soft: #2E4053;
-  --medha-run-ink: #B3D8FF;
-  --medha-success: #4CCB91;
-  --medha-success-soft: #2A5A4A;
-  --medha-warning: #F3B84B;
-  --medha-warning-soft: #5A3D11;
-  --medha-danger: #FF6472;
-  --medha-danger-soft: #3D1F21;
-  --medha-info: #82B4FF;
-  --medha-info-soft: #2A4A6E;
-  --medha-shadow: 0 1px 2px rgba(23, 30, 43, 0.3),
-    0 8px 24px rgba(23, 30, 43, 0.4);
+  /* ——— Bright Swiss DevOps Workspace ———
+     Slate/graphite on white with a developer-blue accent, shared by the
+     workspace shell and the project dashboard (and consistent with the
+     landing palette). Variable names are unchanged so every existing
+     `medha-*` utility resolves to the unified palette without layout
+     changes. Text shades all meet WCAG AA on white surfaces. */
+  --medha-bg: #F8FAFC;
+  --medha-bg-warm: #F1F5F9;
+  --medha-sidebar: #FFFFFF;
+  --medha-canvas: #F8FAFC;
+  --medha-surface: #FFFFFF;
+  --medha-surface-muted: #F1F5F9;
+  --medha-surface-soft: #F8FAFC;
+  --medha-surface-raised: #F1F5F9;
+  --medha-border: #E2E8F0;
+  --medha-border-strong: #CBD5E1;
+  --medha-text: #111827;
+  --medha-text-secondary: #64748B;
+  --medha-text-tertiary: #64748B;
+  --medha-accent: #2563EB;
+  --medha-accent-hover: #1D4ED8;
+  --medha-accent-soft: #EFF6FF;
+  --medha-accent-ink: #FFFFFF;
+  --medha-run: #2563EB;
+  --medha-run-soft: #EFF6FF;
+  --medha-run-ink: #1D4ED8;
+  --medha-success: #059669;
+  /* Darker green for small text on tinted backgrounds (AA). */
+  --medha-success-ink: #047857;
+  --medha-success-soft: #ECFDF5;
+  --medha-warning: #92400E;
+  --medha-warning-soft: #FFFBEB;
+  --medha-danger: #B91C1C;
+  --medha-danger-soft: #FEF2F2;
+  --medha-info: #1D4ED8;
+  --medha-info-soft: #EFF6FF;
+  /* Restrained elevation: thin borders do the work, shadows stay subtle. */
+  --medha-shadow: 0 1px 2px rgba(17, 24, 39, 0.06),
+    0 4px 16px rgba(17, 24, 39, 0.06);
+  /* Restrained neumorphism for hero panels only: light source top-left. */
+  --medha-neu: 4px 4px 12px rgba(17, 24, 39, 0.08),
+    -3px -3px 10px rgba(255, 255, 255, 0.9);
   --medha-radius: 8px;
   --medha-radius-sm: 6px;
   --medha-font-display: "Space Grotesk", system-ui, sans-serif;
@@ -51,22 +62,19 @@ html,
 body {
   max-width: 100%;
   min-height: 100%;
-  overflow-x: hidden;
+  /* `clip` (not `hidden`) prevents horizontal overflow without turning the
+     viewport into a scroll container, so sticky header/sidebar keep working
+     and absolutely-positioned popovers are never clipped vertically. */
+  overflow-x: clip;
   font-family: var(--medha-font-sans);
   background-color: var(--medha-canvas);
   color: var(--medha-text);
   -webkit-font-smoothing: antialiased;
 }
 
-/* The product uses a dark workspace theme. Keep legacy white utility classes
-   readable when shared components are rendered on dark surfaces. */
-.bg-white {
-  background-color: var(--medha-surface-raised) !important;
-}
-
 ::selection {
   background: var(--medha-accent);
-  color: var(--medha-accent-ink);
+  color: #FFFFFF;
 }
 
 :focus-visible {
@@ -102,6 +110,11 @@ body {
   @apply bg-medha-surface border border-medha-border rounded-md p-4;
 }
 
+/* Restrained neumorphic hero surface: use sparingly, never for dense data. */
+.medha-neu {
+  box-shadow: var(--medha-neu);
+}
+
 .medha-label {
   @apply text-[11px] font-medium uppercase tracking-[0.08em] text-medha-secondary;
 }
@@ -115,7 +128,7 @@ body {
 }
 
 .field-input {
-  @apply w-full rounded-md border border-medha-border bg-medha-surface-raised px-3 py-2.5 text-sm text-medha-text shadow-sm transition placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent-soft disabled:cursor-not-allowed disabled:text-medha-secondary;
+  @apply w-full rounded-md border border-medha-border bg-medha-surface px-3 py-2.5 text-sm text-medha-text shadow-sm transition placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent disabled:cursor-not-allowed disabled:text-medha-secondary;
 }
 
 @keyframes medha-fade-up {
@@ -123,17 +136,8 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes medha-pulse-soft {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
-}
-
 .animate-medha-in {
   animation: medha-fade-up 0.35s ease-out both;
-}
-
-.animate-medha-pulse {
-  animation: medha-pulse-soft 1.4s ease-in-out infinite;
 }
 
 .medha-button {
@@ -141,11 +145,11 @@ body {
 }
 
 button.medha-primary {
-  @apply bg-medha-accent text-white hover:bg-medha-accent-soft text-medha-accent-ink;
+  @apply bg-medha-accent text-white hover:bg-medha-accent-hover;
 }
 
 button.medha-secondary {
-  @apply border border-medha-border bg-medha-surface-raised text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text;
+  @apply border border-medha-border bg-medha-surface text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text;
 }
 
 button.medha-danger {
@@ -158,11 +162,11 @@ button.medha-ghost {
 
 /* Sidebar nav link */
 .sidebar-nav-link {
-  @apply flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition hover:bg-medha-surface-muted;
+  @apply flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text;
 }
 
 .sidebar-nav-link-active {
-  @apply bg-medha-surface-raised text-medha-accent;
+  @apply bg-medha-accent-soft font-semibold text-medha-accent-hover;
 }
 
 /* Empty states */
@@ -172,7 +176,7 @@ button.medha-ghost {
 
 /* Table row striping */
 .table-zebra tbody tr:nth-child(odd) {
-  background-color: var(--medha-surface);
+  background-color: var(--medha-surface-soft);
 }
 
 /* Alert badge */
@@ -185,10 +189,118 @@ button.medha-ghost {
   @apply focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent;
 }
 
+/* MedhaFace expression transitions: subtle only, never continuous. */
+.medha-face-shape {
+  transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  .animate-medha-pulse,
-  .animate-medha-spin {
+  .animate-medha-in {
     animation: none;
   }
+  .medha-face-shape {
+    transition: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* ——— Landing page scope ———
+   Bright developer-tool palette, isolated from the application theme.
+   All landing styling goes through these tokens; no hardcoded colors
+   in the landing component. */
+.landing {
+  --lp-bg: #F8FAFC;
+  --lp-surface: #FFFFFF;
+  --lp-surface-muted: #F1F5F9;
+  --lp-text: #111827;
+  --lp-secondary: #475569;
+  --lp-tertiary: #64748B;
+  --lp-border: #E2E8F0;
+  --lp-primary: #2563EB;
+  --lp-primary-hover: #1D4ED8;
+  --lp-primary-soft: #EFF6FF;
+  --lp-success: #059669;
+  --lp-connector: #CBD5E1;
+  --lp-shadow: 0 1px 2px rgba(17, 24, 39, 0.06),
+    0 8px 24px rgba(17, 24, 39, 0.08);
+  background-color: var(--lp-bg);
+  color: var(--lp-text);
+}
+
+.lp-bg { background-color: var(--lp-bg); }
+.lp-surface { background-color: var(--lp-surface); }
+.lp-surface-muted { background-color: var(--lp-surface-muted); }
+.lp-text { color: var(--lp-text); }
+.lp-secondary { color: var(--lp-secondary); }
+.lp-tertiary { color: var(--lp-tertiary); }
+.lp-border { border-color: var(--lp-border); }
+.lp-mono { font-family: var(--medha-font-mono); }
+
+.lp-label {
+  @apply text-[11px] font-medium uppercase tracking-[0.08em];
+  color: var(--lp-secondary);
+}
+
+.lp-btn {
+  @apply inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] px-5 py-2.5 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2;
+  min-height: 44px;
+}
+.lp-btn:focus-visible {
+  outline-color: var(--lp-primary);
+}
+.lp-btn-primary {
+  background-color: var(--lp-primary);
+  color: #FFFFFF;
+}
+.lp-btn-primary:hover {
+  background-color: var(--lp-primary-hover);
+}
+.lp-btn-secondary {
+  background-color: var(--lp-surface);
+  color: var(--lp-text);
+  border: 1px solid var(--lp-border);
+}
+.lp-btn-secondary:hover {
+  background-color: var(--lp-surface-muted);
+}
+
+.lp-nav-link {
+  @apply rounded-md px-3 py-1.5 text-[13px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2;
+  color: var(--lp-secondary);
+}
+.lp-nav-link:hover {
+  background-color: var(--lp-surface-muted);
+  color: var(--lp-text);
+}
+.lp-nav-link:focus-visible {
+  outline-color: var(--lp-primary);
+}
+
+.lp-panel {
+  background-color: var(--lp-surface);
+  border: 1px solid var(--lp-border);
+  box-shadow: var(--lp-shadow);
+}
+.lp-stage {
+  background-color: var(--lp-surface-muted);
+  border: 1px solid var(--lp-border);
+}
+.lp-stage-featured {
+  background-color: var(--lp-primary-soft);
+  border: 1px solid var(--lp-primary);
+}
+.lp-eyebrow {
+  color: var(--lp-primary);
+}
+.lp-chip-featured {
+  background-color: var(--lp-primary);
+  color: #FFFFFF;
+}
+.lp-connector {
+  background-color: var(--lp-connector);
 }

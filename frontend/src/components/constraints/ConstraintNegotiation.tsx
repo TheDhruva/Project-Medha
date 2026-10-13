@@ -55,7 +55,7 @@ export function ConstraintNegotiation() {
 
       {!negotiation && snapshot.constraints.length === 0 ? (
         <p className="mt-4 rounded-md border border-medha-border bg-medha-surface text-medha-secondary py-3 text-center">
-          No constraints yet. Start a DEMO deployment to see negotiation.
+          No constraints yet. Run a real repository analysis to see negotiation.
         </p>
       ) : (
         <>

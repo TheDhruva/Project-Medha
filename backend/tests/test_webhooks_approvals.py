@@ -58,8 +58,8 @@ def _signed(body: dict, *, secret: str = SECRET, delivery: str = "del_1", event:
     }
 
 
-def _push(repo: str = "octo/demo", ref: str = "refs/heads/main", sha: str = "abc1234567890") -> dict:
-    return {"repository": {"full_name": repo}, "ref": ref, "after": sha, "before": "0000000"}
+def _push(repo: str = "octo/demo", ref: str = "refs/heads/main", sha: str = "a" * 40) -> dict:
+    return {"repository": {"full_name": repo}, "ref": ref, "after": sha, "before": "b" * 40}
 
 
 def test_missing_secret_fails_closed(tmp_path, monkeypatch):
@@ -125,7 +125,7 @@ def test_duplicate_delivery_no_second_run(webhook_client):
     second = webhook_client.post("/api/webhooks/github", **_signed(_push(), delivery="del-dup"))
     assert second.json()["status"] == "duplicate"
     listed = webhook_client.get("/api/proposals").json()
-    assert len([p for p in listed["proposals"] if p["target_sha"] == "abc1234567890"]) == 1
+    assert len([p for p in listed["proposals"] if p["target_sha"] == "a" * 40]) == 1
 
 
 async def _analyze_ready_proposal() -> tuple[str, str]:

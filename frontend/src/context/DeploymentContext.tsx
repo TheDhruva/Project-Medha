@@ -29,7 +29,6 @@ import {
   reconcileTerminalState,
 } from "@/lib/api/eventMapper";
 import { createIdleSnapshot } from "@/lib/demo/frames";
-import { SCENARIOS } from "@/lib/demo/scenarios";
 import type {
   CriticView,
   DeployFormState,
@@ -47,24 +46,25 @@ interface DeploymentContextValue {
   snapshot: DeploymentSnapshot;
   selectNode: (id: string | null) => void;
   startDeployment: () => void;
-  viewDemo: () => void;
   reset: () => void;
   openDeployment: (deploymentId: string) => Promise<void>;
   isRunning: boolean;
   hydrating: boolean;
-  scenarios: typeof SCENARIOS;
   connectionError: string | null;
 }
 
 const DeploymentContext = createContext<DeploymentContextValue | null>(null);
 
+// Product default: real repository analysis. The demo scenario engine is not
+// part of the product workflow (backend demo runs are disabled by default),
+// so the form never defaults to demo mode.
 const DEFAULT_FORM: DeployFormState = {
-  repositoryUrl: "https://github.com/example/medha-sample-app",
+  repositoryUrl: "",
   targetHost: "localhost",
   targetPort: "8080",
-  intent: "Deploy the application securely",
-  scenario: "PORT_CONFLICT",
-  mode: "demo",
+  intent: "",
+  scenario: null,
+  mode: "real",
   baseRevision: "",
   targetRevision: "",
 };
@@ -148,8 +148,8 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
       const mode = form.mode;
       setSnapshot({
         ...createIdleSnapshot(),
-        scenario: mode === "demo" ? scenario : null,
-        isDemo: mode === "demo",
+        scenario: null,
+        isDemo: false,
         runStatus: "running",
         explain: {
           currentStage: null,
@@ -170,8 +170,8 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
       try {
         const response = await createDeployment({
           repository_url: form.repositoryUrl,
-          mode,
-          scenario: mode === "demo" ? scenario : null,
+          mode: "real",
+          scenario: null,
           target: { host: form.targetHost, port },
           intent: form.intent,
           // Revisions scope change-impact analysis for local git repos.
@@ -187,8 +187,8 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
         setSnapshot(
           createRunningSnapshot(
             response.deployment_id,
-            mode === "demo" ? (scenario as ScenarioId) : null,
-            mode === "demo",
+            null,
+            false,
           ),
         );
         subscribe(response.deployment_id);
@@ -200,8 +200,8 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
         setConnectionError(message);
         setSnapshot({
           ...createIdleSnapshot(),
-          scenario: mode === "demo" ? scenario : null,
-          isDemo: mode === "demo",
+          scenario: null,
+          isDemo: false,
           runStatus: "failed",
           explain: {
             currentStage: null,
@@ -227,16 +227,8 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
   );
 
   const startDeployment = useCallback(() => {
-    if (form.mode === "real") {
-      void startWithScenario(null);
-      return;
-    }
-    void startWithScenario(form.scenario);
-  }, [form.mode, form.scenario, startWithScenario]);
-
-  const viewDemo = useCallback(() => {
-    setFormState((prev) => ({ ...prev, mode: "demo", scenario: "PARTIAL_FAILURE" }));
-    void startWithScenario("PARTIAL_FAILURE");
+    // Product workflow is real-only; demo creation is not offered.
+    void startWithScenario(null);
   }, [startWithScenario]);
 
   const openDeployment = useCallback(
@@ -361,12 +353,10 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
       snapshot,
       selectNode,
       startDeployment,
-      viewDemo,
       reset,
       openDeployment,
       isRunning: snapshot.runStatus === "running",
       hydrating,
-      scenarios: SCENARIOS,
       connectionError,
     }),
     [
@@ -376,7 +366,6 @@ export function DeploymentProvider({ children }: { children: ReactNode }) {
       snapshot,
       selectNode,
       startDeployment,
-      viewDemo,
       reset,
       openDeployment,
       hydrating,

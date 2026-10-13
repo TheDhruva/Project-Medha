@@ -63,6 +63,22 @@ class InferredStack(BaseModel):
     confidence: float = 0.5
     manifests_examined: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # Evidence-backed inference details (all optional; names only, never secret values).
+    framework: str | None = None
+    framework_version: str | None = None
+    lockfiles: list[str] = Field(default_factory=list)
+    entry_points: list[str] = Field(default_factory=list)
+    env_names: list[str] = Field(default_factory=list)
+    health_hints: list[str] = Field(default_factory=list)
+    app_candidates: list[str] = Field(default_factory=list)
+    ci_configs: list[str] = Field(default_factory=list)
+    test_suites: list[str] = Field(default_factory=list)
+    auth_hints: list[str] = Field(default_factory=list)
+    openapi_hints: list[str] = Field(default_factory=list)
+    db_hints: list[str] = Field(default_factory=list)
+    perf_notes: list[str] = Field(default_factory=list)
+    source_file_count: int | None = None
+    source_bytes_approx: int | None = None
 
 
 class ApplicationProfile(BaseModel):
