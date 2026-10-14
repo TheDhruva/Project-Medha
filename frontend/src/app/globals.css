@@ -196,6 +196,20 @@ button.medha-ghost {
   transform-origin: center;
 }
 
+/* Active pipeline stage indicator: only rendered while a run is running. */
+@keyframes medha-stage-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.medha-stage-pulse {
+  animation: medha-stage-pulse 1.4s ease-in-out infinite;
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   .animate-medha-in {
@@ -203,6 +217,9 @@ button.medha-ghost {
   }
   .medha-face-shape {
     transition: none;
+  }
+  .medha-stage-pulse {
+    animation: none;
   }
   html {
     scroll-behavior: auto;

@@ -234,6 +234,28 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("executor_mode", mode="before")
+    @classmethod
+    def _check_executor_mode(cls, value: object) -> str:
+        """Parse the executor mode explicitly; reject unknown values fast.
+
+        Deterministic across local dev, tests, and deployment: an invalid
+        value fails at Settings construction instead of silently behaving
+        like 'auto' (fail-closed) and surfacing later as a run failure.
+        Empty/unset means 'auto'. Values are normalized to lowercase.
+        """
+        raw = "" if value is None else str(value)
+        mode = raw.strip().lower()
+        if not mode:
+            return "auto"
+        allowed = {"auto", "simulator", "real", "docker", "disabled"}
+        if mode not in allowed:
+            raise ValueError(
+                "MEDHA_EXECUTOR_MODE must be one of 'auto', 'simulator', "
+                f"'real', 'docker', or 'disabled' (got '{raw.strip()}')."
+            )
+        return mode
+
 
 def is_postgres_dsn(value: str | None) -> bool:
     """Scheme check only — never touches credentials."""

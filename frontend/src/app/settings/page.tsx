@@ -6,8 +6,10 @@ import { AppShell } from "@/components/layout/AppShell";
 import {
   checkBackendHealth,
   fetchAiStatus,
+  fetchConfigStatus,
   getApiBaseUrl,
   type AiStatus,
+  type ConfigStatus,
 } from "@/lib/api/client";
 
 const MOTION_KEY = "medha.prefs.reduceMotion.v1";
@@ -17,6 +19,7 @@ export default function SettingsPage() {
   const [detail, setDetail] = useState<string>("");
   const [ai, setAi] = useState<AiStatus | null>(null);
   const [aiError, setAiError] = useState<string>("");
+  const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [reduceMotion, setReduceMotion] = useState(false);
 
   const refresh = useCallback(() => {
@@ -34,6 +37,7 @@ export default function SettingsPage() {
         setAiError("AI status unavailable (backend unreachable?).");
       },
     );
+    void fetchConfigStatus().then(setConfig).catch(() => setConfig(null));
   }, []);
 
   useEffect(() => {
@@ -168,6 +172,85 @@ export default function SettingsPage() {
               </p>
             </div>
           </div>
+        </section>
+
+        <section className="medha-panel animate-medha-in p-4 sm:p-5">
+          <h2 className="font-display text-sm font-semibold tracking-wide text-medha-text">
+            Execution configuration
+          </h2>
+          {config == null ? (
+            <p className="mt-2 text-sm text-medha-secondary">
+              Unavailable — the backend did not report configuration status.
+            </p>
+          ) : (
+            <>
+              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-medha-sm border border-medha-border bg-medha-muted px-3 py-2">
+                  <dt className="medha-label">Executor mode</dt>
+                  <dd className="medha-mono mt-1 text-xs text-medha-text">{config.executor_mode}</dd>
+                  <p className="mt-0.5 text-[11px] text-medha-tertiary">
+                    Docker execution {config.docker_execute ? "enabled" : "disabled"} · environment {config.env}
+                  </p>
+                </div>
+                <div className="rounded-medha-sm border border-medha-border bg-medha-muted px-3 py-2">
+                  <dt className="medha-label">Readiness</dt>
+                  <dd className="mt-1 flex items-center gap-2 text-sm font-semibold text-medha-text">
+                    <span
+                      className={`status-dot ${
+                        config.execution_readiness == null
+                          ? "bg-medha-tertiary"
+                          : config.execution_readiness.status === "ready"
+                            ? "bg-medha-success"
+                            : config.execution_readiness.status === "blocked"
+                              ? "bg-medha-danger"
+                              : "bg-medha-warning"
+                      }`}
+                      aria-hidden
+                    />
+                    {config.execution_readiness == null
+                      ? "not reported"
+                      : config.execution_readiness.status}
+                  </dd>
+                  {config.execution_readiness ? (
+                    <p className="medha-mono mt-0.5 text-[11px] text-medha-tertiary">
+                      {config.execution_readiness.reason_code}
+                    </p>
+                  ) : null}
+                </div>
+              </dl>
+              {config.execution_readiness ? (
+                <div className="mt-3 space-y-2">
+                  <p className="text-sm leading-relaxed text-medha-secondary">
+                    {config.execution_readiness.message}
+                  </p>
+                  {config.execution_readiness.next_actions.length > 0 ? (
+                    <ul className="list-inside list-disc space-y-0.5 text-sm text-medha-secondary">
+                      {config.execution_readiness.next_actions.map((action) => (
+                        <li key={action}>{action}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {config.execution_readiness.requires_operator ||
+                  config.execution_readiness.restart_required ? (
+                    <p className="medha-label">
+                      {[
+                        config.execution_readiness.requires_operator
+                          ? "backend/operator change required"
+                          : null,
+                        config.execution_readiness.restart_required ? "backend restart required" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              <p className="mt-3 text-xs text-medha-tertiary">
+                Server-side environment only (MEDHA_EXECUTOR_MODE, MEDHA_DOCKER_EXECUTE).
+                Presence and readiness only — no environment values or secrets are shown here.
+              </p>
+            </>
+          )}
         </section>
 
         <section className="medha-panel animate-medha-in p-4 sm:p-5">

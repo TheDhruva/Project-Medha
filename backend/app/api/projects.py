@@ -134,6 +134,7 @@ class ProjectPatchBody(BaseModel):
 
 class ProjectRunBody(BaseModel):
     intent: str | None = Field(default=None, max_length=2000)
+    base_revision: str | None = Field(default=None, max_length=100)
     target_revision: str | None = Field(default=None, max_length=100)
     target_host: str = Field(default="localhost", max_length=64)
     target_port: int = Field(default=8080, ge=1, le=65535)
@@ -363,7 +364,11 @@ async def delete_project(project_id: str, subject: str = RequireSubject):
     dependencies=[Depends(require_mutation_token)],
 )
 async def create_project_run(project_id: str, body: ProjectRunBody, subject: str = RequireSubject):
-    """Start a real-mode analysis bound to this project (manual path)."""
+    """Start a project-bound run using the stored repository configuration.
+
+    Omitting both revisions runs a full analysis (backend resolves HEAD);
+    providing base/target revisions (40-hex SHAs) runs a change analysis.
+    """
     project = _owned_project(project_id, subject)
     if project is None:
         return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
@@ -396,6 +401,14 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
             target_revision = git_service.normalize_commit_sha(body.target_revision)
         except Exception:
             return _error(400, "INVALID_SHA", "target_revision must be a 40-hex commit SHA.")
+    base_revision: str | None = None
+    if body.base_revision:
+        from app.services import git_service
+
+        try:
+            base_revision = git_service.normalize_commit_sha(body.base_revision)
+        except Exception:
+            return _error(400, "INVALID_SHA", "base_revision must be a 40-hex commit SHA.")
 
     from app.core.deploy_lock import DeployBusyError, try_acquire_real_deploy
     from app.workflow.planning import schedule_planning_pipeline
@@ -418,7 +431,7 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
         target_host=body.target_host.strip(),
         target_port=body.target_port,
         intent=body.intent or f"Project analysis ({project.repository}@{target_revision[:8] if target_revision else project.branch})",
-        base_revision=None,
+        base_revision=base_revision,
         target_revision=target_revision,
         status=DeploymentStatus.STARTED,
         current_stage=None,

@@ -109,6 +109,11 @@ def _run_summary(record: DeploymentRecord) -> dict:
         "duration_seconds": _compute_duration_seconds(record.created_at, record.updated_at),
         "risk": risk,
         "result_kind": result.get("kind") if isinstance(result, dict) else None,
+        # Structured failure/blocked code from the persisted result payload
+        # (e.g. EXECUTION_NOT_CONFIGURED, MULTIPLE_APPS_REQUIRE_TARGET) so
+        # clients can distinguish configuration blocks from runtime failures
+        # without parsing free-text error summaries.
+        "error_code": result.get("code") if isinstance(result, dict) else None,
         "error_summary": record.error_summary,
         "ai_outcome": ai.get("outcome") if ai else None,
         "ai_provider": ai.get("provider") if ai else None,

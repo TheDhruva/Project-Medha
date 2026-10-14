@@ -581,6 +581,9 @@ export interface RunSummary {
   duration_seconds: number | null;
   risk: string | null;
   result_kind: string | null;
+  /** Structured failure/block code from the persisted result (e.g.
+   * EXECUTION_NOT_CONFIGURED, MULTIPLE_APPS_REQUIRE_TARGET); null otherwise. */
+  error_code?: string | null;
   error_summary: string | null;
   ai_outcome?: string | null;
   ai_provider?: string | null;
@@ -635,6 +638,19 @@ export async function fetchRunHealth(deploymentId: string): Promise<RunHealth | 
   );
 }
 
+/** Structured execution-readiness result (backend/app/execution/readiness.py).
+ * reason_code is stable; message/next_actions are safe operator guidance. */
+export interface ExecutionReadiness {
+  status: "ready" | "blocked" | "disabled";
+  mode: string;
+  reason_code: string;
+  message: string;
+  simulated: boolean;
+  requires_operator: boolean;
+  restart_required: boolean;
+  next_actions: string[];
+}
+
 export interface ConfigStatus {
   env: string;
   auth_mode: string;
@@ -648,6 +664,7 @@ export interface ConfigStatus {
   database_mode: string;
   execution: string;
   execution_reason: string;
+  execution_readiness?: ExecutionReadiness;
   production_ready: boolean | null;
 }
 
@@ -1134,7 +1151,14 @@ export async function fetchProjectTargets(projectId: string): Promise<ProjectTar
 
 export async function createProjectRun(
   projectId: string,
-  input?: { intent?: string; target_revision?: string; target_host?: string; target_port?: number; deployment_target?: string },
+  input?: {
+    intent?: string;
+    base_revision?: string;
+    target_revision?: string;
+    target_host?: string;
+    target_port?: number;
+    deployment_target?: string;
+  },
 ): Promise<DeployApiResponse & { project_id: string }> {
   const response = await apiFetch(
     `/api/projects/${encodeURIComponent(projectId)}/runs`,

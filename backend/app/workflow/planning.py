@@ -28,6 +28,11 @@ from app.workflow.stages import StageTracker
 from app.execution import docker_ops
 from app.execution.executor import choose_executor
 from app.execution.plan_builder import build_ceg_from_plan, build_execution_plan
+from app.execution.readiness import (
+    EXECUTION_DISABLED_HOSTED,
+    EXECUTION_NOT_CONFIGURED,
+    assess_execution_readiness,
+)
 from app.execution.support import assess_plan_support
 from app.models.domain import NegotiatedPlan
 from app.models.execution import CriticRecommendation
@@ -2060,6 +2065,52 @@ class PlanningPipeline:
             )
             return
 
+        # Execution readiness is evaluated at the stage boundary — before the
+        # run claims execution has started — so an unsupported attempt is
+        # reported as a configuration block with a stable reason code, never
+        # as an ordinary runtime failure. Analysis, CNP, and verification
+        # have already completed and their artifacts stay recorded either way.
+        readiness = assess_execution_readiness(_settings)
+        if readiness["status"] != "ready" or readiness["mode"] != "simulator":
+            _code = readiness["reason_code"]
+            _short_message = {
+                EXECUTION_DISABLED_HOSTED: "Execution is disabled on the hosted control plane.",
+                EXECUTION_NOT_CONFIGURED: "Execution is not configured for genuine deployment.",
+            }.get(_code, readiness["message"])
+            await self._fail(
+                deployment_id,
+                readiness["message"],
+                technical=_code,
+                result={
+                    "kind": "failed",
+                    "title": _code,
+                    "final_status": "failed",
+                    "message": _short_message,
+                    "durationLabel": "verify",
+                    "servicesLabel": "0 / 0 started",
+                    "verificationScore": critic.score if critic else None,
+                    "constraintsResolved": constraints_resolved,
+                    "rollbackScope": None,
+                    "phase": PHASE_LABEL,
+                    "is_demo": False,
+                    "code": _code,
+                    "execution_mode": "unconfigured",
+                    # Structured block markers: the execution stage never ran,
+                    # upstream analysis/verification results remain valid.
+                    "blocked": True,
+                    "blocked_stage": "execute",
+                    "readiness": readiness,
+                    "analysis_preserved": True,
+                    "verification_preserved": verification is not None,
+                    "repository_url": _sha_record.repository_url if _sha_record else None,
+                    "target_sha": resolved_sha,
+                    "requested_ref": requested_ref,
+                    "plan": canonical_plan,
+                    "plan_hash": plan_digest,
+                },
+            )
+            return
+
         self._status(
             deployment_id,
             DeploymentStatus.RUNNING,
@@ -2082,72 +2133,6 @@ class PlanningPipeline:
             },
         )
 
-        # Execution routing: never silently simulate. The simulator runs only
-        # when MEDHA_EXECUTOR_MODE=simulator is set explicitly (isolated
-        # development/tests); its results are labelled test-only and can never
-        # be reported as healthy. Anything else without the isolated real
-        # runtime fails closed with actionable guidance.
-        _env = (get_settings().medha_env or "").strip().lower()
-        _mode = (get_settings().executor_mode or "auto").strip().lower()
-        if _env == "production":
-            await self._fail(
-                deployment_id,
-                "Execution is disabled on the hosted control plane. "
-                "Run analysis locally with an isolated builder.",
-                technical="EXECUTION_DISABLED_HOSTED",
-                result={
-                    "kind": "failed",
-                    "title": "EXECUTION_DISABLED_HOSTED",
-                    "final_status": "failed",
-                    "message": "Execution is disabled on the hosted control plane.",
-                    "durationLabel": "verify",
-                    "servicesLabel": "0 / 0 started",
-                    "verificationScore": critic.score if critic else None,
-                    "constraintsResolved": constraints_resolved,
-                    "rollbackScope": None,
-                    "phase": PHASE_LABEL,
-                    "is_demo": False,
-                    "code": "EXECUTION_DISABLED_HOSTED",
-                    "execution_mode": "unconfigured",
-                    "repository_url": _sha_record.repository_url if _sha_record else None,
-                    "target_sha": resolved_sha,
-                    "requested_ref": requested_ref,
-                    "plan": canonical_plan,
-                    "plan_hash": plan_digest,
-                },
-            )
-            return
-        if _mode != "simulator":
-            await self._fail(
-                deployment_id,
-                "Execution is not configured: set MEDHA_EXECUTOR_MODE=simulator "
-                "for explicit test-only runs, or MEDHA_EXECUTOR_MODE=real with "
-                "MEDHA_DOCKER_EXECUTE=true and an isolated Docker builder for "
-                "genuine deployment. MEDHA does not substitute simulation for "
-                "real execution.",
-                technical="EXECUTION_NOT_CONFIGURED",
-                result={
-                    "kind": "failed",
-                    "title": "EXECUTION_NOT_CONFIGURED",
-                    "final_status": "failed",
-                    "message": "Execution is not configured for genuine deployment.",
-                    "durationLabel": "verify",
-                    "servicesLabel": "0 / 0 started",
-                    "verificationScore": critic.score if critic else None,
-                    "constraintsResolved": constraints_resolved,
-                    "rollbackScope": None,
-                    "phase": PHASE_LABEL,
-                    "is_demo": False,
-                    "code": "EXECUTION_NOT_CONFIGURED",
-                    "execution_mode": "unconfigured",
-                    "repository_url": _sha_record.repository_url if _sha_record else None,
-                    "target_sha": resolved_sha,
-                    "requested_ref": requested_ref,
-                    "plan": canonical_plan,
-                    "plan_hash": plan_digest,
-                },
-            )
-            return
         # Executor race guard: cancellation observed here wins — the
         # executor is never invoked after a cancel, and completion paths
         # below re-check terminal state before persisting success.

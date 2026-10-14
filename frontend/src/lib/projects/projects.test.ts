@@ -367,4 +367,67 @@ describe("derivePipeline", () => {
     expect(byId.verify).toBe("blocked");
     expect(byId.execute).toBe("idle");
   });
+
+  it("blocks the execute gate (not upstream) when execution was never configured", () => {
+    const stages = derivePipeline(
+      ["PREFLIGHT", "ANALYZE", "PLAN", "AGENTS", "NEGOTIATE", "VERIFY"].map((stage) => ({
+        ts: "2026-01-01T00:00:00Z",
+        level: "info",
+        source: "system",
+        message: `${stage} completed`,
+        type: "stage.completed",
+        stage,
+        status: "success",
+        is_demo: false,
+      })),
+      "COMPLETE",
+      "failed",
+      "EXECUTION_NOT_CONFIGURED",
+    );
+    const byId = Object.fromEntries(stages.map((s) => [s.id, s.state]));
+    // Upstream stages stay done — only the unconfigured execute gate blocks.
+    expect(byId.preflight).toBe("done");
+    expect(byId.analyze).toBe("done");
+    expect(byId.plan).toBe("done");
+    expect(byId.cnp).toBe("done");
+    expect(byId.verify).toBe("done");
+    expect(byId.execute).toBe("blocked");
+    expect(byId.recover).toBe("idle");
+    const execute = stages.find((s) => s.id === "execute");
+    expect(execute?.reason).toBe("config");
+  });
+
+  it("reports observed stage durations from started/completed pairs", () => {
+    const stages = derivePipeline(
+      [
+        {
+          ts: "2026-01-01T00:00:00.000Z",
+          level: "info",
+          source: "system",
+          message: "PREFLIGHT started",
+          type: "stage.started",
+          stage: "PREFLIGHT",
+          status: "running",
+          is_demo: false,
+        },
+        {
+          ts: "2026-01-01T00:00:05.000Z",
+          level: "info",
+          source: "system",
+          message: "PREFLIGHT completed",
+          type: "stage.completed",
+          stage: "PREFLIGHT",
+          status: "success",
+          is_demo: false,
+        },
+      ],
+      "ANALYZE",
+      "running",
+    );
+    const byId = Object.fromEntries(stages.map((s) => [s.id, s]));
+    expect(byId.preflight.durationMs).toBe(5000);
+    expect(byId.preflight.state).toBe("done");
+    expect(byId.analyze.state).toBe("active");
+    expect(byId.execute.durationMs == null).toBe(true);
+  });
 });

@@ -1,23 +1,22 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const push = vi.fn();
+let search = "";
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push }),
   usePathname: () => "/verify",
   useParams: () => ({}),
+  useSearchParams: () => new URLSearchParams(search),
 }));
 
-const { setFormMock, startDeploymentMock } = vi.hoisted(() => ({
-  setFormMock: vi.fn(),
-  startDeploymentMock: vi.fn(),
-}));
-
-vi.mock("@/context/DeploymentContext", () => ({
-  DeploymentProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  useOptionalDeployment: () => null,
-  useDeployment: () => ({
-    form: {
+const { setFormMock, startDeploymentMock, createProjectRunMock, fetchProjectMock, sharedForm } =
+  vi.hoisted(() => ({
+    setFormMock: vi.fn(),
+    startDeploymentMock: vi.fn(),
+    createProjectRunMock: vi.fn(),
+    fetchProjectMock: vi.fn(),
+    sharedForm: {
       repositoryUrl: "https://github.com/example/app",
       targetHost: "localhost",
       targetPort: "8080",
@@ -27,13 +26,35 @@ vi.mock("@/context/DeploymentContext", () => ({
       baseRevision: "",
       targetRevision: "",
     },
-    setForm: setFormMock,
+  }));
+
+vi.mock("@/context/DeploymentContext", () => ({
+  DeploymentProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  useOptionalDeployment: () => null,
+  useDeployment: () => ({
+    // Mutable shared state: setForm updates it so submit-time reads see the
+    // values fireEvent.change wrote (the component itself does not re-render).
+    form: sharedForm,
+    setForm: (patch: Record<string, unknown>) => {
+      setFormMock(patch);
+      Object.assign(sharedForm, patch);
+    },
     startDeployment: startDeploymentMock,
     isRunning: false,
     snapshot: { deploymentId: null, runStatus: "idle" },
     connectionError: null,
   }),
 }));
+
+vi.mock("@/lib/api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api/client")>();
+  return {
+    ...actual,
+    fetchProject: (...args: unknown[]) => fetchProjectMock(...args),
+    fetchConfigStatus: vi.fn().mockResolvedValue(null),
+    createProjectRun: (...args: unknown[]) => createProjectRunMock(...args),
+  };
+});
 
 import { StartVerificationFlow } from "@/components/verify/StartVerificationFlow";
 
@@ -42,6 +63,15 @@ describe("StartVerificationFlow", () => {
     push.mockClear();
     setFormMock.mockClear();
     startDeploymentMock.mockClear();
+    createProjectRunMock.mockClear();
+    fetchProjectMock.mockClear();
+    Object.assign(sharedForm, { baseRevision: "", targetRevision: "" });
+    fetchProjectMock.mockResolvedValue({
+      project_id: "prj_test",
+      repository: "https://github.com/example/locked",
+    });
+    createProjectRunMock.mockResolvedValue({ deployment_id: "dep_123", project_id: "prj_test" });
+    search = "";
   });
 
   it("renders the real-repository analysis form with no demo choice", () => {
@@ -79,5 +109,48 @@ describe("StartVerificationFlow", () => {
     render(<StartVerificationFlow />);
     fireEvent.click(screen.getByText("Analyze change"));
     expect(startDeploymentMock).toHaveBeenCalled();
+  });
+
+  describe("project-locked mode (?project=)", () => {
+    beforeEach(() => {
+      search = "project=prj_test";
+    });
+
+    it("locks the repository to the project's stored identity", async () => {
+      render(<StartVerificationFlow />);
+      await waitFor(() =>
+        expect(screen.getByLabelText("Repository")).toHaveValue(
+          "https://github.com/example/locked",
+        ),
+      );
+      expect(screen.getByLabelText("Repository")).toHaveAttribute("readonly");
+      expect(screen.getByText(/Locked to this project/)).toBeInTheDocument();
+    });
+
+    it("creates a project-bound run instead of a bare deployment", async () => {
+      render(<StartVerificationFlow />);
+      await waitFor(() => expect(fetchProjectMock).toHaveBeenCalledWith("prj_test"));
+      fireEvent.click(screen.getByText("Analyze change"));
+      await waitFor(() =>
+        expect(createProjectRunMock).toHaveBeenCalledWith(
+          "prj_test",
+          expect.objectContaining({ intent: "Deploy" }),
+        ),
+      );
+      expect(startDeploymentMock).not.toHaveBeenCalled();
+      await waitFor(() => expect(push).toHaveBeenCalledWith("/projects/prj_test/runs/dep_123"));
+    });
+
+    it("rejects non-40-hex revisions with an actionable message", async () => {
+      render(<StartVerificationFlow />);
+      await waitFor(() => expect(fetchProjectMock).toHaveBeenCalled());
+      fireEvent.change(screen.getByLabelText("Base revision"), {
+        target: { value: "main" },
+      });
+      fireEvent.click(screen.getByText("Analyze change"));
+      expect(await screen.findByText(/full 40-character commit SHA/)).toBeInTheDocument();
+      expect(createProjectRunMock).not.toHaveBeenCalled();
+      expect(startDeploymentMock).not.toHaveBeenCalled();
+    });
   });
 });

@@ -402,28 +402,67 @@ export function deriveAgentsFromLogs(
   });
 }
 
-const STAGE_ORDER = ["preflight", "analyze", "cnp", "verify", "execute"];
+/** Display stages in backend execution order (AGENTS folds into Analyze). */
+const STAGE_ORDER = ["preflight", "analyze", "plan", "cnp", "verify", "execute", "recover"];
 
-/** Backend emits PREFLIGHT / ANALYZE / NEGOTIATE / VERIFY / EXECUTE / COMPLETE. */
+/** Backend emits PREFLIGHT / ANALYZE / PLAN / AGENTS / NEGOTIATE / VERIFY / EXECUTE / RECOVER / COMPLETE. */
 const STAGE_MATCH: Record<string, string[]> = {
   preflight: ["preflight"],
-  analyze: ["analy", "repo"],
+  analyze: ["analy", "repo", "agents"],
+  plan: ["plan"],
   cnp: ["cnp", "negot", "mediat"],
   verify: ["verif"],
   execute: ["execut"],
+  recover: ["recover", "rollback"],
 };
+
+/** Failure codes meaning "execution was never configured/available" — the
+ * blocked stage is the execute gate itself; upstream stages remain done. */
+export const CONFIG_BLOCK_CODES = new Set([
+  "EXECUTION_NOT_CONFIGURED",
+  "EXECUTION_DISABLED",
+  "EXECUTION_DISABLED_HOSTED",
+  "REAL_EXECUTION_NOT_ENABLED",
+  "REAL_BUILDER_UNAVAILABLE",
+]);
 
 export interface PipelineStage {
   id: string;
   label: string;
   state: "done" | "active" | "blocked" | "idle";
+  /** Observed stage.started → stage.completed span; null when unknown/running. */
+  durationMs?: number | null;
+  /** Why the stage is blocked: configuration gate vs observed failure. */
+  reason?: "config" | "failure";
 }
 
-/** Pipeline stepper from observed stages + current stage. Honest about gaps. */
+const STAGE_LABELS: Record<string, string> = {
+  preflight: "Preflight",
+  analyze: "Analyze",
+  plan: "Plan",
+  cnp: "Negotiate (CNP)",
+  verify: "Verify",
+  execute: "Execute",
+  recover: "Rollback",
+};
+
+function parseTs(ts: string): number {
+  const value = Date.parse(ts);
+  return Number.isNaN(value) ? Number.NaN : value;
+}
+
+/**
+ * Pipeline stepper from observed stage events + current stage. Honest about
+ * gaps: a stage never observed stays idle. On failure the blocked stage is
+ * backend evidence — the reported current stage, else the configured-block
+ * target (execute), else the furthest observed stage (remediation/rollback
+ * excluded — it runs after the failure point).
+ */
 export function derivePipeline(
   logs: RunLogLine[],
   currentStage: string | null,
   runStatus: string | null,
+  errorCode?: string | null,
 ): PipelineStage[] {
   const failed = runStatus === "failed";
   const running = runStatus === "running" || runStatus === "started" || runStatus === "queued";
@@ -432,24 +471,49 @@ export function derivePipeline(
   );
   const current = (currentStage ?? "").toLowerCase();
   const seenList = [...seen];
-  let blockedAssigned = false;
+  const matches = (stage: string, value: string) =>
+    (STAGE_MATCH[stage] ?? [stage]).some((m) => value.includes(m));
+  const observedFor = (stage: string) => seenList.some((s) => matches(stage, s));
+
+  // Failure point (first match wins): current stage evidence, then the
+  // configuration gate target, then the furthest observed pre-remediation stage.
+  let blockedId: string | null = null;
+  let blockedReason: "config" | "failure" = "failure";
+  if (failed) {
+    const currentId =
+      current && current !== "complete" ? STAGE_ORDER.find((s) => matches(s, current)) ?? null : null;
+    const configBlocked = errorCode != null && CONFIG_BLOCK_CODES.has(errorCode);
+    const observed = STAGE_ORDER.filter((s) => s !== "recover" && observedFor(s));
+    blockedId = currentId ?? (configBlocked ? "execute" : null) ?? observed[observed.length - 1] ?? null;
+    blockedReason = configBlocked && blockedId === "execute" ? "config" : "failure";
+  }
+
   return STAGE_ORDER.map((stage) => {
-    const observed = (STAGE_MATCH[stage] ?? [stage]).some((m) =>
-      seenList.some((s) => s.includes(m)),
-    );
-    const matchers = STAGE_MATCH[stage] ?? [stage];
-    const isCurrent = matchers.some((m) => current.includes(m));
+    const observed = observedFor(stage);
+    const isCurrent = current ? matches(stage, current) : false;
     let state: PipelineStage["state"] = observed ? "done" : "idle";
     if (running && isCurrent) state = "active";
-    if (failed && !blockedAssigned && (isCurrent || observed)) {
-      // Mark the furthest observed-or-current stage as blocked.
-      state = "blocked";
-      blockedAssigned = true;
+    if (failed && stage === blockedId) state = "blocked";
+
+    // Duration from stage.started → stage.completed pairs for this stage.
+    let durationMs: number | null = null;
+    if (observed) {
+      const stageLogs = logs.filter((l) => matches(stage, (l.stage ?? "").toLowerCase()));
+      const start = stageLogs.find((l) => l.type === "stage.started");
+      const done = stageLogs.find((l) => l.type === "stage.completed");
+      if (start && done) {
+        const t0 = parseTs(start.ts);
+        const t1 = parseTs(done.ts);
+        if (!Number.isNaN(t0) && !Number.isNaN(t1) && t1 >= t0) durationMs = t1 - t0;
+      }
     }
+
     return {
       id: stage,
-      label: stage === "cnp" ? "Negotiate (CNP)" : stage[0].toUpperCase() + stage.slice(1),
+      label: STAGE_LABELS[stage] ?? stage[0].toUpperCase() + stage.slice(1),
       state,
+      durationMs,
+      ...(failed && stage === blockedId ? { reason: blockedReason } : {}),
     };
   });
 }

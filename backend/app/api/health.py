@@ -122,6 +122,14 @@ async def config_status() -> dict:
     ):
         execution = "real-ready"
         execution_reason = "Isolated Docker builder reachable; supported profiles can deploy."
+    # Structured readiness (stable reason codes + supported next actions)
+    # shared with the pipeline execute gate. Probes are passed in so this
+    # endpoint never probes Docker twice.
+    from app.execution.readiness import assess_execution_readiness
+
+    readiness = assess_execution_readiness(
+        settings, docker_cli=docker_cli, docker_daemon=docker_daemon
+    )
     return JSONResponse(
         {
             "env": (settings.medha_env or "development"),
@@ -136,6 +144,7 @@ async def config_status() -> dict:
             "database_mode": "postgres" if settings.use_postgres else "sqlite",
             "execution": execution,
             "execution_reason": execution_reason,
+            "execution_readiness": readiness,
             "production_ready": settings.hosted_security_error() is None
             if (settings.medha_env or "").strip().lower() == "production"
             else None,
