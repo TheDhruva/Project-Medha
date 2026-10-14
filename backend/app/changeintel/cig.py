@@ -15,7 +15,6 @@ from __future__ import annotations
 from app.changeintel.dep_index import (
     DependencyIndex,
     compute_dependency_edges,
-    compute_inheritance_edges,
     is_config_file,
     is_test_file,
 )

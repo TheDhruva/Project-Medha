@@ -83,7 +83,11 @@ def test_determinism_same_repo_twice(client):
 def test_sse_stream_emits_json_events_phase3(client):
     created = client.post("/api/deploy", json=_deploy_payload()).json()
     deployment_id = created["deployment_id"]
+    final = _wait_terminal(client, deployment_id)
+    assert final["status"] in {"completed", "failed"}
 
+    # Replay the persisted stream: the server closes on the terminal event,
+    # so this read is bounded by construction (no live-wait).
     with client.stream("GET", f"/api/deploy/{deployment_id}/events") as response:
         assert response.status_code == 200
         collected: list[dict] = []
@@ -96,6 +100,7 @@ def test_sse_stream_emits_json_events_phase3(client):
                 collected.append(_json.loads(line.removeprefix("data: ")))
                 if collected[-1]["type"] in {"deployment.completed", "deployment.failed"}:
                     break
+        assert collected, "SSE replay delivered no events"
         assert any(item["type"] == "deployment.created" for item in collected)
         assert any(item["type"] == "stage.started" for item in collected)
         assert collected[-1]["type"] in {"deployment.completed", "deployment.failed"}

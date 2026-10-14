@@ -18,7 +18,7 @@ from app.core.enums import (
 )
 from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
-from app.core.redact import redact_mapping, redact_text
+from app.ai.redact import redact_text
 from app.database.repositories import DeploymentRepository, ProjectRepository
 from app.models.deployment import DeploymentRecord, DeploymentRequest, DeploymentResponse
 from app.workflow.planning import schedule_planning_pipeline
@@ -549,6 +549,14 @@ async def get_logs(    deployment_id: str,
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
 
     events = await asyncio.to_thread(repo.list_events, deployment_id, limit)
+    # Latest backend agent snapshot: the last persisted event carrying one.
+    # The dashboard renders this instead of inferring activity from log
+    # keywords; null means "unknown", never a fabricated state.
+    agents: list[dict] | None = None
+    for event in events:
+        data = getattr(event, "data", None)
+        if isinstance(data, dict) and isinstance(data.get("agents"), list):
+            agents = data["agents"]
     lines = [
         {
             "ts": event.ts,
@@ -591,6 +599,7 @@ async def get_logs(    deployment_id: str,
             "label": "DEMO/MOCK" if record.is_demo else None,
             "execution_mode": result.get("execution_mode") if isinstance(result, dict) else None,
             "lines": lines,
+            "agents": agents,
             "runtime_logs": runtime_logs,
             "note": (
                 "Event replay (structured deployment events). "
@@ -611,6 +620,11 @@ async def cancel_deployment(deployment_id: str, subject: str = RequireSubject):
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     if record.status in (DeploymentStatus.COMPLETED, DeploymentStatus.FAILED, DeploymentStatus.CANCELLED):
         return JSONResponse({"deployment_id": deployment_id, "status": record.status.value, "duplicate": True})
+    # Signal the in-process pipeline first: stage boundaries poll this flag
+    # and refuse to start new work (never the executor) once set.
+    from app.core import run_control
+
+    run_control.request_cancel(deployment_id)
     updated = await asyncio.to_thread(
         repo.update_status,
         deployment_id,
@@ -626,6 +640,11 @@ async def cancel_deployment(deployment_id: str, subject: str = RequireSubject):
             DeploymentStatus.PARTIAL_RECOVERY.value,
         },
     )
+    if updated is None or updated.status != DeploymentStatus.CANCELLED:
+        # Lost the terminal race (run failed/completed concurrently):
+        # report current truth without emitting a second terminal event.
+        status = updated.status.value if updated is not None else record.status.value
+        return JSONResponse({"deployment_id": deployment_id, "status": status, "duplicate": True})
     if not record.is_demo:
         try:
             from app.core.deploy_lock import release_real_deploy
@@ -648,16 +667,19 @@ async def cancel_deployment(deployment_id: str, subject: str = RequireSubject):
             await asyncio.to_thread(docker_ops.cleanup_deployment, deployment_id)
         except Exception:
             pass
-    event = make_event(
-        deployment_id=deployment_id,
-        event_type=EventType.DEPLOYMENT_CANCELLED,
-        message="Deployment cancelled by the owner.",
-        status=DeploymentStatus.CANCELLED.value,
-        metadata={"simple": "Deployment cancelled by the owner."},
-        is_demo=record.is_demo,
-    )
-    await asyncio.to_thread(repo.add_event, event)
-    await event_bus.publish(event)
+    # Exactly one terminal event wins between this endpoint and the
+    # pipeline task (whichever observes cancellation first emits it).
+    if run_control.claim_terminal(deployment_id):
+        event = make_event(
+            deployment_id=deployment_id,
+            event_type=EventType.DEPLOYMENT_CANCELLED,
+            message="Deployment cancelled by the owner.",
+            status=DeploymentStatus.CANCELLED.value,
+            metadata={"simple": "Deployment cancelled by the owner."},
+            is_demo=record.is_demo,
+        )
+        await asyncio.to_thread(repo.add_event, event)
+        await event_bus.publish(event)
     return JSONResponse(
         {"deployment_id": deployment_id, "status": (updated.status.value if updated else "cancelled")}
     )

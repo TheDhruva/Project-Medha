@@ -4,10 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { ArrowLeft, CheckCircle2, XCircle, AlertTriangle, Loader2, ChevronDown } from "lucide-react";
-import { ChangeImpactPanel } from "@/components/changeintel/ChangeImpactPanel";
 import { ConstraintNegotiation } from "@/components/constraints/ConstraintNegotiation";
 // Heavy views load on demand: graph lib + trace list are not needed for
 // the initial run header/status paint.
+const ChangeImpactPanel = dynamic(
+  () => import("@/components/changeintel/ChangeImpactPanel").then((m) => m.ChangeImpactPanel),
+  { ssr: false, loading: () => null },
+);
 const CausalExecutionGraph = dynamic(
   () => import("@/components/graph/CausalExecutionGraph").then((m) => m.CausalExecutionGraph),
   { ssr: false, loading: () => null },

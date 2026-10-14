@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from app.models.domain import _utc_now
+from app.core.events import utc_now_iso
 
 
 class ChangeType(str, Enum):
@@ -334,7 +334,7 @@ class ChangeImpactAnalysis(BaseModel):
     unresolved: list[UnresolvedDependency] = Field(default_factory=list)
     risk: ImpactRisk = Field(default_factory=ImpactRisk)
     requirements: list[VerificationRequirement] = Field(default_factory=list)
-    generated_at: str = Field(default_factory=_utc_now)
+    generated_at: str = Field(default_factory=utc_now_iso)
     is_demo: bool = False
 
     def to_ui(self) -> dict[str, Any]:

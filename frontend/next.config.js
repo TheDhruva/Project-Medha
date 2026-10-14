@@ -13,6 +13,11 @@ const BACKEND_URL = "http://127.0.0.1:8000";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   outputFileTracingRoot: path.join(__dirname),
+  // Trim first-load JS: lucide-react + xyflow ship per-module so page
+  // bundles include only imported icons/graph code.
+  experimental: {
+    optimizePackageImports: ["lucide-react", "@xyflow/react"],
+  },
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${BACKEND_URL}/api/:path*` },

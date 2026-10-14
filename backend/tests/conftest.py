@@ -27,6 +27,11 @@ def _explicit_test_execution(monkeypatch):
     """
     monkeypatch.setenv("MEDHA_ENABLE_DEMO", "true")
     monkeypatch.setenv("MEDHA_EXECUTOR_MODE", "simulator")
+    # Isolate from operator .env: local workstations may set Clerk auth and
+    # API tokens (or a Postgres URL); the suite defaults to single-operator
+    # mode unless a test pins otherwise.
+    monkeypatch.setenv("MEDHA_AUTH_MODE", "off")
+    monkeypatch.setenv("MEDHA_API_TOKEN", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -48,6 +53,8 @@ def client(tmp_path, monkeypatch):
     # execution (no silent simulator). See ADR-037.
     monkeypatch.setenv("MEDHA_ENABLE_DEMO", "true")
     monkeypatch.setenv("MEDHA_EXECUTOR_MODE", "simulator")
+    monkeypatch.setenv("MEDHA_AUTH_MODE", "off")
+    monkeypatch.setenv("MEDHA_API_TOKEN", "")
     get_settings.cache_clear()
     init_db(db_path)
     app = create_app()

@@ -158,7 +158,34 @@ describe("run logs and hydration client", () => {
     expect(r.runtime_logs?.stdout).toBe("hi");
   });
 
-  it("fetchRunHydration maps mode/logs and tolerates absent fields", async () => {
+  it("fetchRunHydration passes through the backend agent snapshot", async () => {
+    const snapshot = [
+      { id: "preflight", name: "Preflight", status: "complete", activity: "Done", lastEvent: "Done", durationMs: 12.5, startedAt: "t0", finishedAt: "t1", deps: [] },
+      { id: "analyzer", name: "Code Analyzer", status: "running", activity: "Analyzing", lastEvent: "Analyzing", durationMs: null, startedAt: "t1", finishedAt: null, deps: ["preflight"] },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/logs")) {
+          return jsonResponse({
+            deployment_id: "dep_1",
+            is_demo: false,
+            label: null,
+            execution_mode: "controlled_test",
+            lines: [],
+            agents: snapshot,
+            runtime_logs: null,
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const h = await fetchRunHydration("dep_1");
+    expect(h.agents).toEqual(snapshot);
+  });
+
+  it("fetchRunHydration maps absent agents to null (honest unknown)", async () => {
     const calls: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -185,5 +212,6 @@ describe("run logs and hydration client", () => {
     expect(h.executionMode).toBe("controlled_test");
     expect(h.runtimeLogs?.code).toBe("LOGS_UNAVAILABLE");
     expect(h.logs).toEqual([]);
+    expect(h.agents).toBeNull();
   });
 });

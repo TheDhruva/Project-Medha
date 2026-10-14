@@ -150,6 +150,85 @@ def test_sse_replay_limit_param(client):
     assert terminal.event_id in resumed.text
 
 
+def test_list_preserves_summary_blobs_drops_heavy_artifacts(client):
+    """GET /api/deploys list keeps result/ai/risk but skips graph blobs."""
+    from app.core.enums import DeployMode
+
+    repo = DeploymentRepository()
+    repo.create(_record("dep_heavy"))
+    repo.save_artifacts(
+        "dep_heavy",
+        result={"kind": "success", "execution_mode": "controlled_test"},
+        ai={"outcome": "assisted", "provider": "groq"},
+        change_intel={"risk": {"level": "high"}},
+        graph={"nodes": [{"id": "n1"}], "edges": []},
+        verification={"passed": True, "checks": []},
+        updated_at="2026-01-01T00:00:01Z",
+    )
+    records, total = repo.list(limit=10)
+    assert total == 1
+    row = records[0]
+    # Summary consumers: execution_mode/health/risk must survive.
+    assert row.result is not None
+    assert row.ai is not None
+    assert (row.change_intel or {}).get("risk", {}).get("level") == "high"
+    # Heavy per-run artifacts stay on dedicated endpoints, not the list.
+    assert row.graph is None
+    assert row.verification is None
+    assert row.constraints is None
+    assert row.negotiation is None
+    assert row.rollback is None
+    # API summary still reports execution fields + risk.
+    res = client.get("/api/deploys?limit=10")
+    assert res.status_code == 200
+    run = res.json()["runs"][0]
+    assert run["execution_mode"] == "controlled_test"
+    assert run["risk"] == "high"
+
+
+def test_perf_indexes_exist(client):
+    from app.database.connection import get_connection
+
+    with get_connection() as conn:
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+    for expected in (
+        "idx_deployments_project",
+        "idx_deployments_project_status",
+        "idx_events_deployment",
+        "idx_jobs_status_created",
+    ):
+        assert expected in names
+
+
+def test_config_status_caches_docker_probes(client, monkeypatch):
+    from app.api import health as health_api
+    from app.execution import docker_ops
+
+    calls = {"n": 0}
+
+    def _cli():
+        calls["n"] += 1
+        return True
+
+    def _daemon():
+        calls["n"] += 1
+        return False
+
+    monkeypatch.setattr(health_api, "_config_cache", {"at": 0.0})
+    monkeypatch.setattr(docker_ops, "docker_cli_available", _cli)
+    monkeypatch.setattr(docker_ops, "docker_daemon_running", _daemon)
+    first = client.get("/api/config/status")
+    assert first.status_code == 200
+    second = client.get("/api/config/status")
+    assert second.status_code == 200
+    # Two probes on first call, zero on the cached second call.
+    assert calls["n"] == 2
+
+
 def test_ai_cache_hit_does_not_consume_budget():
     settings = get_settings()
     settings.ai_enabled = True

@@ -176,6 +176,8 @@ export function getSseDiagnostics() {
  * ------------------------------------------------------------------------ */
 const apiCache = new Map<string, { expiry: number; data: unknown }>();
 const API_CACHE_TTL_MS = 8000;
+// Identical concurrent GETs share one network request (see cachedGet).
+const inflightGets = new Map<string, Promise<unknown>>();
 
 export function clearApiCache(prefix?: string): void {
   if (!prefix) {
@@ -191,14 +193,26 @@ async function cachedGet<T>(path: string, ttlMs = API_CACHE_TTL_MS): Promise<T> 
   const now = Date.now();
   const hit = apiCache.get(path);
   if (hit && hit.expiry > now) return hit.data as T;
-  const response = await apiFetch(path, { cache: "no-store" });
-  if (!response.ok) {
-    throw await parseError(response);
+  // Deduplicate identical concurrent requests (StrictMode double-effects,
+  // overlapping polls, multi-component mounts): one fetch per URL at a time.
+  const inflight = inflightGets.get(path);
+  if (inflight) return inflight as Promise<T>;
+  const pending = (async () => {
+    const response = await apiFetch(path, { cache: "no-store" });
+    if (!response.ok) {
+      throw await parseError(response);
+    }
+    const data = (await response.json()) as T;
+    if (apiCache.size > 200) apiCache.clear();
+    apiCache.set(path, { expiry: Date.now() + ttlMs, data });
+    return data;
+  })();
+  inflightGets.set(path, pending);
+  try {
+    return await pending;
+  } finally {
+    if (inflightGets.get(path) === pending) inflightGets.delete(path);
   }
-  const data = (await response.json()) as T;
-  if (apiCache.size > 200) apiCache.clear();
-  apiCache.set(path, { expiry: now + ttlMs, data });
-  return data;
 }
 
 async function cachedGetOrNull<T>(path: string, ttlMs = API_CACHE_TTL_MS): Promise<T | null> {
@@ -661,26 +675,56 @@ export interface RuntimeLogsResponse {
   stderr?: string;
 }
 
+/** One backend agent lifecycle row (see backend/app/workflow/stages.py). */
+export interface AgentSnapshotRow {
+  id: string;
+  name: string;
+  status: string;
+  activity: string;
+  lastEvent: string;
+  durationMs: number | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  deps: string[];
+  error?: string;
+}
+
 export interface RunLogsResponse {
   deployment_id: string;
   is_demo: boolean;
   label: string | null;
   execution_mode: string | null;
   lines: RunLogLine[];
+  /** Latest backend agent snapshot (null = unknown, never fabricated). */
+  agents: AgentSnapshotRow[] | null;
   runtime_logs: RuntimeLogsResponse | null;
 }
 
 export async function fetchRunLogs(deploymentId: string): Promise<RunLogsResponse> {
-  const response = await apiFetch(
-    `/api/deploy/${encodeURIComponent(deploymentId)}/logs`,
-    {
-      cache: "no-store",
-    },
-  );
-  if (!response.ok) {
-    throw await parseError(response);
+  // Logs are never cache-read (they grow during runs), but identical
+  // concurrent callers (multi-panel hydration + rapid reselect) still share
+  // one network request instead of stacking duplicate log fetches.
+  const key = `logs:${deploymentId}`;
+  const inflight = inflightGets.get(key);
+  if (inflight) return inflight as Promise<RunLogsResponse>;
+  const pending = (async () => {
+    const response = await apiFetch(
+      `/api/deploy/${encodeURIComponent(deploymentId)}/logs`,
+      {
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) {
+      throw await parseError(response);
+    }
+    return response.json();
+  })();
+  inflightGets.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (inflightGets.get(key) === pending) inflightGets.delete(key);
   }
-  return response.json();
 }
 
 export interface ConstraintsArtifact {
@@ -741,6 +785,7 @@ export async function fetchGraphArtifact(deploymentId: string): Promise<GraphArt
 export async function fetchRunHydration(deploymentId: string): Promise<{
   logs: RunLogLine[];
   executionMode: string | null;
+  agents: AgentSnapshotRow[] | null;
   runtimeLogs: RuntimeLogsResponse | null;
   constraints: ConstraintsArtifact | null;
   verification: VerificationArtifact | null;
@@ -758,6 +803,7 @@ export async function fetchRunHydration(deploymentId: string): Promise<{
   return {
     logs: logsValue?.lines ?? [],
     executionMode: logsValue?.execution_mode ?? null,
+    agents: logsValue?.agents ?? null,
     runtimeLogs: logsValue?.runtime_logs ?? null,
     constraints: constraints.status === "fulfilled" ? constraints.value : null,
     verification: verification.status === "fulfilled" ? verification.value : null,
@@ -966,6 +1012,7 @@ export interface Project {
   branch: string;
   visibility: "unverified" | "public" | "private_unsupported" | string;
   connection_status: "pending" | "connected" | "failed" | "disconnected" | string;
+  deploy_target?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -980,7 +1027,7 @@ export async function fetchProjects(): Promise<ProjectsListResponse> {
 }
 
 export async function createProject(input: {
-  name: string;
+  name?: string;
   repository: string;
   branch?: string;
 }): Promise<Project> {
@@ -992,6 +1039,7 @@ export async function createProject(input: {
   if (!response.ok) {
     throw await parseError(response);
   }
+  clearApiCache("/api/projects");
   return response.json();
 }
 
@@ -1007,7 +1055,7 @@ export async function fetchProject(projectId: string): Promise<Project> {
 
 export async function updateProject(
   projectId: string,
-  patch: { name?: string; branch?: string },
+  patch: { name?: string; branch?: string; deploy_target?: string | null },
 ): Promise<Project> {
   const response = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "PATCH",
@@ -1017,6 +1065,7 @@ export async function updateProject(
   if (!response.ok) {
     throw await parseError(response);
   }
+  clearApiCache("/api/projects");
   return response.json();
 }
 
@@ -1035,6 +1084,7 @@ export async function verifyProject(projectId: string): Promise<ProjectVerifyRes
   if (!response.ok) {
     throw await parseError(response);
   }
+  clearApiCache("/api/projects");
   return response.json();
 }
 
@@ -1046,6 +1096,7 @@ export async function disconnectProject(projectId: string): Promise<Project> {
   if (!response.ok) {
     throw await parseError(response);
   }
+  clearApiCache("/api/projects");
   return response.json();
 }
 
@@ -1056,12 +1107,34 @@ export async function deleteProject(projectId: string): Promise<{ deleted: strin
   if (!response.ok) {
     throw await parseError(response);
   }
+  clearApiCache("/api/projects");
+  clearApiCache("/api/deploys");
+  clearApiCache("/api/proposals");
+  return response.json();
+}
+
+export interface ProjectTargets {
+  project_id: string;
+  deploy_target: string | null;
+  candidates: { path: string; technologies: string[]; evidence: string[] }[];
+  relationship: string | null;
+  source_run: string | null;
+  note: string;
+}
+
+export async function fetchProjectTargets(projectId: string): Promise<ProjectTargets> {
+  const response = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/targets`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
   return response.json();
 }
 
 export async function createProjectRun(
   projectId: string,
-  input?: { intent?: string; target_revision?: string; target_host?: string; target_port?: number },
+  input?: { intent?: string; target_revision?: string; target_host?: string; target_port?: number; deployment_target?: string },
 ): Promise<DeployApiResponse & { project_id: string }> {
   const response = await apiFetch(
     `/api/projects/${encodeURIComponent(projectId)}/runs`,
@@ -1074,5 +1147,8 @@ export async function createProjectRun(
   if (!response.ok) {
     throw await parseError(response);
   }
+  clearApiCache("/api/projects");
+  clearApiCache("/api/deploys");
+  clearApiCache("/api/proposals");
   return response.json();
 }

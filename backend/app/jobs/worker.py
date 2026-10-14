@@ -36,8 +36,11 @@ def enqueue_job(*, repository: str, branch: str, target_sha: str,
     )
     if job is not None:
         try:
+            # Ordering counter is `seq` on SQLite, `seq_num` on Postgres
+            # (where `seq` is the row surrogate). Prefer the counter key.
+            keep = job.get("seq_num", job.get("seq", 0))
             repo.cancel_queued_superseded(
-                repository=repository, branch=branch, keep_seq=int(job.get("seq", 0)))
+                repository=repository, branch=branch, keep_seq=int(keep))
         except Exception:
             pass
     return job

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { RunSummary } from "@/lib/api/client";
 import {
+  canonicalRepoKey,
+  connectionLabel,
   deriveProjects,
   filterProjects,
   filterProjectsByStatus,
@@ -10,6 +12,7 @@ import {
   projectIdForRepo,
   repoForProjectId,
   shortNameForRepo,
+  shortSha,
   sortProjects,
 } from "@/lib/projects/projects";
 import { derivePipeline, summarizeVerification } from "@/lib/projects/useProjectData";
@@ -17,10 +20,10 @@ import { derivePipeline, summarizeVerification } from "@/lib/projects/useProject
 function run(overrides: Partial<RunSummary> & { deployment_id: string }): RunSummary {
   return {
     status: "completed",
-    mode: "demo",
-    is_demo: true,
-    label: "DEMO/MOCK",
-    scenario: "PORT_CONFLICT",
+    mode: "real",
+    is_demo: false,
+    label: null,
+    scenario: null,
     repository_url: "https://github.com/example/app",
     intent: null,
     base_revision: null,
@@ -200,6 +203,120 @@ describe("projectCardStatus / filterProjectsByStatus / sortProjects", () => {
     expect(sortProjects(projects, "name")[0]?.repositoryUrl).toContain("alpha");
     // Attention sorts before completed regardless of recency.
     expect(sortProjects(projects, "status")[0]?.repositoryUrl).toContain("alpha");
+  });
+});
+
+describe("deriveProjects demo exclusion", () => {
+  it("excludes simulated runs from the Projects experience", () => {
+    const summaries = deriveProjects([
+      run({ deployment_id: "dep_1", is_demo: true, mode: "demo", label: "DEMO/MOCK" }),
+    ]);
+    expect(summaries).toHaveLength(0);
+  });
+
+  it("reports canonical projects with only demo runs as having no runs", () => {
+    const project = {
+      project_id: "prj_abc123",
+      name: "Demo Service",
+      provider: "github",
+      repo_owner: "octo",
+      repo_name: "demo",
+      repository: "octo/demo",
+      canonical_url: "https://github.com/octo/demo.git",
+      branch: "main",
+      visibility: "public",
+      connection_status: "connected",
+      created_at: "2026-10-01T10:00:00Z",
+      updated_at: "2026-10-01T10:00:00Z",
+    };
+    const summaries = deriveProjects(
+      [run({ deployment_id: "dep_1", is_demo: true, mode: "demo", project_id: "prj_abc123" })],
+      [project],
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.totalRuns).toBe(0);
+    expect(summaries[0]?.latest).toBeNull();
+    expect(summaries[0]?.repoOwner).toBe("octo");
+    expect(summaries[0]?.repoName).toBe("demo");
+    expect(summaries[0]?.branch).toBe("main");
+  });
+});
+
+describe("canonicalRepoKey", () => {
+  it("normalizes equivalent GitHub URL variants", () => {
+    const keys = new Set(
+      [
+        "octo/demo",
+        "https://github.com/octo/demo",
+        "https://github.com/octo/demo.git",
+        "https://github.com/octo/demo/",
+        "https://github.com/OCTO/DEMO",
+        "https://github.com/octo/demo/tree/main",
+      ].map((u) => canonicalRepoKey(u)),
+    );
+    expect(keys).toEqual(new Set(["octo/demo"]));
+  });
+
+  it("rejects lookalike hosts and garbage", () => {
+    expect(canonicalRepoKey("https://evilgithub.com/octo/demo")).toBeNull();
+    expect(canonicalRepoKey("https://github.com.evil.com/octo/demo")).toBeNull();
+    expect(canonicalRepoKey("C:/src/local")).toBeNull();
+  });
+});
+
+describe("deriveProjects duplicate collapse", () => {
+  const project = {
+    project_id: "prj_abc123",
+    name: "Demo Service",
+    provider: "github",
+    repo_owner: "octo",
+    repo_name: "demo",
+    repository: "octo/demo",
+    canonical_url: "https://github.com/octo/demo.git",
+    branch: "main",
+    visibility: "public",
+    connection_status: "connected",
+    created_at: "2026-10-01T10:00:00Z",
+    updated_at: "2026-10-01T10:00:00Z",
+  };
+
+  it("merges legacy URL-variant runs into the canonical card", () => {
+    const summaries = deriveProjects(
+      [
+        run({ deployment_id: "dep_1", repository_url: "https://github.com/octo/demo" }),
+        run({ deployment_id: "dep_2", repository_url: "https://github.com/OCTO/demo.git" }),
+      ],
+      [project],
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.id).toBe("prj_abc123");
+    expect(summaries[0]?.totalRuns).toBe(2);
+  });
+
+  it("groups legacy variants without a project into one card", () => {
+    const summaries = deriveProjects([
+      run({ deployment_id: "dep_1", repository_url: "https://github.com/octo/demo" }),
+      run({ deployment_id: "dep_2", repository_url: "https://github.com/octo/demo.git" }),
+    ]);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.legacy).toBe(true);
+  });
+});
+
+describe("shortSha / connectionLabel", () => {
+  it("shortens only full 40-hex SHAs", () => {
+    expect(shortSha("a".repeat(40))).toBe("aaaaaaa");
+    expect(shortSha("abc123")).toBeNull();
+    expect(shortSha(null)).toBeNull();
+    expect(shortSha("")).toBeNull();
+  });
+
+  it("distinguishes connection states without implying run health", () => {
+    expect(connectionLabel("connected")).toContain("Connected");
+    expect(connectionLabel("pending")).toContain("pending");
+    expect(connectionLabel("failed")).toContain("failed");
+    expect(connectionLabel("disconnected")).toContain("Disconnected");
+    expect(connectionLabel(null)).toBe("No runs yet");
   });
 });
 

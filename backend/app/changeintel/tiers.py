@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 
 
 TIER_BUDGETS = {1: 0, 2: 2, 3: 6}
-SCORE_VERSION = "scores-v1"
 
 _DOC_EXTS = {".md", ".rst", ".txt"}
 _CSS_EXTS = {".css", ".scss", ".less"}
@@ -110,7 +109,3 @@ def inputs_hash(*, base_sha: str | None, target_sha: str, file_hashes: dict[str,
         "extra": sorted((extra or {}).items()),
     }, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def file_content_hash(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()

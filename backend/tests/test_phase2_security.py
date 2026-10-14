@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import app.api.webhooks as webhooks
 from app.core.rate_limit import check_rate_limit, reset_rate_limits
-from app.core.redact import redact_mapping, redact_text
+from app.ai.redact import REDACTED, redact_mapping, redact_text
 from app.core.repo_url import RepositoryUrlError, ensure_approved_github_host, resolve_and_recheck
 from app.execution.policy import PolicyViolation, check_real_execution_policy
 from app.execution.real_executor import RealExecutor
@@ -28,11 +28,11 @@ def test_rate_limit_blocks_over_budget():
 
 
 def test_redact_strips_tokens_and_url_creds():
-    assert redact_text("https://user:pass@github.com/o/r.git") == "https://***@github.com/o/r.git"
-    assert "***" in redact_text("token ghp_abcdef1234567890 leaked")
+    assert redact_text("https://user:pass@github.com/o/r.git") == f"https://{REDACTED}@github.com/o/r.git"
+    assert REDACTED in redact_text("token ghp_abcdef1234567890 leaked")
     cleaned = redact_mapping({"api_token": "secret", "note": "https://a:b@x.com/y"})
-    assert cleaned["api_token"] == "***"
-    assert "***@" in cleaned["note"]
+    assert cleaned["api_token"] == REDACTED
+    assert f"{REDACTED}@" in cleaned["note"]
 
 
 def test_repo_url_blocks_metadata_and_private():

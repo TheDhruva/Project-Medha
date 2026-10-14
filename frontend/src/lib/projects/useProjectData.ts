@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchProject,
   fetchProposals,
   fetchRunHealth,
   fetchRunHydration,
   fetchRunsList,
+  type AgentSnapshotRow,
   type Project,
   type Proposal,
   type RunHealth,
@@ -21,10 +22,12 @@ import type {
   NegotiationView,
   RollbackSummary,
 } from "@/lib/demo/types";
-import { repoForProjectId, shortNameForRepo } from "./projects";
+import { canonicalRepoKey, repoForProjectId, shortNameForRepo } from "./projects";
 
 export interface RunHydration {
   logs: RunLogLine[];
+  /** Latest backend agent snapshot; null when the backend reported none. */
+  agents: AgentSnapshotRow[] | null;
   /** How the selected run actually executed (real / simulator / controlled_test / demo); null when unknown. */
   executionMode: string | null;
   constraints: ConstraintView[];
@@ -62,6 +65,7 @@ export interface ProjectData {
 
 const EMPTY_HYDRATION: RunHydration = {
   logs: [],
+  agents: null,
   executionMode: null,
   constraints: [],
   negotiation: null,
@@ -96,8 +100,12 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
   const [hydrating, setHydrating] = useState(false);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsLoading, setProposalsLoading] = useState(false);
+  // Generation counter: rapid project switches must not let a stale load()
+  // overwrite newer state (last-wins without AbortController churn).
+  const loadGen = useRef(0);
 
   const load = useCallback(async () => {
+    const gen = ++loadGen.current;
     if (canonicalId) {
       // Canonical identity: one DB-backed project, runs joined by project_id.
       setLoading(true);
@@ -110,6 +118,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
           fetchRunsList({ project_id: canonicalId, limit: 100, offset: 0 }),
           fetchProposals({ project_id: canonicalId, limit: 50 }).catch(() => ({ proposals: [] as Proposal[] })),
         ]);
+        if (gen !== loadGen.current) return;
         setRuns(runsRes.runs);
         setProposals(proposalsRes.proposals ?? []);
         setBackendReachable(true);
@@ -118,6 +127,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
           return runsRes.runs[0]?.deployment_id ?? null;
         });
       } catch (err) {
+        if (gen !== loadGen.current) return;
         const missing = err instanceof Error && /not found/i.test(err.message);
         setBackendReachable(!missing ? false : true);
         setError(err instanceof Error ? err.message : "Cannot reach MEDHA backend.");
@@ -125,6 +135,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
         setProposals([]);
         if (missing) setProject(null);
       } finally {
+        if (gen !== loadGen.current) return;
         setLoading(false);
         setProposalsLoading(false);
       }
@@ -143,8 +154,14 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
         fetchRunsList({ repository: repo, limit: 100, offset: 0 }),
         fetchProposals({ repository: repo, limit: 50 }).catch(() => ({ proposals: [] as Proposal[] })),
       ]);
-      // Backend filters by substring; keep exact matches to avoid cross-project leaks.
-      const exact = runsRes.runs.filter((r) => r.repository_url === repo);
+      // Backend filters by substring; keep canonical-identity matches to
+      // avoid cross-project leaks and `.git`/casing splits.
+      const want = canonicalRepoKey(repo);
+      const exact = runsRes.runs.filter((r) => {
+        if (want) return canonicalRepoKey(r.repository_url) === want;
+        return r.repository_url === repo;
+      });
+      if (gen !== loadGen.current) return;
       setRuns(exact);
       setProposals(proposalsRes.proposals ?? []);
       setBackendReachable(true);
@@ -153,11 +170,13 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
         return exact[0]?.deployment_id ?? null;
       });
     } catch (err) {
+      if (gen !== loadGen.current) return;
       setBackendReachable(false);
       setError(err instanceof Error ? err.message : "Cannot reach MEDHA backend.");
       setRuns([]);
       setProposals([]);
     } finally {
+      if (gen !== loadGen.current) return;
       setLoading(false);
       setProposalsLoading(false);
     }
@@ -181,6 +200,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
         if (cancelled) return;
         setHydration({
           logs: h.logs,
+          agents: h.agents ?? null,
           executionMode: h.executionMode ?? null,
           constraints: h.constraints?.constraints ?? [],
           negotiation: h.constraints?.negotiation ?? null,
@@ -285,6 +305,59 @@ const AGENT_STAGES: { id: string; label: string; match: string[] }[] = [
   { id: "executor", label: "Executor", match: ["execut"] },
   { id: "rollback", label: "Rollback", match: ["rollback"] },
 ];
+
+const SNAPSHOT_LABELS: Record<string, string> = {
+  preflight: "Preflight",
+  analyzer: "Code Analyzer",
+  docker: "Docker",
+  nginx: "Nginx",
+  security: "Security",
+  mediator: "Mediator / CNP",
+  verifier: "Verifier",
+  critic: "Critic",
+  executor: "Executor",
+  rollback: "Rollback",
+};
+
+/**
+ * Map a real backend agent snapshot to display states. Only backend-known
+ * statuses are shown: complete→done, failed/timed_out→blocked,
+ * running→active; cancelled/skipped/idle stay idle (settled, no attention).
+ * Unknown statuses degrade to idle — never invented as done.
+ */
+export function agentsFromSnapshot(rows: AgentSnapshotRow[]): AgentState[] {
+  return rows.map((row) => {
+    let state: AgentState["state"] = "idle";
+    if (row.status === "complete") state = "done";
+    else if (row.status === "failed" || row.status === "timed_out") state = "blocked";
+    else if (row.status === "running") state = "active";
+    const parts = [row.activity || row.lastEvent || "No observed activity for this run."];
+    if (typeof row.durationMs === "number") parts.push(`(${(row.durationMs / 1000).toFixed(1)}s)`);
+    if (row.error) parts.push(`— ${row.error}`);
+    return {
+      id: row.id,
+      label: SNAPSHOT_LABELS[row.id] ?? row.name ?? row.id,
+      state,
+      detail: parts.join(" "),
+    };
+  });
+}
+
+/**
+ * Prefer the backend snapshot; fall back to log-keyword derivation only when
+ * the backend reported no snapshot (null). The fallback never claims
+ * unobserved stages as done.
+ */
+export function resolveAgents(
+  hydration: RunHydration,
+  currentStage: string | null,
+  runStatus: string | null,
+): { agents: AgentState[]; source: "backend" | "logs" } {
+  if (hydration.agents && hydration.agents.length > 0) {
+    return { agents: agentsFromSnapshot(hydration.agents), source: "backend" };
+  }
+  return { agents: deriveAgentsFromLogs(hydration.logs, currentStage, runStatus), source: "logs" };
+}
 
 /**
  * Derive per-agent states from observed backend log lines only.

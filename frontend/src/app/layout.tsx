@@ -1,7 +1,6 @@
 import { ClerkProvider } from "@clerk/nextjs";
 import type { Metadata } from "next";
 import "./globals.css";
-import { WorkspaceProvider } from "@/lib/workspace/store";
 import { ClerkTokenSync } from "@/components/auth/ClerkTokenSync";
 import { PerfInit } from "@/lib/perf/PerfInit";
 
@@ -23,7 +22,7 @@ export default function RootLayout({
       <html lang="en">
         <body className="font-sans antialiased">
           <PerfInit />
-          <WorkspaceProvider>{children}</WorkspaceProvider>
+          {children}
         </body>
       </html>
     );
@@ -34,7 +33,7 @@ export default function RootLayout({
         <ClerkProvider>
           <ClerkTokenSync />
           <PerfInit />
-          <WorkspaceProvider>{children}</WorkspaceProvider>
+          {children}
         </ClerkProvider>
       </body>
     </html>

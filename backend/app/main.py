@@ -25,12 +25,34 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    import asyncio as _asyncio
+    import time as _time
+
+    _t_start = _time.perf_counter()
     settings = get_settings()
     setup_logging(settings.log_level)
     problem = settings.hosted_security_error()
     if problem is not None:
         raise RuntimeError(f"Refusing to start hosted production: {problem}")
-    init_db()
+    _t_db = _time.perf_counter()
+    if settings.ignored_db_url:
+        # A dotenv-inherited production URL must never silently hijack local
+        # runs: stay on SQLite and say so loudly (label only, never the URL).
+        logger.warning(
+            "MEDHA_DATABASE_URL is set but ignored in development "
+            "(source=%s): using SQLite at %s. Set "
+            "MEDHA_DATABASE_BACKEND=postgres to use Postgres locally.",
+            settings.database_url_source(),
+            settings.database_path,
+        )
+    try:
+        init_db()
+    except Exception as exc:  # noqa: BLE001 - fail closed, redacted, no secrets
+        raise RuntimeError(
+            f"Database initialization failed for {describe_db()}: "
+            f"{type(exc).__name__}. Refusing to serve without a database."
+        ) from exc
+    _db_s = _time.perf_counter() - _t_db
     try:
         from app.services.recovery import reconcile_interrupted, recovery_summary
 
@@ -38,19 +60,25 @@ async def lifespan(_app: FastAPI):
     except Exception:  # noqa: BLE001 - recovery must never block startup
         logger.exception("Startup recovery failed")
         recovered = {}
-    try:
-        from app.services.workspace import prune_stale_workspaces
+    # Non-critical workspace cleanup runs in the background AFTER the
+    # service is ready, so slow filesystems never delay readiness.
+    def _deferred_prune() -> None:
+        try:
+            from app.services.workspace import prune_stale_workspaces
 
-        pruned = prune_stale_workspaces(max_age_hours=24)
-    except Exception:  # noqa: BLE001 - cleanup must never block startup
-        logger.exception("Workspace prune failed at startup")
-        pruned = 0
+            pruned = prune_stale_workspaces(max_age_hours=24)
+            logger.info("Deferred workspace prune removed=%s", pruned)
+        except Exception:  # noqa: BLE001 - cleanup must never crash serving
+            logger.exception("Deferred workspace prune failed")
+
+    _asyncio.get_running_loop().run_in_executor(None, _deferred_prune)
     logger.info(
-        "MEDHA backend starting env=%s db=%s cors=%s pruned_workspaces=%s recovery=%s",
+        "MEDHA backend starting env=%s db=%s cors=%s db_init_s=%.2f total_init_s=%.2f recovery=%s",
         settings.medha_env,
         describe_db(),
         settings.cors_origins,
-        pruned,
+        _db_s,
+        _time.perf_counter() - _t_start,
         recovery_summary(recovered) if recovered else "none",
     )
     try:

@@ -36,11 +36,31 @@ def run_cnp(
 
     LLM mediation is optional and not required for V1; same-priority deadlocks use
     deterministic_tiebreak so the laptop/demo path stays ₹0 and offline-capable.
+    Hard-security deadlocks (all-SECURITY conflicts with no deterministic winner)
+    are reported infeasible instead of being arbitrarily dropped.
     """
-    working = _validate([deepcopy(c) for c in constraints])
+    working, dropped_ids = _validate([deepcopy(c) for c in constraints])
+    if not working and constraints:
+        # Every proposal was malformed: nothing to negotiate. Fail closed
+        # with an explicit invalid state rather than an empty "resolved" set.
+        return NegotiationResult(
+            deployment_id=deployment_id,
+            status="invalid",
+            rounds_used=0,
+            max_rounds=max_rounds,
+            conflicts=[],
+            decisions=[],
+            final_constraints=[],
+            dropped_constraint_ids=dropped_ids,
+            is_demo=is_demo,
+        )
     all_conflicts: list[ConflictRecord] = []
     decisions: list[DecisionRecord] = []
     rounds_used = 0
+    # Proposal memory: signatures of already-decided conflicts. A conflict
+    # that survives its decision and reappears is unresolvable — repeating
+    # the same decision would loop forever, so negotiation is exhausted.
+    seen_signatures: set[tuple[str | None, tuple[str, ...]]] = set()
 
     for round_idx in range(1, max_rounds + 1):
         rounds_used = round_idx
@@ -57,8 +77,27 @@ def run_cnp(
                 conflicts=all_conflicts,
                 decisions=decisions,
                 final_constraints=working,
+                dropped_constraint_ids=dropped_ids,
                 is_demo=is_demo,
             )
+
+        signatures = [_conflict_signature(c) for c in conflicts]
+        if signatures and all(sig in seen_signatures for sig in signatures):
+            # Previously decided conflicts persist: no feasible solution.
+            all_conflicts.extend(conflicts)
+            return NegotiationResult(
+                deployment_id=deployment_id,
+                status="exhausted",
+                rounds_used=rounds_used,
+                max_rounds=max_rounds,
+                conflicts=all_conflicts,
+                decisions=decisions,
+                final_constraints=working,
+                dropped_constraint_ids=dropped_ids,
+                is_demo=is_demo,
+            )
+        for sig in signatures:
+            seen_signatures.add(sig)
 
         all_conflicts.extend(conflicts)
         for conflict in conflicts:
@@ -79,6 +118,7 @@ def run_cnp(
                 conflicts=all_conflicts,
                 decisions=decisions,
                 final_constraints=working,
+                dropped_constraint_ids=dropped_ids,
                 is_demo=is_demo,
             )
 
@@ -90,21 +130,46 @@ def run_cnp(
         conflicts=all_conflicts,
         decisions=decisions,
         final_constraints=working,
+        dropped_constraint_ids=dropped_ids,
         is_demo=is_demo,
     )
 
 
-def _validate(constraints: list[Constraint]) -> list[Constraint]:
+def _conflict_signature(conflict: ConflictRecord) -> tuple[str | None, tuple[str, ...]]:
+    return (conflict.resource_key, tuple(sorted(conflict.constraint_ids)))
+
+
+def _validate(constraints: list[Constraint]) -> tuple[list[Constraint], list[str]]:
+    """Drop malformed constraints of every supported type.
+
+    Returns (valid, dropped_ids). Dropped ids are reported on the
+    NegotiationResult so invalid input is observable, never silent.
+    """
     valid: list[Constraint] = []
+    dropped: list[str] = []
     for c in constraints:
-        if c.type == ConstraintType.PORT_CLAIM and "port" not in c.payload:
-            logger.warning("Dropping invalid PORT_CLAIM %s", c.constraint_id)
-            continue
-        if c.type == ConstraintType.ENV_VAR and "key" not in c.payload:
-            logger.warning("Dropping invalid ENV_VAR %s", c.constraint_id)
+        payload = c.payload or {}
+        ok = True
+        if c.type == ConstraintType.PORT_CLAIM:
+            ok = "port" in payload
+        elif c.type == ConstraintType.ENV_VAR:
+            ok = bool(payload.get("key"))
+        elif c.type == ConstraintType.VOLUME_MOUNT:
+            ok = bool(payload.get("host_path") or payload.get("host")) and bool(
+                payload.get("container_path") or payload.get("container")
+            )
+        elif c.type == ConstraintType.NETWORK_POLICY:
+            ok = bool(payload.get("rule") or payload.get("network"))
+        elif c.type == ConstraintType.SECURITY_POLICY:
+            ok = bool(payload.get("rule"))
+        elif c.type == ConstraintType.EXEC_ORDER:
+            ok = bool(payload.get("before")) and bool(payload.get("after"))
+        if not ok:
+            logger.warning("Dropping invalid %s %s", c.type.value, c.constraint_id)
+            dropped.append(c.constraint_id)
             continue
         valid.append(c)
-    return valid
+    return valid, dropped
 
 
 def detect_conflicts(constraints: list[Constraint]) -> list[ConflictRecord]:
@@ -157,6 +222,13 @@ def _group_incompatible(group: list[Constraint]) -> bool:
         if len(rules) == 1:
             modes = {c.payload.get("mode") for c in policyish if c.payload.get("mode") is not None}
             if len(modes) > 1:
+                return True
+            enforcements = {
+                c.payload.get("enforcement")
+                for c in policyish
+                if c.payload.get("enforcement") is not None
+            }
+            if len(enforcements) > 1:
                 return True
             priorities = {c.priority for c in policyish}
             if Priority.SECURITY in priorities and Priority.PREFERENCE in priorities:
@@ -249,6 +321,25 @@ def resolve_conflict(constraints: list[Constraint], conflict: ConflictRecord) ->
                 updates=updates,
             )
 
+    if all(c.priority == Priority.SECURITY for c in group):
+        # Hard-security deadlock: every claim is non-negotiable and no
+        # alternative reconciles them. Arbitrarily dropping one would violate
+        # the SECURITY-wins invariant, so report infeasible and let the
+        # round bound fail the negotiation closed.
+        agents = ", ".join(sorted({c.source_agent for c in group}))
+        return DecisionRecord(
+            conflict_id=conflict.conflict_id,
+            method="infeasible",
+            winner_ids=[],
+            loser_ids=[],
+            rationale=(
+                f"Conflicting SECURITY constraints on {conflict.resource_key} "
+                f"between {agents} admit no deterministic compromise; "
+                "negotiation cannot satisfy all hard constraints."
+            ),
+            updates=[],
+        )
+
     ordered = sorted(group, key=lambda c: c.constraint_id)
     keeper = ordered[0]
     return DecisionRecord(
@@ -274,19 +365,34 @@ def _pick_alternative_port(
         for c in all_constraints
         if c.type == ConstraintType.PORT_CLAIM and c.status != ConstraintStatus.REJECTED
     }
+    # Proposal memory: never re-propose a port already rejected in this run.
+    rejected_ports = {
+        c.payload.get("port")
+        for c in all_constraints
+        if c.type == ConstraintType.PORT_CLAIM and c.status == ConstraintStatus.REJECTED
+    }
     for alt in constraint.alternatives:
         port = alt.get("port")
-        if isinstance(port, int) and port not in used and port != conflicting_port:
+        if (
+            isinstance(port, int)
+            and port not in used
+            and port not in rejected_ports
+            and port != conflicting_port
+        ):
             return port
     base = constraint.payload.get("port") or conflicting_port or 8080
     for delta in range(1, 20):
         candidate = int(base) + delta
-        if candidate not in used:
+        if candidate not in used and candidate not in rejected_ports:
             return candidate
     return None
 
 
 def apply_decision(constraints: list[Constraint], decision: DecisionRecord) -> None:
+    # An infeasible decision changes nothing: the conflict persists and the
+    # round bound turns the repeat into an exhausted negotiation.
+    if decision.method == "infeasible":
+        return
     by_id = {c.constraint_id: c for c in constraints}
     for cid in decision.winner_ids:
         if cid in by_id:

@@ -146,9 +146,22 @@ class DeploymentRepository:
                 total = conn.execute(
                     f"SELECT COUNT(*) AS count FROM deployments{clause}", params_count
                 ).fetchone()["count"]
+                # Summary listing fetches only the blobs the list view needs
+                # (result/ai/change_intel drive execution_mode, health, risk).
+                # The large graph/verification/critic/rollback/constraints/
+                # negotiation blobs stay on their dedicated per-run endpoints.
+                # _row_to_record tolerates missing keys.
                 rows = conn.execute(
                     f"""
-                    SELECT * FROM deployments{clause}
+                    SELECT deployment_id, repository_url, mode, scenario,
+                        target_host, target_port, intent,
+                        base_revision, target_revision,
+                        status, current_stage,
+                        explain_simple, explain_technical, error_summary,
+                        result_json, ai_json, change_intel_json,
+                        owner_sub, project_id, is_demo,
+                        created_at, updated_at
+                    FROM deployments{clause}
                     ORDER BY rowid DESC
                     LIMIT ? OFFSET ?
                     """,
@@ -157,6 +170,23 @@ class DeploymentRepository:
             return [self._row_to_record(row) for row in rows], int(total)
         finally:
             timed_db("list", _t0)
+
+    def has_active_runs(self, project_id: str) -> bool:
+        """True when the project has a run still in flight.
+
+        Single bounded COUNT query; in-flight means status queued, started,
+        or running. Used to block destructive project operations safely.
+        """
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM deployments WHERE project_id = ?"
+                " AND status IN ('queued', 'started', 'running')",
+                (project_id,),
+            ).fetchone()
+        try:
+            return int(row["count"]) > 0
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def update_status(
         self,
@@ -835,6 +865,22 @@ class ProjectRepository:
             ).fetchall()
         return [self._row_to_project(row) for row in rows]
 
+    def find_by_owner_repo(self, owner_sub: str, repository: str) -> ProjectRecord | None:
+        """Existing project for (owner, repository), case-insensitive.
+
+        Used for idempotent reconnect: the same authorized user reconnecting
+        the same repository resolves here instead of inserting a duplicate.
+        Never returns another owner's row.
+        """
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM projects WHERE owner_sub = ? AND lower(repository) = lower(?)",
+                (owner_sub, repository.strip()),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_project(row)
+
     def update(
         self,
         project_id: str,
@@ -843,30 +889,53 @@ class ProjectRepository:
         branch: str | None = None,
         visibility: str | None = None,
         connection_status: str | None = None,
+        deploy_target: str | None = None,
         updated_at: str,
     ) -> ProjectRecord | None:
         current = self.get(project_id)
         if current is None:
             return None
         with get_connection(self.db_path) as conn:
-            conn.execute(
-                """
-                UPDATE projects
-                SET name = ?, branch = ?, visibility = ?,
-                    connection_status = ?, updated_at = ?
-                WHERE project_id = ?
-                """,
-                (
-                    name if name is not None else current.name,
-                    branch if branch is not None else current.branch,
-                    visibility if visibility is not None else current.visibility,
-                    connection_status
-                    if connection_status is not None
-                    else current.connection_status,
-                    updated_at,
-                    project_id,
-                ),
-            )
+            try:
+                conn.execute(
+                    """
+                    UPDATE projects
+                    SET name = ?, branch = ?, visibility = ?,
+                        connection_status = ?, deploy_target = ?, updated_at = ?
+                    WHERE project_id = ?
+                    """,
+                    (
+                        name if name is not None else current.name,
+                        branch if branch is not None else current.branch,
+                        visibility if visibility is not None else current.visibility,
+                        connection_status
+                        if connection_status is not None
+                        else current.connection_status,
+                        deploy_target if deploy_target is not None else current.deploy_target,
+                        updated_at,
+                        project_id,
+                    ),
+                )
+            except Exception:
+                # Legacy databases pre-deploy_target: retry without the column.
+                conn.execute(
+                    """
+                    UPDATE projects
+                    SET name = ?, branch = ?, visibility = ?,
+                        connection_status = ?, updated_at = ?
+                    WHERE project_id = ?
+                    """,
+                    (
+                        name if name is not None else current.name,
+                        branch if branch is not None else current.branch,
+                        visibility if visibility is not None else current.visibility,
+                        connection_status
+                        if connection_status is not None
+                        else current.connection_status,
+                        updated_at,
+                        project_id,
+                    ),
+                )
             conn.commit()
         return self.get(project_id)
 
@@ -883,6 +952,7 @@ class ProjectRepository:
 
     @staticmethod
     def _row_to_project(row: Any) -> ProjectRecord:
+        keys = set(row.keys())
         return ProjectRecord(
             project_id=row["project_id"],
             owner_sub=row["owner_sub"],
@@ -895,6 +965,7 @@ class ProjectRepository:
             branch=row["branch"],
             visibility=row["visibility"],
             connection_status=row["connection_status"],
+            deploy_target=row["deploy_target"] if "deploy_target" in keys else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -904,7 +975,41 @@ class ProjectConflictError(ValueError):
     """Duplicate (owner, repository) connection attempt (maps to 409)."""
 
 
-_JOB_SEQ_SQL = "COALESCE((SELECT MAX(seq) FROM jobs WHERE repository = ? AND branch = ?), -1) + 1"
+def _job_order_col(db_path) -> str:
+    """Per-branch ordering column for the jobs table.
+
+    SQLite stores the counter in `seq` (schema.sql). Postgres reserves
+    `seq` for the BIGSERIAL row surrogate (the rowid→seq translation
+    target in schema_pg.sql) and keeps the counter in `seq_num`.
+    """
+    return "seq_num" if resolve_backend(db_path) == "postgres" else "seq"
+
+
+def _job_seq_sql(db_path) -> str:
+    col = _job_order_col(db_path)
+    return (
+        "COALESCE((SELECT MAX(" + col + ") FROM jobs "
+        "WHERE repository = ? AND branch = ?), -1) + 1"
+    )
+
+
+_SQLITE_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+_SQLITE_NOW_PLUS_MIN = "strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)"
+_PG_NOW_FMT = "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'"
+
+
+def _job_now_expr(db_path) -> str:
+    """UTC ISO-millis timestamp expression (`...Z`, lexicographically ordered)."""
+    if resolve_backend(db_path) == "postgres":
+        return f"TO_CHAR(NOW(), {_PG_NOW_FMT})"
+    return _SQLITE_NOW
+
+
+def _job_not_before_expr(db_path) -> str:
+    """`not_before` for a backoff of `?` minutes from now (param is minutes)."""
+    if resolve_backend(db_path) == "postgres":
+        return f"TO_CHAR(NOW() + (INTERVAL '1 minute' * ?), {_PG_NOW_FMT})"
+    return _SQLITE_NOW_PLUS_MIN
 
 
 class JobRepository:
@@ -924,13 +1029,14 @@ class JobRepository:
         """Idempotent insert. Returns the job dict, or None on duplicate delivery."""
         with get_connection(self.db_path) as conn:
             try:
+                order_col = _job_order_col(self.db_path)
                 seq_row = conn.execute(
-                    f"SELECT {_JOB_SEQ_SQL} AS seq", (repository, branch)
+                    f"SELECT {_job_seq_sql(self.db_path)} AS seq", (repository, branch)
                 ).fetchone()
                 seq = int(seq_row["seq"] if seq_row else 0)
                 conn.execute(
-                    """INSERT INTO jobs (job_id, delivery_id, project_id, repository,
-                        branch, base_sha, target_sha, seq, status, attempts,
+                    f"""INSERT INTO jobs (job_id, delivery_id, project_id, repository,
+                        branch, base_sha, target_sha, {order_col}, status, attempts,
                         max_attempts, deployment_id, created_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 3, ?, ?, ?)""",
                     (job_id, delivery_id, project_id, repository, branch,
@@ -950,17 +1056,18 @@ class JobRepository:
 
     def claim_next(self) -> dict[str, Any] | None:
         """Atomically claim the oldest queued job whose backoff has expired."""
+        now = _job_now_expr(self.db_path)
         with get_connection(self.db_path) as conn:
             row = conn.execute(
-                """SELECT * FROM jobs WHERE status = 'queued'
-                   AND (not_before IS NULL OR not_before <= strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                f"""SELECT * FROM jobs WHERE status = 'queued'
+                   AND (not_before IS NULL OR not_before <= {now})
                    ORDER BY created_at ASC LIMIT 1"""
             ).fetchone()
             if row is None:
                 return None
             conn.execute(
                     "UPDATE jobs SET status='running', attempts=attempts+1,"
-                    " updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE job_id=? AND status='queued'",
+                    f" updated_at={now} WHERE job_id=? AND status='queued'",
                     (row["job_id"],),
                 )
             conn.commit()
@@ -985,19 +1092,27 @@ class JobRepository:
                 )
             else:
                 backoff_min = min(2 ** int(row["attempts"]), 30)
-                conn.execute(
-                    "UPDATE jobs SET status='queued', last_error=?,"
-                    " not_before=strftime('%Y-%m-%dT%H:%M:%fZ','now', ?), updated_at=? WHERE job_id=?",
-                    (error, f"+{backoff_min} minutes", updated_at, job_id),
-                )
+                if resolve_backend(self.db_path) == "postgres":
+                    conn.execute(
+                        f"UPDATE jobs SET status='queued', last_error=?,"
+                        f" not_before={_job_not_before_expr(self.db_path)},"
+                        " updated_at=? WHERE job_id=?",
+                        (error, backoff_min, updated_at, job_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE jobs SET status='queued', last_error=?,"
+                        " not_before=strftime('%Y-%m-%dT%H:%M:%fZ','now', ?), updated_at=? WHERE job_id=?",
+                        (error, f"+{backoff_min} minutes", updated_at, job_id),
+                    )
             conn.commit()
 
     def cancel_queued_superseded(self, *, repository: str, branch: str, keep_seq: int) -> int:
         """Mark older queued jobs superseded when a newer push arrives."""
         with get_connection(self.db_path) as conn:
             cursor = conn.execute(
-                "UPDATE jobs SET status='superseded' WHERE repository=? AND branch=?"
-                " AND seq < ? AND status='queued'",
+                f"UPDATE jobs SET status='superseded' WHERE repository=? AND branch=?"
+                f" AND {_job_order_col(self.db_path)} < ? AND status='queued'",
                 (repository, branch, keep_seq),
             )
             conn.commit()
@@ -1009,7 +1124,8 @@ class JobRepository:
     def latest_for_branch(self, repository: str, branch: str) -> dict[str, Any] | None:
         with get_connection(self.db_path) as conn:
             row = conn.execute(
-                "SELECT * FROM jobs WHERE repository=? AND branch=? ORDER BY seq DESC LIMIT 1",
+                f"SELECT * FROM jobs WHERE repository=? AND branch=?"
+                f" ORDER BY {_job_order_col(self.db_path)} DESC LIMIT 1",
                 (repository, branch),
             ).fetchone()
         return dict(row) if row else None

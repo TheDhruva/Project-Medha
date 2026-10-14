@@ -8,7 +8,7 @@ Rule: implement **only** the current phase. Each phase must leave the project ru
 
 ## PHASE 0 — Architecture + Project Contracts
 
-**Status:** IN DEVELOPMENT → docs complete this phase.
+**Status:** TESTED (Phase 12 complete; retained as historical record).
 
 ### Objective
 Establish architecture, contracts, directory structure, rules, and technical specifications. No MEDHA runtime features.

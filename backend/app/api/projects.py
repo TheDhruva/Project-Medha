@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,11 @@ from app.core.clerk_auth import LOCAL_SUBJECT, RequireSubject
 from app.core.enums import DeploymentStatus, DeployMode, EventType
 from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
+from app.core.repo_identity import (
+    RepoIdentityError,
+    canonical_repo_identity,
+    validate_deploy_target,
+)
 from app.database.repositories import (
     DeploymentRepository,
     ProjectConflictError,
@@ -41,8 +46,6 @@ router = APIRouter(prefix="/api")
 repo = DeploymentRepository()
 projects = ProjectRepository()
 
-_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})$")
-_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]{1,120}$")
 
 
@@ -53,46 +56,17 @@ class ProjectRefError(ValueError):
         self.message = message
 
 
-def parse_github_repo_ref(raw: str) -> tuple[str, str, str]:
-    """Parse `owner/name` or a github.com URL into (owner, name, canonical_url).
+def parse_github_repo_ref(raw: str) -> tuple[str, str, str, str]:
+    """Parse `owner/name` or a github.com URL into (owner, name, repository, canonical_url).
 
-    Returns the lowercased `owner/name`, original-case owner/name, and the
-    canonical clone URL. Anything else raises ProjectRefError — a URL in a
+    Single authoritative identity lives in app.core.repo_identity; this
+    wrapper preserves the established API-contract error codes. A URL in a
     form is never trusted as proof of access.
     """
-    value = (raw or "").strip()
-    if not value or len(value) > 300:
-        raise ProjectRefError("INVALID_REPOSITORY_REF", "Repository reference is empty or too long.")
-    candidate = value
-    if "://" in candidate:
-        lowered = candidate.lower()
-        if "github.com" not in lowered.split("://", 1)[1].split("/", 1)[0]:
-            raise ProjectRefError(
-                "NON_GITHUB_REPOSITORY",
-                "V1 supports github.com repositories only.",
-            )
-        path = candidate.split("://", 1)[1].split("/", 1)
-        if len(path) < 2:
-            raise ProjectRefError("INVALID_REPOSITORY_REF", "GitHub URL has no owner/name path.")
-        candidate = path[1]
-    candidate = candidate.strip().strip("/")
-    if candidate.lower().endswith(".git"):
-        candidate = candidate[: -len(".git")]
-    parts = [p for p in candidate.split("/") if p]
-    if len(parts) != 2:
-        raise ProjectRefError(
-            "INVALID_REPOSITORY_REF",
-            "Repository must look like 'owner/name' or a github.com URL.",
-        )
-    owner, name = parts[0].strip(), parts[1].strip()
-    if not _OWNER_RE.match(owner) or not _NAME_RE.match(name):
-        raise ProjectRefError(
-            "INVALID_REPOSITORY_REF",
-            "Owner/name contain unsupported characters.",
-        )
-    repository = f"{owner.lower()}/{name.lower()}"
-    canonical = f"https://github.com/{owner}/{name}.git"
-    return owner, name, repository, canonical
+    try:
+        return canonical_repo_identity(raw)
+    except RepoIdentityError as exc:
+        raise ProjectRefError(exc.code, exc.message) from exc
 
 
 def validate_branch_name(branch: str) -> str:
@@ -127,14 +101,35 @@ def _owned_project(project_id: str, subject: str) -> ProjectRecord | None:
 
 
 class ProjectCreateBody(BaseModel):
-    name: str = Field(..., min_length=1, max_length=80)
+    # Name defaults to the repository name when omitted; branch is
+    # auto-detected from the remote default (via ls-remote --symref) when
+    # omitted, falling back to "main" when detection is impossible.
+    name: str | None = Field(default=None, max_length=80)
     repository: str = Field(..., min_length=1, max_length=300)
-    branch: str = Field(default="main", max_length=120)
+    branch: str | None = Field(default=None, max_length=120)
+
+
+async def _resolve_branch(canonical_url: str, requested: str | None) -> str:
+    """Explicit branch when given (validated); otherwise the remote default."""
+    if requested is not None and requested.strip():
+        return validate_branch_name(requested)
+    from app.services import git_service
+
+    import asyncio
+
+    detected = await asyncio.to_thread(git_service.ls_remote_default_branch, canonical_url)
+    if detected:
+        try:
+            return validate_branch_name(detected)
+        except ProjectRefError:
+            pass
+    return "main"
 
 
 class ProjectPatchBody(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     branch: str | None = Field(default=None, max_length=120)
+    deploy_target: str | None = Field(default=None, max_length=120)
 
 
 class ProjectRunBody(BaseModel):
@@ -142,20 +137,31 @@ class ProjectRunBody(BaseModel):
     target_revision: str | None = Field(default=None, max_length=100)
     target_host: str = Field(default="localhost", max_length=64)
     target_port: int = Field(default=8080, ge=1, le=65535)
+    deployment_target: str | None = Field(default=None, max_length=120)
 
 
 @router.post("/projects", status_code=201, dependencies=[Depends(require_mutation_token)])
 async def create_project(body: ProjectCreateBody, subject: str = RequireSubject):
     try:
         owner, name, repository, canonical = parse_github_repo_ref(body.repository)
-        branch = validate_branch_name(body.branch or "main")
+        branch = await _resolve_branch(canonical, body.branch)
     except ProjectRefError as exc:
         return _error(400, exc.code, exc.message)
+    display_name = (body.name or "").strip() or name
+    if len(display_name) > 80:
+        return _error(400, "INVALID_NAME", "Connection name is too long (max 80).")
+    # Idempotent reconnect: the same authorized user resolving the same
+    # canonical identity gets their existing project (200) instead of a
+    # duplicate row. The DB unique index remains the concurrency guard —
+    # this pre-check is a fast path, never the sole enforcement.
+    existing = projects.find_by_owner_repo(subject, repository)
+    if existing is not None:
+        return JSONResponse(existing.to_api(), status_code=200)
     now = utc_now_iso()
     project = ProjectRecord(
         project_id=f"prj_{uuid4().hex[:16]}",
         owner_sub=subject,
-        name=body.name.strip(),
+        name=display_name,
         provider="github",
         repo_owner=owner,
         repo_name=name,
@@ -169,8 +175,17 @@ async def create_project(body: ProjectCreateBody, subject: str = RequireSubject)
     )
     try:
         projects.create(project)
-    except ProjectConflictError as exc:
-        return _error(409, "PROJECT_EXISTS", str(exc))
+    except ProjectConflictError:
+        # Lost a race: re-read the winner owned by this subject. A row owned
+        # by someone else never leaks — return the contract 409 instead.
+        winner = projects.find_by_owner_repo(subject, repository)
+        if winner is not None:
+            return JSONResponse(winner.to_api(), status_code=200)
+        return _error(
+            409, "PROJECT_EXISTS",
+            f"Repository '{repository}' is already connected for this owner.",
+            details={"repository": repository},
+        )
     logger.info("Project created id=%s repo=%s owner=%s", project.project_id, repository, subject)
     return JSONResponse(project.to_api(), status_code=201)
 
@@ -200,17 +215,66 @@ async def update_project(project_id: str, body: ProjectPatchBody, subject: str =
         return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
     try:
         branch = validate_branch_name(body.branch) if body.branch is not None else None
+        deploy_target = (
+            validate_deploy_target(body.deploy_target)
+            if body.deploy_target is not None
+            else None
+        )
     except ProjectRefError as exc:
+        return _error(400, exc.code, exc.message)
+    except RepoIdentityError as exc:
         return _error(400, exc.code, exc.message)
     updated = projects.update(
         project_id,
         name=body.name.strip() if body.name is not None else None,
         branch=branch,
+        deploy_target=deploy_target,
         updated_at=utc_now_iso(),
     )
     if updated is None:
         return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
     return JSONResponse(updated.to_api())
+
+
+@router.get("/projects/{project_id}/targets")
+async def project_targets(project_id: str, subject: str = RequireSubject):
+    """Current deployment target plus last observed candidates.
+
+    Candidates come from the latest run's persisted result (no extra clone):
+    empty with an honest note when no run has reported them yet. Setting the
+    target is PATCH /projects/{id} {deploy_target}; it takes effect on the
+    next run and never leaks across projects.
+    """
+    project = _owned_project(project_id, subject)
+    if project is None:
+        return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
+    candidates: list[dict] = []
+    relationship: str | None = None
+    source_run: str | None = None
+    try:
+        runs, _ = repo.list(project_id=project_id, limit=20, offset=0)
+        for run in runs:
+            result = run.result if isinstance(run.result, dict) else None
+            detail = (result or {}).get("target_selection") if result else None
+            if isinstance(detail, dict) and detail.get("candidates"):
+                candidates = detail["candidates"]
+                relationship = detail.get("relationship")
+                source_run = run.deployment_id
+                break
+    except Exception:
+        candidates = []
+    return JSONResponse({
+        "project_id": project_id,
+        "deploy_target": project.deploy_target,
+        "candidates": candidates,
+        "relationship": relationship,
+        "source_run": source_run,
+        "note": (
+            "No candidate information recorded yet; run an analysis first."
+            if not candidates else
+            "V1 executes exactly one selected service; coordinated multi-service deployment is unsupported."
+        ),
+    })
 
 
 @router.post(
@@ -277,6 +341,16 @@ async def delete_project(project_id: str, subject: str = RequireSubject):
     project = _owned_project(project_id, subject)
     if project is None:
         return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
+    # Active runs keep their history rows; refusing deletion while a run is
+    # in flight avoids orphaning an executing pipeline. Disconnect instead,
+    # or retry once the run settles.
+    if repo.has_active_runs(project_id):
+        return _error(
+            409, "ACTIVE_RUNS",
+            "This project has a run still in flight; deletion is blocked "
+            "until it finishes. Disconnect the repository instead, or retry "
+            "after the run settles.",
+        )
     projects.delete(project_id)
     # Run/proposal history is preserved; without the mapping, future webhook
     # events for this repository no longer route anywhere.
@@ -300,6 +374,20 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
         )
     if body.target_host.strip().lower() not in {"localhost", "127.0.0.1", "::1"}:
         return _error(400, "INVALID_TARGET", "V1 target host must be localhost / 127.0.0.1")
+    try:
+        deployment_target = (
+            validate_deploy_target(body.deployment_target)
+            if body.deployment_target is not None
+            else None
+        )
+    except RepoIdentityError as exc:
+        return _error(400, exc.code, exc.message)
+    if deployment_target is not None:
+        # Persisted on the project: scoped to this project only, takes
+        # effect on this run and every later one until changed again.
+        project = projects.update(
+            project_id, deploy_target=deployment_target, updated_at=utc_now_iso()
+        ) or project
     target_revision: str | None = None
     if body.target_revision:
         from app.services import git_service

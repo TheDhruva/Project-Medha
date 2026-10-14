@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -14,7 +15,7 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _SCHEMA_PG_PATH = Path(__file__).with_name("schema_pg.sql")
 
 # Bump when schema.sql or migration steps change. Tracked via PRAGMA user_version.
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 _ARTIFACT_COLUMNS = (
     "result_json",
@@ -79,6 +80,7 @@ _NEW_TABLES_SQL = (
         branch TEXT NOT NULL DEFAULT 'main',
         visibility TEXT NOT NULL DEFAULT 'unverified',
         connection_status TEXT NOT NULL DEFAULT 'pending',
+        deploy_target TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
@@ -99,7 +101,10 @@ def resolve_backend(db_path: Path | None = None) -> str:
     """Return "postgres" or "sqlite" without opening any connection.
 
     An explicit file path always means SQLite (offline tests, Demo Mode).
-    Otherwise MEDHA_DATABASE_URL selects Postgres when set.
+    Otherwise Settings.use_postgres decides: MEDHA_ENV=production with a
+    valid MEDHA_DATABASE_URL, or any env with explicit
+    MEDHA_DATABASE_BACKEND=postgres. A dotenv-inherited URL alone keeps
+    local development on SQLite (never hang on a remote pooler by accident).
     """
     if db_path is not None:
         return "sqlite"
@@ -192,6 +197,16 @@ class PostgresConnection:
 
 
 def _pg_connect() -> PostgresConnection:
+    return PostgresConnection(_pg_connect_raw())
+
+
+def _pg_connect_raw() -> Any:
+    """Open one brand-new Postgres connection (TLS handshake included).
+
+    Slow against hosted databases (measured ~2-3s per connect from a dev
+    laptop) — request paths must reuse connections via _pg_checkout()
+    instead of calling this per query.
+    """
     try:
         import psycopg
     except ImportError as exc:
@@ -200,15 +215,135 @@ def _pg_connect() -> PostgresConnection:
             "not installed (pip install psycopg[binary])."
         ) from exc
     dsn = normalize_dsn(get_settings().database_url)
-    conn = psycopg.connect(dsn, connect_timeout=10)
-    return PostgresConnection(conn)
+    return psycopg.connect(dsn, connect_timeout=10)
+
+
+# Persistent per-thread Postgres connections (zero new dependencies).
+#
+# Supabase-class hosts charge a full TLS + auth handshake per TCP connect,
+# so the old open-per-query lifecycle turned every trivial SELECT into
+# seconds. Each thread keeps one connection that is reused across requests;
+# uvicorn serves requests on one event-loop thread and repository work runs
+# on a small thread pool, so the total stays a handful of connections.
+_pg_local = threading.local()
+# Idle connections older than this are validated with SELECT 1 on checkout
+# (one cheap RTT) so a server-side idle timeout never fails a real query.
+# Actively-used connections skip validation entirely.
+_PG_IDLE_VALIDATE_SECONDS = 30.0
+
+
+def _pg_discard() -> None:
+    raw = getattr(_pg_local, "conn", None)
+    _pg_local.conn = None
+    _pg_local.last_use = 0.0
+    if raw is not None:
+        try:
+            raw.close()
+        except Exception:  # noqa: BLE001 - discard is best-effort
+            pass
+
+
+def _pg_checkout() -> Any:
+    """Return the calling thread's live Postgres connection."""
+    import time as _time
+
+    now = _time.monotonic()
+    raw = getattr(_pg_local, "conn", None)
+    if raw is not None:
+        try:
+            is_closed = bool(raw.closed)
+        except Exception:  # noqa: BLE001 - treat inspection failure as dead
+            is_closed = True
+        if not is_closed:
+            idle = now - float(getattr(_pg_local, "last_use", 0.0) or 0.0)
+            valid = True
+            if idle >= _PG_IDLE_VALIDATE_SECONDS:
+                try:
+                    with raw.cursor() as cur:
+                        cur.execute("SELECT 1")
+                    raw.commit()
+                except Exception:  # noqa: BLE001 - stale; reconnect below
+                    valid = False
+            if valid:
+                _pg_local.last_use = now
+                return raw
+        _pg_discard()
+    fresh = _pg_connect_raw()
+    _pg_local.conn = fresh
+    _pg_local.last_use = now
+    return fresh
+
+
+def _is_connection_failure(exc: BaseException) -> bool:
+    try:
+        import psycopg
+        import psycopg.errors as _pg_errors
+
+        _conn_errors = (
+            psycopg.OperationalError,
+            psycopg.InterfaceError,
+            _pg_errors.ConnectionFailure,
+            _pg_errors.ConnectionException,
+        )
+    except ImportError:
+        return False
+    return isinstance(exc, _conn_errors)
+
+
+class PooledPostgresConnection(PostgresConnection):
+    """Request-scoped handle over a persistent per-thread connection.
+
+    Same repository interface as PostgresConnection, except the underlying
+    connection is NOT closed on context exit — it returns to the thread
+    slot for the next request. A connection-level failure discards the
+    slot (next checkout reconnects) and re-raises, preserving the exact
+    fail-fast semantics callers already expect.
+    """
+
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        try:
+            return super().execute(sql, params)
+        except Exception as exc:  # noqa: BLE001 - inspect, then re-raise
+            if _is_connection_failure(exc):
+                _pg_discard()
+            raise
+
+    def commit(self) -> None:
+        try:
+            super().commit()
+        except Exception as exc:  # noqa: BLE001 - inspect, then re-raise
+            if _is_connection_failure(exc):
+                _pg_discard()
+            raise
+
+    def close(self) -> None:
+        # No-op: the thread owns the connection, not the request.
+        return None
+
+    def __enter__(self) -> PooledPostgresConnection:
+        _pg_local.depth = int(getattr(_pg_local, "depth", 0) or 0) + 1
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        try:
+            if exc_type is not None:
+                self.rollback()
+        finally:
+            _pg_local.depth = max(0, int(getattr(_pg_local, "depth", 1) or 1) - 1)
+            self.close()
 
 
 def get_connection(
     db_path: Path | None = None,
 ) -> sqlite3.Connection | PostgresConnection:
     if resolve_backend(db_path) == "postgres":
-        return _pg_connect()
+        if int(getattr(_pg_local, "depth", 0) or 0) > 0:
+            # Nested checkout inside an open pooled block: a dedicated
+            # short-lived connection preserves the old separate-transaction
+            # semantics instead of silently sharing one transaction.
+            return PostgresConnection(_pg_connect_raw())
+        # Pooled: reuses the thread's connection (no per-query handshake).
+        return PooledPostgresConnection(_pg_checkout())
     path = db_path or get_settings().database_path
     path.parent.mkdir(parents=True, exist_ok=True)
     # timeout=10s bounds lock waits; WAL + busy_timeout keep concurrent
@@ -275,6 +410,8 @@ _V8_TABLES_SQL = (
         ON jobs (repository, branch, seq)""",
     """CREATE INDEX IF NOT EXISTS idx_jobs_status
         ON jobs (status)""",
+    """CREATE INDEX IF NOT EXISTS idx_jobs_status_created
+        ON jobs (status, created_at)""",
     """CREATE TABLE IF NOT EXISTS commits (
         project_id TEXT NOT NULL,
         sha TEXT NOT NULL,
@@ -338,6 +475,48 @@ def _ensure_v6_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE proposals ADD COLUMN push_json TEXT")
 
 
+def _ensure_deploy_target_column(conn: sqlite3.Connection) -> None:
+    """Explicit deployment-target selection (v9): projects.deploy_target.
+
+    Idempotent: checks PRAGMA before ALTER, and normalizes stored
+    repository identities to lowercase so duplicate detection is stable.
+    Never deletes rows.
+    """
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+    except Exception:
+        return
+    if "deploy_target" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN deploy_target TEXT")
+    try:
+        conn.execute("UPDATE projects SET repository = lower(repository)")
+    except Exception:
+        pass
+
+
+def _ensure_perf_indexes(conn: sqlite3.Connection) -> None:
+    """Indexes on columns added by later migrations (project_id on the
+    deployments table). Runs AFTER _ensure_v6_columns so legacy databases
+    already have the columns; fresh databases also get them via schema.sql.
+    Idempotent."""
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS idx_deployments_project "
+        "ON deployments (project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_deployments_project_status "
+        "ON deployments (project_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_events_deployment "
+        "ON events (deployment_id)",
+        "CREATE INDEX IF NOT EXISTS idx_jobs_status_created "
+        "ON jobs (status, created_at)",
+    ):
+        try:
+            conn.execute(statement)
+        except Exception:
+            # Pre-jobs legacy DBs may lack the jobs table here; init_db's
+            # schema pass creates remaining indexes after _migrate.
+            pass
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Apply pending schema migrations. Idempotent and version-gated.
 
@@ -356,6 +535,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _ensure_v5_tables(conn)
     _ensure_v6_columns(conn)
     _ensure_v8_tables(conn)
+    _ensure_deploy_target_column(conn)
+    _ensure_perf_indexes(conn)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
@@ -410,6 +591,9 @@ def _init_postgres() -> str:
             ("deployments", "project_id", "TEXT"),
             ("proposals", "project_id", "TEXT"),
             ("proposals", "push_json", "TEXT"),
+            ("projects", "deploy_target", "TEXT"),
+            # Jobs ordering counter for databases created before seq_num.
+            ("jobs", "seq_num", "INTEGER NOT NULL DEFAULT 0"),
         ):
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}"
@@ -425,8 +609,10 @@ def init_db(db_path: Path | None = None) -> Path | str:
     """Create or upgrade the configured database deterministically.
 
     Repeat calls are safe. An explicit path always initializes SQLite;
-    otherwise the backend follows MEDHA_DATABASE_URL (Postgres) or falls
-    back to the SQLite file.
+    otherwise the backend follows Settings.use_postgres (production URL or
+    explicit local opt-in) or falls back to the SQLite file. Production
+    with a missing/invalid URL fails closed in lifespan before reaching
+    here; this function never silently substitutes SQLite for Postgres.
     """
     if resolve_backend(db_path) == "postgres":
         return _init_postgres()

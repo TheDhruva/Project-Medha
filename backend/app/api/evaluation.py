@@ -60,9 +60,17 @@ async def run_cnp(request: Request, subject: str = RequireSubject):
             status_code=429,
         )
     # CPU/file-bound eval runs off the event loop; request stays open but
-    # no longer head-of-line blocks health/SSE. Timeouts: none configured
-    # (deterministic CPU only, no network); rate limit above bounds abuse.
-    report = await asyncio.to_thread(run_cnp_evaluation)
+    # no longer head-of-line blocks health/SSE. Bounded with a 300s timeout
+    # so a stuck run returns 503 instead of hanging the client forever.
+    try:
+        async with asyncio.timeout(300):
+            report = await asyncio.to_thread(run_cnp_evaluation)
+    except TimeoutError:
+        return JSONResponse(
+            {"error": {"code": "EVAL_TIMEOUT", "message": "Evaluation run timed out.",
+                       "details": {}}},
+            status_code=503,
+        )
     return JSONResponse(report)
 
 
@@ -82,7 +90,15 @@ async def run_ceg(request: Request, subject: str = RequireSubject):
                        "details": {}}},
             status_code=429,
         )
-    report = await asyncio.to_thread(run_ceg_evaluation)
+    try:
+        async with asyncio.timeout(300):
+            report = await asyncio.to_thread(run_ceg_evaluation)
+    except TimeoutError:
+        return JSONResponse(
+            {"error": {"code": "EVAL_TIMEOUT", "message": "Evaluation run timed out.",
+                       "details": {}}},
+            status_code=503,
+        )
     return JSONResponse(report)
 
 

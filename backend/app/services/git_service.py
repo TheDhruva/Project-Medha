@@ -183,6 +183,47 @@ def ls_remote_sha(url: str, ref: str = "HEAD") -> str | None:
     return None
 
 
+def ls_remote_default_branch(url: str) -> str | None:
+    """Detect the remote default branch without cloning (bounded).
+
+    Parses `git ls-remote --symref <url> HEAD` for the `ref:
+    refs/heads/<branch>` symref line. Returns the branch name, or None
+    when it cannot be determined (unreachable, private, no git, or no
+    symref advertised). Never raises for network failures — callers fall
+    back to an explicit or conventional default.
+    """
+    try:
+        cleaned = validate_repository_url(url)
+    except RepositoryUrlError:
+        return None
+    if resolve_local_repo_path(cleaned) is not None:
+        return None
+    try:
+        _enforce_connection_boundary(cleaned)
+    except (GitAcquireError, RepositoryUrlError):
+        return None
+    if not _git_available():
+        return None
+    try:
+        out = _run_git(
+            ["ls-remote", "--symref", cleaned, "HEAD"],
+            timeout=_LSREMOTE_TIMEOUT_S,
+        )
+    except GitAcquireError:
+        return None
+    for line in out.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("ref:"):
+            continue
+        # Format: "ref: refs/heads/<branch>\tHEAD"
+        ref_part = stripped[len("ref:"):].strip().split()[0]
+        if ref_part.startswith("refs/heads/"):
+            candidate = ref_part[len("refs/heads/"):].strip()
+            if 0 < len(candidate) <= 120 and ".." not in candidate:
+                return candidate
+    return None
+
+
 def local_rev_parse(local: Path, sha: str) -> str:
     """Assert a commit exists in a local repository; return normalized SHA."""
     wanted = _require_full_sha(sha)

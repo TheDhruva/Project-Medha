@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,14 @@ class Settings(BaseSettings):
     )
     database_path: Path = Field(default=DEFAULT_DB_PATH, alias="MEDHA_DATABASE_PATH")
     database_url: str = Field(default="", alias="MEDHA_DATABASE_URL")
+    # Explicit Postgres opt-in for non-production environments.
+    # "" (default) / "auto" / "sqlite": SQLite unless MEDHA_ENV=production.
+    # "postgres": use MEDHA_DATABASE_URL when it is a valid Postgres DSN.
+    # A dotenv-inherited production URL must never hijack local runs (it
+    # hangs startup on unreachable poolers and spends production
+    # credentials), so development selects Postgres ONLY via this flag.
+    # Unknown values fail fast at Settings construction (all environments).
+    database_backend: str = Field(default="", alias="MEDHA_DATABASE_BACKEND")
     log_level: str = Field(default="INFO", alias="MEDHA_LOG_LEVEL")
     workflow_step_delay_seconds: float = Field(
         default=0.35,
@@ -43,6 +52,16 @@ class Settings(BaseSettings):
     docker_execute: bool = Field(default=False, alias="MEDHA_DOCKER_EXECUTE")
     docker_cleanup: bool = Field(default=True, alias="MEDHA_DOCKER_CLEANUP")
     max_verify_rounds: int = Field(default=3, alias="MEDHA_MAX_VERIFY_ROUNDS")
+    # Bounded in-process stage timeouts (seconds). These bound how long the
+    # pipeline *waits* for a stage; detached worker threads cannot be killed
+    # and their late results are dropped, never accepted after a timeout or
+    # cancellation. Clamped to [1, 3600] at use.
+    timeout_analyze_s: float = Field(default=120.0, alias="MEDHA_TIMEOUT_ANALYZE_S")
+    timeout_specialists_s: float = Field(default=30.0, alias="MEDHA_TIMEOUT_SPECIALISTS_S")
+    timeout_verify_s: float = Field(default=30.0, alias="MEDHA_TIMEOUT_VERIFY_S")
+    # Network-facing repository acquisition (clone/fetch) gets its own bound:
+    # same wait-not-kill semantics as the other stage timeouts.
+    timeout_acquire_s: float = Field(default=120.0, alias="MEDHA_TIMEOUT_ACQUIRE_S")
     executor_mode: str = Field(default="auto", alias="MEDHA_EXECUTOR_MODE")
     api_token: str = Field(default="", alias="MEDHA_API_TOKEN")
     # Demo/scenario engine: disabled by default. The deterministic DemoRunner
@@ -107,10 +126,29 @@ class Settings(BaseSettings):
             return "MEDHA_API_TOKEN must be configured in production."
         if not (self.database_url or "").strip():
             return "MEDHA_DATABASE_URL (pooled Postgres) must be configured in production."
+        if not is_postgres_dsn(self.database_url):
+            # A present-but-invalid URL must fail closed: falling back to
+            # the ephemeral SQLite file would silently lose history.
+            return (
+                "MEDHA_DATABASE_URL must be a valid postgresql:// DSN in "
+                "production (never silently fall back to SQLite)."
+            )
+        if self.database_backend.strip().lower() == "sqlite":
+            # Explicit contradiction: production requires Postgres, so an
+            # explicit sqlite request is refused instead of silently winning
+            # over the configured URL (or vice versa).
+            return (
+                "MEDHA_DATABASE_BACKEND must not be 'sqlite' in production."
+            )
         if (self.executor_mode or "auto").strip().lower() in {"real", "docker"}:
             return (
                 "MEDHA_EXECUTOR_MODE must not be 'real'/'docker' on the hosted "
                 "control plane (execution-disabled). Run the isolated builder separately."
+            )
+        if self.docker_execute:
+            return (
+                "MEDHA_DOCKER_EXECUTE must be 'false' on the hosted control "
+                "plane (execution-disabled)."
             )
         return None
 
@@ -134,12 +172,67 @@ class Settings(BaseSettings):
 
     @property
     def use_postgres(self) -> bool:
-        """True when MEDHA_DATABASE_URL selects a Postgres backend (Supabase).
+        """True when the Postgres backend is selected (Supabase in prod).
 
-        Empty/absent means SQLite. An explicit file path passed to
-        get_connection()/init_db() always means SQLite regardless of this.
+        Selection rules (ADR-029 as amended):
+        - Invalid/empty MEDHA_DATABASE_URL: always SQLite.
+        - MEDHA_ENV=production: a valid URL selects Postgres (missing or
+          invalid URLs are refused by hosted_security_error, never SQLite).
+        - Any other env: Postgres ONLY with explicit
+          MEDHA_DATABASE_BACKEND=postgres. A dotenv-inherited production URL
+          alone keeps SQLite, so local runs never hang on (or spend
+          credentials against) a remote pooler by accident.
+        An explicit file path passed to get_connection()/init_db() always
+        means SQLite regardless of this.
         """
-        return is_postgres_dsn(self.database_url)
+        if not is_postgres_dsn(self.database_url):
+            return False
+        if self._is_production:
+            return True
+        return self.database_backend.strip().lower() == "postgres"
+
+    @property
+    def _is_production(self) -> bool:
+        return (self.medha_env or "").strip().lower() == "production"
+
+    def database_url_source(self) -> str:
+        """Where the configured URL came from: "shell" | "file" | "unset".
+
+        "shell" = exported in the process environment (operator intent).
+        Anything else non-empty arrived via a dotenv file (or direct
+        construction) — implicit, never sufficient alone to select Postgres
+        outside production. Returns the source name only, never the value.
+        """
+        if os.environ.get("MEDHA_DATABASE_URL", "").strip():
+            return "shell"
+        if (self.database_url or "").strip():
+            return "file"
+        return "unset"
+
+    @property
+    def ignored_db_url(self) -> bool:
+        """True when a valid Postgres URL is configured but not used.
+
+        Development-only signal for the startup warning: the operator likely
+        pasted a production URL into a local .env. Production never ignores
+        a URL (it fails closed instead), so this is always False there.
+        """
+        return (
+            not self._is_production
+            and is_postgres_dsn(self.database_url)
+            and not self.use_postgres
+        )
+
+    @field_validator("database_backend")
+    @classmethod
+    def _check_database_backend(cls, value: str) -> str:
+        allowed = {"", "auto", "sqlite", "postgres"}
+        if (value or "").strip().lower() not in allowed:
+            raise ValueError(
+                "MEDHA_DATABASE_BACKEND must be one of "
+                "'postgres', 'sqlite', 'auto', or unset."
+            )
+        return value
 
 
 def is_postgres_dsn(value: str | None) -> bool:

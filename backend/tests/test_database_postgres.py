@@ -4,8 +4,10 @@ Offline-safe: everything here runs without a database except
 test_live_postgres_roundtrip, which is skip-guarded on MEDHA_DATABASE_URL
 and skips again when the server is unreachable.
 
-Live run (requires the secret in your shell, never committed):
+Live run (requires the secret in your shell, never committed, plus the
+local Postgres opt-in):
     MEDHA_DATABASE_URL=postgresql://postgres:<pw>@db.<ref>.supabase.co:5432/postgres \
+    MEDHA_DATABASE_BACKEND=postgres \
         .venv/Scripts/python.exe -m pytest tests/test_database_postgres.py -q
 """
 
@@ -81,6 +83,8 @@ def test_resolve_backend_explicit_path_always_sqlite(tmp_path, monkeypatch) -> N
         "MEDHA_DATABASE_URL",
         f"postgresql://postgres:pw@{SUPABASE_HOST}:5432/postgres",
     )
+    # Non-production selects Postgres only via explicit opt-in.
+    monkeypatch.setenv("MEDHA_DATABASE_BACKEND", "postgres")
     get_settings.cache_clear()
     try:
         assert resolve_backend(tmp_path / "x.db") == "sqlite"
@@ -105,6 +109,8 @@ def test_describe_db_redacts_postgres_password(monkeypatch) -> None:
         "MEDHA_DATABASE_URL",
         f"postgresql://postgres:Sup3rS3cret!@{SUPABASE_HOST}:5432/postgres",
     )
+    # Opt-in so describe_db reports the Postgres label in development.
+    monkeypatch.setenv("MEDHA_DATABASE_BACKEND", "postgres")
     get_settings.cache_clear()
     try:
         label = describe_db()
@@ -141,6 +147,11 @@ def test_live_postgres_roundtrip() -> None:
 
     get_settings.cache_clear()
     try:
+        if not get_settings().use_postgres:
+            pytest.skip(
+                "Live Postgres test needs MEDHA_DATABASE_BACKEND=postgres "
+                "locally (or MEDHA_ENV=production) — stray URLs stay SQLite."
+            )
         assert get_settings().use_postgres
         try:
             init_db()

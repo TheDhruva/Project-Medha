@@ -52,6 +52,7 @@ USER appuser
 # are always provided by the platform configuration, never baked in here).
 ENV MEDHA_ENV=production \
     MEDHA_DEBUG=false \
+    NEXT_TELEMETRY_DISABLED=1 \
     MEDHA_HOST=127.0.0.1 \
     MEDHA_BACKEND_HOST=127.0.0.1 \
     MEDHA_BACKEND_PORT=8000 \

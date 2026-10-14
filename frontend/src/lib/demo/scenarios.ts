@@ -1,16 +1,14 @@
 import type {
   AgentActivity,
   CegGraph,
-  ConstraintView,
-  CriticView,
   PipelineStage,
-  ScenarioId,
-  ScenarioMeta,
   StageId,
-  VerificationView,
 } from "./types";
 
-export const SCENARIOS: ScenarioMeta[] = [];
+// Live initializers for the real deployment flow (used by eventMapper and
+// DeploymentContext). The deterministic demo catalog, playback constants,
+// and scripted graphs were removed: SCENARIOS was [] and framesForScenario
+// always returned [], so nothing in product routes consumed them.
 
 export const STAGE_ORDER: StageId[] = [
   "PREFLIGHT",
@@ -112,51 +110,6 @@ export function emptyGraph(): CegGraph {
   return { nodes: [], edges: [] };
 }
 
-export function emptyVerification(): VerificationView {
-  return {
-    checks: [
-      { id: "schema", name: "Schema", status: "pending", message: "Not run" },
-      { id: "yaml", name: "YAML", status: "pending", message: "Not run" },
-      { id: "compose", name: "Compose", status: "pending", message: "Not run" },
-      {
-        id: "security",
-        name: "Security",
-        status: "pending",
-        message: "Not run",
-      },
-      {
-        id: "constraints",
-        name: "Constraints",
-        status: "pending",
-        message: "Not run",
-      },
-      { id: "health", name: "Health", status: "pending", message: "Not run" },
-    ],
-    passed: null,
-    summary: "Verification has not started.",
-  };
-}
-
-export function emptyCritic(): CriticView {
-  return {
-    score: 0,
-    breakdown: {
-      security: 0,
-      completeness: 0,
-      constraints: 0,
-      intentAlignment: 0,
-    },
-    recommendation: "PASS",
-    findings: [],
-  };
-}
-
-export function scenarioById(id: ScenarioId): ScenarioMeta {
-  const found = SCENARIOS.find((s) => s.id === id);
-  if (!found) throw new Error(`Unknown scenario (demo catalog removed): ${id}`);
-  return found;
-}
-
 export function setStages(
   pipeline: PipelineStage[],
   updates: Partial<Record<StageId, Partial<PipelineStage>>>,
@@ -165,186 +118,4 @@ export function setStages(
     const patch = updates[stage.id];
     return patch ? { ...stage, ...patch } : stage;
   });
-}
-
-export function setAgents(
-  agents: AgentActivity[],
-  updates: Partial<Record<AgentActivity["id"], Partial<AgentActivity>>>,
-): AgentActivity[] {
-  return agents.map((agent) => {
-    const patch = updates[agent.id];
-    return patch ? { ...agent, ...patch } : agent;
-  });
-}
-
-export const BASE_CONSTRAINTS_CLEAN: ConstraintView[] = [
-  {
-    id: "c_port_backend",
-    type: "PORT_CLAIM",
-    priority: "RESOURCE",
-    sourceAgent: "Docker Agent",
-    service: "backend",
-    summary: "Backend claims host port 8080",
-    detail: "Exclusive publish of container port 8080 → host 8080",
-    status: "accepted",
-    technical: { payload: { port: 8080, protocol: "tcp", exclusive: true } },
-  },
-  {
-    id: "c_port_proxy",
-    type: "PORT_CLAIM",
-    priority: "DEPENDENCY",
-    sourceAgent: "Nginx Agent",
-    service: "nginx",
-    summary: "Nginx publishes edge port 80",
-    detail: "Reverse proxy listens on host port 80",
-    status: "accepted",
-    technical: { payload: { port: 80, protocol: "tcp", exclusive: true } },
-  },
-  {
-    id: "c_sec_no_priv",
-    type: "SECURITY_POLICY",
-    priority: "SECURITY",
-    sourceAgent: "Security Agent",
-    summary: "Disallow privileged containers",
-    detail: "privileged=false required for all services",
-    status: "accepted",
-    technical: {
-      payload: { rule: "no_privileged", enforcement: "block", severity: "high" },
-    },
-  },
-  {
-    id: "c_order_db_be",
-    type: "EXEC_ORDER",
-    priority: "DEPENDENCY",
-    sourceAgent: "Docker Agent",
-    summary: "Database before backend",
-    detail: "backend starts only after database is healthy",
-    status: "accepted",
-    technical: { payload: { before: "database", after: "backend" } },
-  },
-];
-
-export function successGraph(variant: "all_ok" | "partial"): CegGraph {
-  if (variant === "all_ok") {
-    return {
-      nodes: [
-        {
-          id: "n_network",
-          service: "NETWORK",
-          action: "create_network",
-          status: "success",
-          timestamp: "08:41:12",
-          dependencies: [],
-          position: { x: 280, y: 0 },
-        },
-        {
-          id: "n_database",
-          service: "DATABASE",
-          action: "start_container",
-          status: "success",
-          timestamp: "08:41:14",
-          dependencies: ["n_network"],
-          position: { x: 80, y: 120 },
-        },
-        {
-          id: "n_analytics",
-          service: "ANALYTICS",
-          action: "start_container",
-          status: "success",
-          timestamp: "08:41:14",
-          dependencies: ["n_network"],
-          position: { x: 480, y: 120 },
-        },
-        {
-          id: "n_backend",
-          service: "BACKEND",
-          action: "start_container",
-          status: "success",
-          timestamp: "08:41:16",
-          dependencies: ["n_database"],
-          position: { x: 80, y: 250 },
-        },
-        {
-          id: "n_frontend",
-          service: "FRONTEND",
-          action: "start_container",
-          status: "success",
-          timestamp: "08:41:18",
-          dependencies: ["n_backend"],
-          position: { x: 80, y: 380 },
-        },
-      ],
-      edges: [
-        { id: "e1", source: "n_network", target: "n_database" },
-        { id: "e2", source: "n_network", target: "n_analytics" },
-        { id: "e3", source: "n_database", target: "n_backend" },
-        { id: "e4", source: "n_backend", target: "n_frontend" },
-      ],
-    };
-  }
-
-  return {
-    nodes: [
-      {
-        id: "n_network",
-        service: "NETWORK",
-        action: "create_network",
-        status: "preserved",
-        timestamp: "08:41:12",
-        dependencies: [],
-        preserved: true,
-        position: { x: 280, y: 0 },
-      },
-      {
-        id: "n_database",
-        service: "DATABASE",
-        action: "start_container",
-        status: "preserved",
-        timestamp: "08:41:14",
-        dependencies: ["n_network"],
-        preserved: true,
-        position: { x: 80, y: 120 },
-      },
-      {
-        id: "n_analytics",
-        service: "ANALYTICS",
-        action: "start_container",
-        status: "preserved",
-        timestamp: "08:41:14",
-        dependencies: ["n_network"],
-        preserved: true,
-        reason: "Causally independent of backend failure",
-        position: { x: 480, y: 120 },
-      },
-      {
-        id: "n_backend",
-        service: "BACKEND",
-        action: "start_container",
-        status: "failed",
-        timestamp: "08:41:16",
-        dependencies: ["n_database"],
-        reason: "Health check failed after start",
-        dependents: ["n_frontend"],
-        rollbackRequired: true,
-        position: { x: 80, y: 250 },
-      },
-      {
-        id: "n_frontend",
-        service: "FRONTEND",
-        action: "start_container",
-        status: "rolled_back",
-        timestamp: "08:41:19",
-        dependencies: ["n_backend"],
-        reason: "Dependent on failed backend",
-        rollbackRequired: true,
-        position: { x: 80, y: 380 },
-      },
-    ],
-    edges: [
-      { id: "e1", source: "n_network", target: "n_database" },
-      { id: "e2", source: "n_network", target: "n_analytics" },
-      { id: "e3", source: "n_database", target: "n_backend" },
-      { id: "e4", source: "n_backend", target: "n_frontend" },
-    ],
-  };
 }

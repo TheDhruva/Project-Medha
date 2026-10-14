@@ -172,9 +172,25 @@ const envLocation = existsSync(join(ROOT, ".env"))
   : "(root .env absent — shell env only)";
 const dbUrl = (process.env.MEDHA_DATABASE_URL || "").trim();
 const dbScheme = dbUrl.includes("://") ? dbUrl.split("://", 1)[0].toLowerCase() : "";
-const dbMode = ["postgres", "postgresql"].includes(dbScheme)
-  ? "postgres (MEDHA_DATABASE_URL set)"
-  : "sqlite (local default)";
+const dbBackend = (process.env.MEDHA_DATABASE_BACKEND || "").trim().toLowerCase();
+const dbEnv = (process.env.MEDHA_ENV || "development").trim().toLowerCase();
+// Mirrors Settings.use_postgres: production honors a valid URL; local
+// development stays on SQLite unless explicitly opted in, so a stray
+// production URL in a local .env can never hang startup on a pooler.
+const dbMode =
+  ["postgres", "postgresql"].includes(dbScheme) &&
+  (dbEnv === "production" || dbBackend === "postgres")
+    ? "postgres (explicitly selected)"
+    : "sqlite (local default)";
+if (
+  ["postgres", "postgresql"].includes(dbScheme) &&
+  dbMode.startsWith("sqlite")
+) {
+  console.log(
+    `[backend] MEDHA_DATABASE_URL is set but ignored (sqlite active). ` +
+      `Set MEDHA_DATABASE_BACKEND=postgres to use Postgres locally.`,
+  );
+}
 
 const uvicornArgs = [
   "-m",

@@ -45,6 +45,19 @@ describe("shared GET cache", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("deduplicates identical concurrent requests into one fetch", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ runs: [], total: 0, limit: 100, offset: 0 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await Promise.all([
+      fetchRunsList({ repository: "https://github.com/x/y", limit: 100 }),
+      fetchRunsList({ repository: "https://github.com/x/y", limit: 100 }),
+      fetchRunsList({ repository: "https://github.com/x/y", limit: 100 }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("fetchConstraintsArtifact caches repeat hydration reads", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({ constraints: [], negotiation: null }),

@@ -256,9 +256,28 @@ Return aggregated structured log lines (not raw Docker multiplex blobs by defaul
       "message": "Conflict resolved by RESOURCE priority",
       "is_demo": true
     }
+  ],
+  "agents": [
+    {
+      "id": "mediator",
+      "name": "Mediator",
+      "status": "complete",
+      "activity": "Constraint set accepted as proposed",
+      "lastEvent": "Constraint set accepted as proposed",
+      "durationMs": 12.4,
+      "startedAt": "2026-09-03T04:50:11Z",
+      "finishedAt": "2026-09-03T04:50:12Z",
+      "deps": ["docker", "nginx", "security"]
+    }
   ]
 }
 ```
+
+`agents` is the latest backend agent lifecycle snapshot (10 stable rows;
+`status` ∈ `idle|running|complete|failed|skipped|cancelled|timed_out`;
+`durationMs` measured server-side). `null` when no event carried a snapshot
+yet — the UI must render unknown/pending, never infer activity. No secrets,
+tokens, or repository contents appear in this surface.
 
 ---
 
@@ -455,9 +474,11 @@ no founder-edited global allowlist per project. All endpoints require the
 Clerk subject (or the legacy single-operator subject); all rows carry
 `owner_sub` and cross-owner access returns `404` (no existence oracle).
 
-- `POST /api/projects` `{name, repository, branch?}` — `repository` accepts
+- `POST /api/projects` `{repository, name?, branch?}` — `repository` accepts
   `owner/name` or a `github.com` URL (anything else → `400
-  NON_GITHUB_REPOSITORY` / `INVALID_REPOSITORY_REF`). Stores configuration
+  NON_GITHUB_REPOSITORY` / `INVALID_REPOSITORY_REF`). `name` defaults to the
+  repository name; `branch` defaults to the remote default branch
+  (`ls-remote --symref`, falling back to `main`). Stores configuration
   only (`pending`/`unverified`) — never credentials, never proof of access.
   Duplicate `(owner, repository)` → `409 PROJECT_EXISTS`. → `201` project.
 - `GET /api/projects` — caller's projects only. `GET /api/projects/{id}` —
@@ -468,7 +489,8 @@ Clerk subject (or the legacy single-operator subject); all rows carry
   unsupported (GitHub App required — not implemented) and stay unconnected.
 - `POST /api/projects/{id}/disconnect` — stops webhook routing and project
   runs (`disconnected`). `DELETE /api/projects/{id}` — removes the mapping;
-  run/proposal history is preserved but no longer routable.
+  run/proposal history is preserved but no longer routable. Deletion is
+  refused with `409 ACTIVE_RUNS` while a run is in flight.
 - `POST /api/projects/{id}/runs` `{intent?, target_revision? (40-hex),
   target_host?, target_port?}` — starts a real-mode analysis bound to the
   project (`connected` required, else `409 PROJECT_NOT_CONNECTED`).

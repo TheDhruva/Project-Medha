@@ -113,16 +113,37 @@ def load_cnp_cases() -> list[dict]:
     ]
 
 
+def _normalize_alternatives(raw_alts: object) -> list[dict]:
+    """Lift declared alternatives into Constraint.alternatives shape.
+
+    Legacy fixtures nest `alternatives` inside the payload as bare port
+    ints; the engine reads top-level dicts ({"port": n}). Normalize both.
+    """
+    if not isinstance(raw_alts, list):
+        return []
+    normalized: list[dict] = []
+    for alt in raw_alts:
+        if isinstance(alt, int):
+            normalized.append({"port": alt})
+        elif isinstance(alt, dict):
+            normalized.append(dict(alt))
+    return normalized
+
+
 def constraints_from_case(case: dict) -> list[Constraint]:
     out: list[Constraint] = []
     for raw in case["constraints"]:
+        payload = dict(raw["payload"])
+        alternatives = _normalize_alternatives(payload.pop("alternatives", []))
+        alternatives.extend(_normalize_alternatives(raw.get("alternatives")))
         out.append(
             Constraint(
                 constraint_id=raw["constraint_id"],
                 type=ConstraintType(raw["type"]),
                 priority=Priority(raw["priority"]),
                 source_agent=raw["source_agent"],
-                payload=raw["payload"],
+                payload=payload,
+                alternatives=alternatives,
                 status=ConstraintStatus(raw.get("status", "proposed")),
             )
         )

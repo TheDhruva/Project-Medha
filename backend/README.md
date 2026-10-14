@@ -4,36 +4,46 @@ FastAPI + SQLite + SSE backend for the Constraint-Negotiating Multi-Agent DevOps
 automation prototype (Phases 0–12).
 
 Real-mode pipeline: `PREFLIGHT → ANALYZE → AGENTS → NEGOTIATE (CNP) → VERIFY →
-EXECUTE → CEG / scoped ROLLBACK`. Demo Mode replays deterministic scenario
-fixtures through the same SSE/events contract.
+EXECUTE → CEG / scoped ROLLBACK`. Demo fixtures (`app/demo/*`) exist for
+isolated automated tests only and are unreachable from product routes
+(`POST /api/deploy` with `mode=demo` returns `410 DEMO_REMOVED`).
 
 ## Setup
 
 ```bash
+# Preferred: single command from the repository root (starts backend + frontend)
+npm run dev
+```
+
+Manual backend-only setup:
+
+```bash
 cd backend
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
+# Windows PowerShell:
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
 ## Run
 
 ```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000
 ```
 
 Health: http://127.0.0.1:8000/health
 
-Configuration is read from env vars (see `app/core/config.py`, e.g.
-`MEDHA_DATABASE_PATH`, `MEDHA_DOCKER_EXECUTE`). SQLite data lives at
+Configuration is read from the repository-root `.env` (canonical local config,
+see root `.env.example`) with `backend/.env` as fallback (see
+`app/core/config.py`, e.g. `MEDHA_DATABASE_PATH`, `MEDHA_DOCKER_EXECUTE`). SQLite data lives at
 `backend/data/medha.db` by default and is initialized/upgraded automatically on startup
 (`init_db`; schema versioning via `PRAGMA user_version`). No API keys required.
 
 ## API surface
 
-- `POST /api/deploy` — create a deployment (`mode=demo|real`); real mode is
-  admission-controlled by a single-flight lock (`409 DEPLOYMENT_BUSY`).
+- `POST /api/deploy` — create a deployment (`mode=real`; `mode=demo` returns
+  `410 DEMO_REMOVED`); real mode is admission-controlled by a single-flight
+  lock (`409 DEPLOYMENT_BUSY`).
 - `GET /api/deploy/{id}` — deployment record incl. final `result`.
 - `GET /api/deploy/{id}/events` — SSE stream; persisted events are replayed
   first, then live events; stream ends at the terminal event.
@@ -56,7 +66,7 @@ cd backend
 pytest -q
 ```
 
-Covers demo + real-mode pipelines, CNP/CEG, verifier/critic, deploy lock,
+Covers fixture + real-mode pipelines, CNP/CEG, verifier/critic, deploy lock,
 database init/migrations, and SSE terminal replay. Docker-mutating tests are
 skipped when the daemon is unavailable (marked `docker`).
 
@@ -70,13 +80,19 @@ a full chain (git → diff → symbols → edges → risk → requirements → s
 - Local-only deployment targets (`localhost`/`127.0.0.1`).
 - One real deployment at a time (in-process lock).
 - Docker mutation is opt-in (`MEDHA_DOCKER_EXECUTE=false` default).
-- Deterministic-first: CNP/verifier/critic are rule-based; no LLM calls.
+- Deterministic-first: CNP/verifier/critic are rule-based; AI providers
+  (Groq/Groq-fallback Gemini) are optional, advisory-only, schema-validated,
+  and disabled by default (`MEDHA_AI_ENABLED=false`).
 - Phase 2 Change Intelligence analyses **local git repositories only**
   (remote URLs → `NOT_LOCAL_REPOSITORY`); static analysis, repo code never runs.
 - Push-triggered remote analysis (Phase 2b) uses verified push-payload file
   lists confirmed against the exact-SHA checkout (`source_method=webhook_push`).
-- PostgreSQL (Supabase) is the persistent backend when `MEDHA_DATABASE_URL`
-  is configured (schema `app/database/schema_pg.sql`, idempotent `init_db`;
-  use the pooled 6543 host on hosted services). SQLite remains the
-  zero-config fallback. No Redis/Kubernetes in V1.
-- Private GitHub repositories are unsupported pending a GitHub App (ADR-036).
+- PostgreSQL (Supabase) is the persistent backend on Render
+  (`MEDHA_ENV=production` + `MEDHA_DATABASE_URL`; missing/invalid refuses to
+  boot — never silent SQLite). Local development stays on SQLite unless
+  explicitly opted in (`MEDHA_DATABASE_BACKEND=postgres`), so a stray
+  production URL in a local `.env` is ignored with a warning instead of
+  hanging startup. Schema `app/database/schema_pg.sql`, idempotent `init_db`;
+  use the pooled 6543 host on hosted services. No Redis/Kubernetes in V1.
+- Private GitHub repositories via a configured GitHub App (`GITHUB_APP_ID` +
+  `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, ADR-036).

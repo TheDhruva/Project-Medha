@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+from app.core.events import utc_now_iso
 
 
 class ConstraintType(str, Enum):
@@ -71,6 +68,11 @@ class InferredStack(BaseModel):
     env_names: list[str] = Field(default_factory=list)
     health_hints: list[str] = Field(default_factory=list)
     app_candidates: list[str] = Field(default_factory=list)
+    # Structured discovery (centralized app_discovery): candidate evidence,
+    # relationship (none|single|fullstack|monorepo), and the effective target.
+    app_candidate_details: list[dict] = Field(default_factory=list)
+    app_relationship: str | None = None
+    selected_target: str | None = None
     ci_configs: list[str] = Field(default_factory=list)
     test_suites: list[str] = Field(default_factory=list)
     auth_hints: list[str] = Field(default_factory=list)
@@ -92,7 +94,7 @@ class ApplicationProfile(BaseModel):
     target_host: str
     target_port: int
     inferred_stack: InferredStack
-    created_at: str = Field(default_factory=_utc_now)
+    created_at: str = Field(default_factory=utc_now_iso)
     is_demo: bool = False
 
     def to_public(self) -> dict[str, Any]:
@@ -124,7 +126,14 @@ class Constraint(BaseModel):
         if self.type == ConstraintType.SECURITY_POLICY:
             return f"policy:{p.get('rule')}"
         if self.type == ConstraintType.EXEC_ORDER:
-            return f"order:{p.get('before')}->{p.get('after')}"
+            # Direction-independent key so reversed pairs (A->B vs B->A)
+            # group into one conflict; chained pairs (A->B, B->C) stay
+            # separate because their endpoint sets differ.
+            before, after = p.get("before"), p.get("after")
+            if before and after:
+                first, second = sorted((str(before), str(after)))
+                return f"order:{first}<->{second}"
+            return f"order:{before}->{after}"
         return f"{self.type.value}:{self.constraint_id}"
 
     def to_ui(self) -> dict[str, Any]:
@@ -170,7 +179,7 @@ class ConflictRecord(BaseModel):
 
 class DecisionRecord(BaseModel):
     conflict_id: str
-    method: str  # priority | alternative | deterministic_tiebreak
+    method: str  # priority | alternative | deterministic_tiebreak | infeasible
     winner_ids: list[str] = Field(default_factory=list)
     loser_ids: list[str] = Field(default_factory=list)
     rationale: str
@@ -179,12 +188,17 @@ class DecisionRecord(BaseModel):
 
 class NegotiationResult(BaseModel):
     deployment_id: str
-    status: str  # pending | resolved | failed | exhausted
+    # resolved: clean set · exhausted: bounded rounds hit with no feasible
+    #   solution (fail closed) · invalid: no valid constraints to negotiate
+    #   (fail closed) · pending: negotiation not started yet.
+    status: str  # pending | resolved | exhausted | invalid
     rounds_used: int = 0
     max_rounds: int = 3
     conflicts: list[ConflictRecord] = Field(default_factory=list)
     decisions: list[DecisionRecord] = Field(default_factory=list)
     final_constraints: list[Constraint] = Field(default_factory=list)
+    # Malformed constraints dropped by validation (ids only, never payloads).
+    dropped_constraint_ids: list[str] = Field(default_factory=list)
     is_demo: bool = False
 
     def to_ui(self) -> dict[str, Any]:
@@ -217,9 +231,11 @@ class NegotiationResult(BaseModel):
                 f"status={self.status}",
                 f"conflicts={len(self.conflicts)}",
                 f"methods={methods}",
+                f"dropped={len(self.dropped_constraint_ids)}",
             ],
             "conflicts_resolved": resolved,
             "resolution_methods": methods,
+            "droppedConstraintIds": list(self.dropped_constraint_ids),
             "is_demo": self.is_demo,
         }
 

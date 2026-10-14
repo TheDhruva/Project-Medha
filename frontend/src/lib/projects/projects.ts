@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createDeployment,
   fetchProjects,
@@ -29,6 +29,11 @@ export interface ProjectSummary {
   legacy: boolean;
   repositoryUrl: string;
   name: string;
+  /** Owner/name identity (canonical projects); null for legacy groups. */
+  repoOwner: string | null;
+  repoName: string | null;
+  /** Watched branch (canonical projects); null for legacy groups. */
+  branch: string | null;
   totalRuns: number;
   latest: RunSummary | null;
   lastActivity: string | null;
@@ -42,6 +47,51 @@ export interface ProjectSummary {
 
 export function projectIdForRepo(repositoryUrl: string): string {
   return encodeURIComponent(repositoryUrl);
+}
+
+/**
+ * Canonical `owner/name` key for a GitHub reference (lowercased).
+ * Handles `owner/name`, https/http github URLs (.git, trailing slash,
+ * query/fragment, tree/blob suffixes), www host, and scp-like
+ * `git@github.com:owner/repo.git`. Null when not recognizable — used only
+ * to collapse display groups, never as authorization.
+ */
+export function canonicalRepoKey(url: string | null | undefined): string | null {
+  if (url == null || typeof url !== "string") return null;
+  const v = url.trim();
+  if (!v) return null;
+  if (!v.includes("://")) {
+    const scp = /^(?:[\w.\-]+@)?([\w.\-]+):(.+)$/.exec(v);
+    if (scp) {
+      const host = (scp[1] ?? "").toLowerCase().replace(/\.+$/, "");
+      if (host !== "github.com" && host !== "www.github.com") return null;
+      const path = (scp[2] ?? "").split("?")[0].split("#")[0].replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/i, "");
+      const parts = path.split("/").filter(Boolean);
+      if (parts.length !== 2) return null;
+      if (!/^[\w.\- ]+$/.test(parts[0]!) || !/^[\w.\-]+$/.test(parts[1]!)) return null;
+      return `${parts[0]!.trim().toLowerCase()}/${parts[1]!.trim().toLowerCase()}`;
+    }
+    if (v.includes("@") || v.includes("\\") || v.includes(" ")) return null;
+    const bare = v.replace(/\/+$/, "").replace(/\.git$/i, "");
+    const parts = bare.split("/").filter(Boolean);
+    if (parts.length !== 2) return null;
+    if (!/^[\w.\-]+$/.test(parts[0]!) || !/^[\w.\-]+$/.test(parts[1]!)) return null;
+    return `${parts[0]!.toLowerCase()}/${parts[1]!.toLowerCase()}`;
+  }
+  try {
+    const u = new URL(v);
+    const host = u.hostname.toLowerCase().replace(/\.+$/, "");
+    if (host !== "github.com" && host !== "www.github.com") return null;
+    const segs = u.pathname.split("/").filter((s) => s && s !== "." && s !== "..");
+    if (segs.length < 2) return null;
+    const owner = segs[0]!.trim();
+    const name = segs[1]!.trim().replace(/\.git$/i, "");
+    if (!owner || !name) return null;
+    if (!/^[\w.\-]+$/.test(owner) || !/^[\w.\-]+$/.test(name)) return null;
+    return `${owner.toLowerCase()}/${name.toLowerCase()}`;
+  } catch {
+    return null;
+  }
 }
 
 export function repoForProjectId(id: string): string | null {
@@ -71,7 +121,14 @@ function summarize(
   repositoryUrl: string,
   name: string,
   list: RunSummary[],
-  extra?: { projectId?: string | null; connectionStatus?: string | null; legacy?: boolean },
+  extra?: {
+    projectId?: string | null;
+    connectionStatus?: string | null;
+    legacy?: boolean;
+    repoOwner?: string | null;
+    repoName?: string | null;
+    branch?: string | null;
+  },
 ): ProjectSummary {
   const sorted = [...list].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   const latest = sorted[0] ?? null;
@@ -97,6 +154,9 @@ function summarize(
     legacy: extra?.legacy ?? false,
     repositoryUrl,
     name,
+    repoOwner: extra?.repoOwner ?? null,
+    repoName: extra?.repoName ?? null,
+    branch: extra?.branch ?? null,
     totalRuns: sorted.length,
     latest,
     lastActivity: latest?.updated_at ?? null,
@@ -109,30 +169,67 @@ function summarize(
 }
 
 export function deriveProjects(runs: RunSummary[], projects?: Project[]): ProjectSummary[] {
+  // Demo/simulated runs are excluded from the Projects experience: demo mode
+  // was removed from the product, and simulated executions must never render
+  // as project state. Persisted demo rows stay in the database untouched.
+  const real = runs.filter((r) => !r.is_demo);
   const out: ProjectSummary[] = [];
   const claimed = new Set<string>();
+  const buckets = new Map<string, RunSummary[]>();
+  const canonicalByKey = new Map<string, string>();
   for (const p of projects ?? []) {
-    const mine = runs
+    const key = (p.repository || "").trim().toLowerCase()
+      || canonicalRepoKey(p.canonical_url);
+    if (key) canonicalByKey.set(key, p.project_id);
+  }
+  for (const p of projects ?? []) {
+    const mine = real
       .filter((r) => r.project_id === p.project_id)
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     for (const r of mine) claimed.add(r.deployment_id);
+    buckets.set(p.project_id, [...mine]);
+  }
+  // Unclaimed runs whose canonical identity matches a known project belong
+  // to it for display (legacy /api/deploy rows recorded before project
+  // routing, or `.git`/casing URL variants). This collapses the duplicate
+  // cards without touching stored rows; ownership stays server-enforced.
+  const orphan: RunSummary[] = [];
+  for (const run of real) {
+    if (claimed.has(run.deployment_id)) continue;
+    const key = canonicalRepoKey(run.repository_url);
+    const owner = key ? canonicalByKey.get(key) : undefined;
+    if (owner && buckets.has(owner)) {
+      buckets.get(owner)!.push(run);
+      claimed.add(run.deployment_id);
+    } else {
+      orphan.push(run);
+    }
+  }
+  for (const p of projects ?? []) {
+    const mine = (buckets.get(p.project_id) ?? [])
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     out.push(
       summarize(p.project_id, p.canonical_url, p.name, mine, {
         projectId: p.project_id,
         connectionStatus: p.connection_status,
+        repoOwner: p.repo_owner,
+        repoName: p.repo_name,
+        branch: p.branch,
       }),
     );
   }
-  // Legacy compatibility: runs without a project record group by exact URL.
-  const byRepo = new Map<string, RunSummary[]>();
-  for (const run of runs) {
-    if (claimed.has(run.deployment_id)) continue;
-    const key = (run.repository_url || "unknown").trim() || "unknown";
-    const list = byRepo.get(key);
-    if (list) list.push(run);
-    else byRepo.set(key, [run]);
+  // Legacy compatibility: real runs without a project record group by
+  // canonical identity (so `.git`/casing variants share one card), else by
+  // exact URL. Demo-only leftovers never surface as projects.
+  const byRepo = new Map<string, { url: string; list: RunSummary[] }>();
+  for (const run of orphan) {
+    const raw = (run.repository_url || "unknown").trim() || "unknown";
+    const key = canonicalRepoKey(raw) ?? `url:${raw}`;
+    const entry = byRepo.get(key);
+    if (entry) entry.list.push(run);
+    else byRepo.set(key, { url: raw, list: [run] });
   }
-  for (const [repositoryUrl, list] of byRepo) {
+  for (const { url: repositoryUrl, list } of byRepo.values()) {
     out.push(
       summarize(projectIdForRepo(repositoryUrl), repositoryUrl, shortNameForRepo(repositoryUrl), list, {
         legacy: true,
@@ -271,6 +368,34 @@ export function filterProjects(
   });
 }
 
+/** Short 7-char commit SHA for display; null when absent or malformed. */
+export function shortSha(rev: string | null | undefined): string | null {
+  if (!rev) return null;
+  const candidate = rev.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(candidate)) return null;
+  return candidate.slice(0, 7);
+}
+
+/**
+ * Human-readable connection state for cards with no runs yet. Run state
+ * always takes precedence once runs exist — connection, analysis, and
+ * deployment health are distinct and never conflated.
+ */
+export function connectionLabel(status: string | null): string {
+  switch ((status ?? "").toLowerCase()) {
+    case "connected":
+      return "Connected · no runs yet";
+    case "pending":
+      return "Connection pending verification";
+    case "failed":
+      return "Connection failed — verify the repository";
+    case "disconnected":
+      return "Disconnected";
+    default:
+      return "No runs yet";
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Hook: live project list backed by /api/deploys                       */
 /* ------------------------------------------------------------------ */
@@ -282,15 +407,19 @@ export interface CreateProjectInput {
   intent?: string;
 }
 
-export function useProjects(limit = 200) {
+export function useProjects(limit = 200, pollIntervalMs = 8000) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [backendReachable, setBackendReachable] = useState(true);
+  const inFlight = useRef(false);
 
   const load = useCallback(async () => {
+    // Guard against overlapping polls (interval + manual refresh).
+    if (inFlight.current) return;
+    inFlight.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -309,6 +438,7 @@ export function useProjects(limit = 200) {
       // error without wiping the visible grid (fresh mounts start empty).
     } finally {
       setLoading(false);
+      inFlight.current = false;
     }
   }, [limit]);
 
@@ -317,6 +447,20 @@ export function useProjects(limit = 200) {
   }, [load]);
 
   const summaries = useMemo(() => deriveProjects(runs, projects), [runs, projects]);
+  const hasRunning = useMemo(
+    () => summaries.some((p) => p.latest != null && isRunningStatus(p.latest.status)),
+    [summaries],
+  );
+
+  // Efficient polling with cleanup: only while a run is genuinely in
+  // flight, so idle grids make zero background requests.
+  useEffect(() => {
+    if (!hasRunning) return;
+    const timer = window.setInterval(() => {
+      void load();
+    }, pollIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [hasRunning, load, pollIntervalMs]);
 
   const createProject = useCallback(
     async (input: CreateProjectInput): Promise<string> => {

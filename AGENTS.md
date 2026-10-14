@@ -31,7 +31,7 @@ Priority order: **WORKING > CLEVER**, **SIMPLE > OVER-ENGINEERED**, **DETERMINIS
 17. **Avoid unnecessary dependencies.** Every new package needs a concrete V1 reason.
 18. **Avoid unnecessary infrastructure.** One FastAPI process + one Next.js app + local Docker is enough for V1.
 19. **No Redis in V1.** Use in-process structures / SQLite for coordination and events.
-20. **No PostgreSQL in V1.** SQLite only.
+20. **SQLite by default; Supabase Postgres only via `MEDHA_DATABASE_URL` (ADR-029).** No other database servers in V1.
 21. **No Kubernetes in V1.**
 22. **No DNS automation in V1.**
 23. **No CI/CD automation in V1.**

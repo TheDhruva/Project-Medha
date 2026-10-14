@@ -19,8 +19,8 @@ Ship a demonstrable, laptop-friendly prototype that proves:
 | Area | Notes |
 |------|--------|
 | Bright Mode web dashboard | Next.js + TypeScript + Tailwind |
-| Repository URL input | Real mode later; demo may use fixtures |
-| Demo Mode | Deterministic offline scenarios |
+| Repository URL input + Connect GitHub repo | Real pipeline; per-owner project connections |
+| Demo fixtures (test-only) | Deterministic fixtures for isolated tests; product demo path removed (`410 DEMO_REMOVED`, ADR demo-removal) |
 | Host preflight | Docker/git/host checks |
 | Git repository analysis | Shallow clone + manifests |
 | Manifest-based stack inference | Compose/Dockerfile/package manifests |
@@ -32,7 +32,7 @@ Ship a demonstrable, laptop-friendly prototype that proves:
 | Docker execution | Local Docker **CLI** (allowlisted verbs, MEDHA-labelled resources; the `docker` PyPI SDK is not used) |
 | Causal Execution Graph | Nodes + dependency edges |
 | Scoped rollback | Dependency-aware; preserve independents |
-| SQLite persistence | Single-file DB |
+| SQLite default + Supabase Postgres | SQLite single-file DB; Postgres when `MEDHA_DATABASE_URL` is set (ADR-029) |
 | REST API | Deployment lifecycle |
 | SSE live events | Per-deployment stream |
 | Local Docker host | Only target |
@@ -52,12 +52,12 @@ Ship a demonstrable, laptop-friendly prototype that proves:
 | AWS / GCP / Azure deployment | Local-only V1 |
 | Remote SSH deployment | Local Docker only (ADR-009) |
 | Multi-host / multi-cloud | Complexity / demo risk |
-| Multi-user concurrency | Single-operator prototype |
-| PostgreSQL | SQLite sufficient (ADR-001) |
+| Multi-user concurrency | Per-owner projects; one real deployment at a time (single-flight lock) |
+| Databases other than SQLite / Supabase-via-URL | Supabase Postgres via `MEDHA_DATABASE_URL` only (ADR-029) |
 | Redis | In-process bus (ADR-002) |
 | Kafka / RabbitMQ / Celery | No worker fleet |
 | Unnecessary microservices | Monolith process preferred |
-| Authentication / multi-tenant IAM | Not required for local demo |
+| Authentication / IAM beyond Clerk + project ownership | Clerk session JWTs + per-owner projects (current); no other IAM |
 | Sending entire repositories to LLMs | Manifest-focused analysis (ADR-006) |
 
 Do **not** introduce these technologies unless an ADR explicitly changes V1 scope.
@@ -71,7 +71,7 @@ These are not optional polish:
 1. **CNP** — typed constraints + priority resolution + bounded mediation.
 2. **CEG** — causal nodes for execution + dependency-aware rollback.
 3. **Explainability** — UI shows decisions/events, not fake CoT.
-4. **Demo Mode** — offline deterministic demonstration path.
+4. **Demo fixtures** — deterministic test-only fixtures (product demo path removed).
 
 ---
 
@@ -105,7 +105,7 @@ These are not optional polish:
 
 A reviewer can:
 
-1. Run Demo Mode offline through all five scenarios.
+1. Run the deterministic fixture regression (`pytest backend/tests/test_demo_scenarios.py`) — the product demo path is removed.
 2. See CNP conflict resolution explained in the UI.
 3. See a CEG visualization and a scoped rollback on partial failure.
 4. (If Docker available) run one real local deployment path.

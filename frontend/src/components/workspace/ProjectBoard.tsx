@@ -8,8 +8,8 @@ import { MedhaFace, faceStateFromRun } from "@/components/medha/MedhaFace";
 import { Badge, Breadcrumbs, EmptyState, ErrorBox, Panel, Skeleton } from "@/components/ui/primitives";
 import { ExecutionModeBadge } from "@/components/ui/Section";
 import {
-  deriveAgentsFromLogs,
   derivePipeline,
+  resolveAgents,
   summarizeVerification,
   useProjectData,
 } from "@/lib/projects/useProjectData";
@@ -47,7 +47,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
     [hydration],
   );
   const agents = useMemo(
-    () => (hydration ? deriveAgentsFromLogs(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : []),
+    () => (hydration ? resolveAgents(hydration, selected?.current_stage ?? null, selected?.status ?? null).agents : []),
     [hydration, selected],
   );
   const pipeline = useMemo(
@@ -73,6 +73,10 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
     }
     return items;
   }, [selected, verification, conflicts, hydration]);
+  const needsTarget = useMemo(
+    () => (selected?.error_summary ?? "").toLowerCase().includes("deployment target"),
+    [selected],
+  );
 
   if (!repo) {
     return (
@@ -170,6 +174,13 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                       <div className="flex gap-2"><dt className="w-24 shrink-0">Stage</dt><dd className="text-medha-text">{selected.current_stage ?? "none reported"}</dd></div>
                       <div className="flex gap-2"><dt className="w-24 shrink-0">Mode</dt><dd className="text-medha-text">{hydration?.executionMode ?? selected.mode}{selected.is_demo ? " · DEMO" : ""}</dd></div>
                     </dl>
+                    {needsTarget ? (
+                      <p className="mt-2">
+                        <Link href={`/projects/${projectId}/settings`} className="rounded font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
+                          Choose a deployment target in project settings →
+                        </Link>
+                      </p>
+                    ) : null}
                   </details>
                 ) : null}
               </div>

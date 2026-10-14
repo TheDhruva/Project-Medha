@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from typing import Any, Callable
 
@@ -16,12 +17,14 @@ from app.agents.preflight import run_preflight
 from app.agents.security_agent import run_security_agent
 from app.agents.verifier import run_verifier
 from app.cnp.engine import detect_conflicts, run_cnp
+from app.core import run_control
 from app.core.config import get_settings
 from app.core.deploy_lock import release_real_deploy, try_acquire_real_deploy
 from app.core.enums import DeploymentStatus, EventType, StageId
 from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
 from app.database.repositories import DeploymentRepository
+from app.workflow.stages import StageTracker
 from app.execution import docker_ops
 from app.execution.executor import choose_executor
 from app.execution.plan_builder import build_ceg_from_plan, build_execution_plan
@@ -111,11 +114,99 @@ def _ai_rollup(notes: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _clamp_timeout(value: float, default: float) -> float:
+    """Clamp a configured stage timeout to [1, 3600] seconds."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed != parsed or parsed == float("inf") or parsed == float("-inf"):
+        return default
+    return max(1.0, min(parsed, 3600.0))
+
+
 class PlanningPipeline:
     """Phases 4–11 real path (local only; Docker mutate opt-in)."""
 
     def __init__(self, repo: DeploymentRepository | None = None) -> None:
         self.repo = repo or DeploymentRepository()
+        # Per-run observability: real agent lifecycle + measured stage
+        # timings. One pipeline instance serves one run.
+        self.tracker = StageTracker()
+        self.stage_timings: dict[str, float] = {}
+        self._pipeline_t0 = 0.0
+
+    # -- cancellation + terminal handling ------------------------------------
+
+    def _cancel_observed(self, deployment_id: str) -> bool:
+        """True when the owner cancelled (flag) or the record is cancelled."""
+        if run_control.cancel_requested(deployment_id):
+            return True
+        try:
+            record = self.repo.get(deployment_id)
+            return record is not None and record.status == DeploymentStatus.CANCELLED
+        except Exception:  # noqa: BLE001 - a failed read must not mask work
+            return False
+
+    def _current_status(self, deployment_id: str) -> str | None:
+        try:
+            record = self.repo.get(deployment_id)
+            return record.status.value if record is not None else None
+        except Exception:  # noqa: BLE001 - terminal guards degrade to proceed
+            return None
+
+    async def _note_cancelled(self, deployment_id: str, where: str) -> None:
+        """Record pipeline-observed cancellation and emit one terminal event.
+
+        Idempotent: the cancel endpoint usually already set CANCELLED and
+        emitted; `claim_terminal` guarantees exactly one terminal event wins.
+        """
+        self.repo.update_status(
+            deployment_id,
+            status=DeploymentStatus.CANCELLED,
+            current_stage=StageId.COMPLETE.value,
+            explain_simple=(
+                f"Deployment cancelled during {where}; remaining stages skipped."
+            ),
+            explain_technical=f"cancel.observed={where}",
+            updated_at=utc_now_iso(),
+            allowed_from={
+                DeploymentStatus.STARTED.value,
+                DeploymentStatus.RUNNING.value,
+                DeploymentStatus.QUEUED.value,
+                DeploymentStatus.AWAITING_APPROVAL.value,
+            },
+        )
+        self.tracker.cancel_remaining()
+        if run_control.claim_terminal(deployment_id):
+            await self._emit(
+                deployment_id,
+                EventType.DEPLOYMENT_CANCELLED,
+                f"Deployment cancelled during {where}; remaining stages skipped.",
+                stage=StageId.COMPLETE.value,
+                status=DeploymentStatus.CANCELLED.value,
+                metadata={
+                    "simple": "The owner cancelled this run; no further stages started.",
+                    "technical": f"cancel.observed={where}",
+                },
+                include_agents=True,
+            )
+
+    def _record_timing(self, name: str, elapsed_s: float) -> None:
+        try:
+            self.stage_timings[name] = round(
+                self.stage_timings.get(name, 0.0) + elapsed_s * 1000.0, 1
+            )
+        except Exception:  # noqa: BLE001 - instrumentation never breaks runs
+            pass
+
+    def _result_timings(self) -> dict[str, Any]:
+        timings = dict(self.stage_timings)
+        if self._pipeline_t0:
+            timings["totalMs"] = round(
+                (time.perf_counter() - self._pipeline_t0) * 1000.0, 1
+            )
+        return timings
 
     async def run(
         self,
@@ -146,6 +237,10 @@ class PlanningPipeline:
             return
 
         pipeline_t0 = time.perf_counter()
+        self._pipeline_t0 = pipeline_t0
+        self.tracker = StageTracker()
+        self.stage_timings = {}
+        run_control.clear_run(deployment_id)
         # One shared HTTP client for all AI assists in this run (keep-alive
         # reuse instead of a new TCP/TLS pool per assist). Closed in finally.
         try:
@@ -179,13 +274,19 @@ class PlanningPipeline:
             )
 
             is_remote = resolve_local_repo_path(record.repository_url) is None
+            await self._agent_start(
+                deployment_id, "preflight", "Checking host prerequisites.")
             preflight = run_preflight(
                 require_git_for_remote=True,
                 is_remote=is_remote,
                 target_port=record.target_port,
                 require_docker_for_execute=bool(settings.docker_execute),
             )
-            await self._agent_events(deployment_id, "preflight", preflight.summary, delay)
+            await self._agent_done(
+                deployment_id, "preflight", preflight.summary, ok=preflight.ok)
+            if self._cancel_observed(deployment_id):
+                await self._note_cancelled(deployment_id, "preflight")
+                return
             if not preflight.ok:
                 raise RuntimeError(preflight.summary)
 
@@ -321,30 +422,132 @@ class PlanningPipeline:
             ref_sha = resolved_sha
             from app.core.perf import stage as _stage_timer
 
-            with _stage_timer("acquire", deployment_id=deployment_id):
-                acquisition = await asyncio.to_thread(
-                    acquire_repository,
-                    deployment_id,
-                    record.repository_url,
-                    ref_sha=ref_sha,
-                    token_env=git_auth_env or None,
-                )
+            with _stage_timer("acquire", deployment_id=deployment_id) as acquire_timer:
+                try:
+                    # Bounded wait on network-facing acquisition (clone/fetch):
+                    # a timeout cancels the wait, not the detached thread,
+                    # whose late result is dropped — never accepted after this.
+                    async with asyncio.timeout(
+                        _clamp_timeout(settings.timeout_acquire_s, 120.0)
+                    ):
+                        acquisition = await asyncio.to_thread(
+                            acquire_repository,
+                            deployment_id,
+                            record.repository_url,
+                            ref_sha=ref_sha,
+                            token_env=git_auth_env or None,
+                        )
+                except TimeoutError:
+                    # __exit__ has not run yet, so elapsed is unset — measure
+                    # from t0 directly for an honest timeout duration.
+                    self._record_timing(
+                        "acquire", time.perf_counter() - acquire_timer.t0
+                    )
+                    await self._fail(
+                        deployment_id,
+                        "Repository acquisition timed out; the run fails closed.",
+                        technical="TIMEOUT:acquire",
+                    )
+                    return
+            self._record_timing("acquire", acquire_timer.elapsed)
             if ref_sha and acquisition.checked_sha != ref_sha:
                 # Defense in depth: acquire_repository already asserts this.
                 raise RuntimeError(
                     "SHA_MISMATCH: checked-out commit does not match the requested SHA."
                 )
-            with _stage_timer("analyze", deployment_id=deployment_id):
-                profile, analysis = await asyncio.to_thread(
-                    analyze_repository,
-                    deployment_id=deployment_id,
-                    repository_url=record.repository_url,
-                    workspace_path=acquisition.path,
-                    target_host=record.target_host,
-                    target_port=record.target_port,
-                    intent=record.intent,
+            if self._cancel_observed(deployment_id):
+                await self._note_cancelled(deployment_id, "acquisition")
+                return
+            await self._agent_start(
+                deployment_id, "analyzer", "Analyzing repository manifests.")
+            # Project-scoped deployment target (persisted per project, never
+            # shared across projects). Invalid/stale values fail closed below.
+            deploy_target: str | None = None
+            if record.project_id:
+                try:
+                    from app.database.repositories import ProjectRepository
+
+                    _proj = ProjectRepository(db_path=self.repo.db_path).get(record.project_id)
+                    if _proj is not None and _proj.deploy_target:
+                        deploy_target = _proj.deploy_target
+                except Exception:
+                    deploy_target = None
+            analyze_timer = None
+            try:
+                # Bounded wait: the analyzer is deterministic and fast; on
+                # timeout the run fails closed and any detached thread result
+                # is dropped, never accepted late.
+                async with asyncio.timeout(
+                    _clamp_timeout(settings.timeout_analyze_s, 120.0)
+                ):
+                    with _stage_timer("analyze", deployment_id=deployment_id) as analyze_timer:
+                        profile, analysis = await asyncio.to_thread(
+                            analyze_repository,
+                            deployment_id=deployment_id,
+                            repository_url=record.repository_url,
+                            workspace_path=acquisition.path,
+                            target_host=record.target_host,
+                            target_port=record.target_port,
+                            intent=record.intent,
+                            deploy_target=deploy_target,
+                        )
+            except TimeoutError:
+                if analyze_timer is not None:
+                    self._record_timing("analyze", analyze_timer.elapsed)
+                await self._agent_done(
+                    deployment_id, "analyzer",
+                    "Repository analysis exceeded its stage time budget.",
+                    ok=False, status="timed_out", error="timeout")
+                await self._fail(
+                    deployment_id,
+                    "Repository analysis timed out; the run fails closed.",
+                    technical="TIMEOUT:analyze",
                 )
-            await self._agent_events(deployment_id, "analyzer", analysis.summary, delay)
+                return
+            except ValueError as exc:
+                # Stale/invalid deployment target: actionable, never a crash.
+                message = str(exc)
+                code = "INVALID_DEPLOYMENT_TARGET"
+                if message.startswith("INVALID_DEPLOYMENT_TARGET"):
+                    message = message.split(":", 1)[1].strip() if ":" in message else message
+                else:
+                    code = "ANALYZE_FAILED"
+                if analyze_timer is not None:
+                    self._record_timing("analyze", analyze_timer.elapsed)
+                await self._agent_done(
+                    deployment_id, "analyzer", message, ok=False, error="invalid_target")
+                result = {
+                    "kind": "failed",
+                    "title": code,
+                    "final_status": "failed",
+                    "message": message,
+                    "durationLabel": "analyze",
+                    "servicesLabel": "0 / 0 started",
+                    "verificationScore": None,
+                    "constraintsResolved": 0,
+                    "rollbackScope": None,
+                    "phase": PHASE_LABEL,
+                    "is_demo": False,
+                    "code": code,
+                    "target_selection": {
+                        "candidates": [],
+                        "reason": "stale or unknown target",
+                        "next_actions": ["select_target", "reanalyze"],
+                    },
+                }
+                self.repo.save_artifacts(
+                    deployment_id, result=result, updated_at=utc_now_iso()
+                )
+                await self._fail(
+                    deployment_id, message, technical=code, result=result,
+                )
+                return
+            self._record_timing("analyze", analyze_timer.elapsed)
+            await self._agent_done(
+                deployment_id, "analyzer", analysis.summary, ok=analysis.ok)
+            if self._cancel_observed(deployment_id):
+                await self._note_cancelled(deployment_id, "analysis")
+                return
             change_intel = await self._run_change_intel(
                 deployment_id, record, settings, delay
             )
@@ -412,18 +615,48 @@ class PlanningPipeline:
                         "has_compose": profile.inferred_stack.has_compose,
                         "suggested_ports": profile.inferred_stack.suggested_ports,
                         "confidence": profile.inferred_stack.confidence,
+                        "app_candidates": profile.inferred_stack.app_candidates,
+                        "app_relationship": profile.inferred_stack.app_relationship,
+                        "selected_target": profile.inferred_stack.selected_target,
                     },
                 },
             )
             await self._stage(deployment_id, StageId.ANALYZE, "completed", delay)
 
-            support = assess_plan_support(profile)
+            support = assess_plan_support(profile, selected_target=deploy_target)
             if not support.supported:
+                stack = profile.inferred_stack
+                candidates = [
+                    {"path": c.path, "technologies": c.technologies, "evidence": c.evidence}
+                    if hasattr(c, "path") else c
+                    for c in []
+                ]
+                details = support.details or {}
+                target_selection = {
+                    "candidates": details.get("candidates", [
+                        {"path": p, "technologies": [], "evidence": []}
+                        for p in (stack.app_candidates or [])
+                    ]),
+                    "relationship": details.get("relationship", stack.app_relationship),
+                    "reason": details.get("reason", "automatic selection is ambiguous"),
+                    "next_actions": details.get("next_actions", ["select_target", "reanalyze"]),
+                    "supported_targets": details.get("supported_targets", list(stack.app_candidates or [])),
+                    "selected_target": deploy_target,
+                    "project_id": record.project_id,
+                }
+                if support.code == "MULTIPLE_APPS_REQUIRE_TARGET":
+                    user_message = (
+                        support.message
+                        + " Set one via project settings or re-run with an explicit "
+                        "deployment target; V1 executes exactly one service."
+                    )
+                else:
+                    user_message = support.message
                 result = {
                     "kind": "failed",
                     "title": support.code or "DEPLOYMENT_UNSUPPORTED",
                     "final_status": "failed",
-                    "message": support.message,
+                    "message": user_message,
                     "durationLabel": "analyze",
                     "servicesLabel": "0 / 0 started",
                     "verificationScore": None,
@@ -432,6 +665,8 @@ class PlanningPipeline:
                     "phase": PHASE_LABEL,
                     "is_demo": False,
                     "code": support.code,
+                    "target_selection": target_selection,
+                    "deployment_id": deployment_id,
                 }
                 self.repo.save_artifacts(
                     deployment_id, result=result, updated_at=utc_now_iso()
@@ -468,11 +703,40 @@ class PlanningPipeline:
             # Independent pure functions over the same immutable profile:
             # bounded concurrency, deterministic aggregation order preserved.
             # Each runs in a worker thread (sync CPU/file work off the loop).
-            docker_res, nginx_res, security_res = await asyncio.gather(
-                asyncio.to_thread(run_docker_agent, profile),
-                asyncio.to_thread(run_nginx_agent, profile),
-                asyncio.to_thread(run_security_agent, profile),
-            )
+            # Bounded wait with honest semantics: a timeout cancels the wait,
+            # not the detached threads, whose late results are dropped.
+            await self._agent_start(
+                deployment_id, "docker", "Publishing container constraints.")
+            await self._agent_start(
+                deployment_id, "nginx", "Publishing proxy constraints.")
+            await self._agent_start(
+                deployment_id, "security", "Publishing security policies.")
+            spec_timer = None
+            try:
+                async with asyncio.timeout(
+                    _clamp_timeout(settings.timeout_specialists_s, 30.0)
+                ):
+                    with _stage_timer("specialists", deployment_id=deployment_id) as spec_timer:
+                        docker_res, nginx_res, security_res = await asyncio.gather(
+                            asyncio.to_thread(run_docker_agent, profile),
+                            asyncio.to_thread(run_nginx_agent, profile),
+                            asyncio.to_thread(run_security_agent, profile),
+                        )
+            except TimeoutError:
+                if spec_timer is not None:
+                    self._record_timing("specialists", spec_timer.elapsed)
+                for agent_name in ("docker", "nginx", "security"):
+                    await self._agent_done(
+                        deployment_id, agent_name,
+                        "Specialist exceeded its stage time budget.",
+                        ok=False, status="timed_out", error="timeout")
+                await self._fail(
+                    deployment_id,
+                    "Specialist agents timed out; the run fails closed.",
+                    technical="TIMEOUT:specialists",
+                )
+                return
+            self._record_timing("specialists", spec_timer.elapsed)
             agent_results = [preflight, analysis, docker_res, nginx_res, security_res]
 
             all_constraints = [
@@ -485,7 +749,12 @@ class PlanningPipeline:
                 ("nginx", nginx_res),
                 ("security", security_res),
             ):
-                await self._agent_events(deployment_id, agent_name, res.summary, delay * 0.5)
+                await self._agent_done(
+                    deployment_id, agent_name, res.summary, ok=res.ok)
+
+            if self._cancel_observed(deployment_id):
+                await self._note_cancelled(deployment_id, "specialists")
+                return
 
             await self._emit(
                 deployment_id,
@@ -496,7 +765,7 @@ class PlanningPipeline:
                     "simple": "Specialist agents published typed infrastructure constraints.",
                     "technical": f"constraints={len(all_constraints)} · is_demo=false",
                     "constraints": [c.to_ui() for c in all_constraints],
-                    "agents": _agents_snapshot(agent_results),
+                    "agents": self.tracker.snapshot(),
                 },
             )
             self.repo.save_artifacts(
@@ -526,6 +795,8 @@ class PlanningPipeline:
                 "workflow=planning · stage=NEGOTIATE · cnp=deterministic",
             )
             await self._stage(deployment_id, StageId.NEGOTIATE, "started", 0)
+            await self._agent_start(
+                deployment_id, "mediator", "Negotiating typed constraints.")
             await self._emit(
                 deployment_id,
                 EventType.NEGOTIATION_STARTED,
@@ -544,6 +815,7 @@ class PlanningPipeline:
                         "involvedConstraintIds": [c.constraint_id for c in all_constraints],
                     },
                 },
+                include_agents=True,
             )
 
             # Emit conflicts before resolution for UI visibility
@@ -576,10 +848,23 @@ class PlanningPipeline:
 
             from app.core.perf import stage as _stage_timer
 
-            with _stage_timer("cnp", deployment_id=deployment_id):
+            with _stage_timer("cnp", deployment_id=deployment_id) as cnp_timer:
                 negotiation = run_cnp(deployment_id, all_constraints, is_demo=False)
-            ui_constraints = [c.to_ui() for c in negotiation.final_constraints]
-            ui_negotiation = negotiation.to_ui()
+            self._record_timing("cnp", cnp_timer.elapsed)
+            if negotiation.status == "resolved":
+                method_summary = (
+                    negotiation.decisions[-1].rationale
+                    if negotiation.decisions
+                    else "Constraint set accepted as proposed"
+                )
+            else:
+                method_summary = (
+                    f"CNP ended {negotiation.status} after "
+                    f"{negotiation.rounds_used} round(s)"
+                )
+            await self._agent_done(
+                deployment_id, "mediator", method_summary,
+                ok=negotiation.status == "resolved")
             ui_constraints = [c.to_ui() for c in negotiation.final_constraints]
             ui_negotiation = negotiation.to_ui()
 
@@ -601,7 +886,12 @@ class PlanningPipeline:
                         "constraints": ui_constraints,
                         "negotiation": ui_negotiation,
                     },
+                    include_agents=True,
                 )
+
+            if self._cancel_observed(deployment_id):
+                await self._note_cancelled(deployment_id, "negotiation")
+                return
 
             if negotiation.status != "resolved":
                 plan = NegotiatedPlan(
@@ -614,7 +904,11 @@ class PlanningPipeline:
                         "nginx": nginx_res.artifacts,
                         "security": security_res.artifacts,
                     },
-                    message="CNP exhausted without a clean constraint set. Execution blocked.",
+                    message=(
+                        "CNP found no valid constraints to negotiate. Execution blocked."
+                        if negotiation.status == "invalid"
+                        else "CNP exhausted without a clean constraint set. Execution blocked."
+                    ),
                     is_demo=False,
                 )
                 self.repo.save_artifacts(
@@ -628,25 +922,28 @@ class PlanningPipeline:
                     deployment_id,
                     DeploymentStatus.FAILED,
                     StageId.COMPLETE,
-                    "Constraint negotiation exhausted. Plan failed closed.",
-                    f"cnp.status=exhausted · rounds={negotiation.rounds_used}",
+                    "Constraint negotiation failed closed without a clean plan.",
+                    f"cnp.status={negotiation.status} · rounds={negotiation.rounds_used}",
                     error=plan.message,
                 )
-                await self._emit(
-                    deployment_id,
-                    EventType.DEPLOYMENT_FAILED,
-                    plan.message,
-                    stage=StageId.COMPLETE.value,
-                    status=DeploymentStatus.FAILED.value,
-                    level="error",
-                    metadata={
-                        "simple": plan.message,
-                        "technical": f"cnp.status={negotiation.status}",
-                        "result": plan.to_result(),
-                        "constraints": ui_constraints,
-                        "negotiation": ui_negotiation,
-                    },
-                )
+                self.tracker.fail_remaining(error=plan.message[:200])
+                if run_control.claim_terminal(deployment_id):
+                    await self._emit(
+                        deployment_id,
+                        EventType.DEPLOYMENT_FAILED,
+                        plan.message,
+                        stage=StageId.COMPLETE.value,
+                        status=DeploymentStatus.FAILED.value,
+                        level="error",
+                        metadata={
+                            "simple": plan.message,
+                            "technical": f"cnp.status={negotiation.status}",
+                            "result": plan.to_result(),
+                            "constraints": ui_constraints,
+                            "negotiation": ui_negotiation,
+                        },
+                        include_agents=True,
+                    )
                 return
 
             await self._stage(deployment_id, StageId.NEGOTIATE, "completed", delay)
@@ -707,6 +1004,7 @@ class PlanningPipeline:
             await self._fail(deployment_id, str(exc), technical=type(exc).__name__)
         finally:
             release_real_deploy(deployment_id)
+            run_control.clear_run(deployment_id)
             try:
                 service = ai_ctx.get("service") if ai_ctx else None
                 client = getattr(service, "_client", None)
@@ -1002,6 +1300,101 @@ class PlanningPipeline:
             await asyncio.sleep(delay * 0.5)
         return info
 
+    async def _renegotiate_after_replan(
+        self,
+        *,
+        deployment_id: str,
+        constraints: list,
+        replan_count: int,
+    ):
+        """Re-run deterministic CNP after a replan round.
+
+        Replanning must not bypass negotiation: the (possibly changed)
+        constraint set is re-negotiated and the refreshed artifacts are
+        returned as (negotiation, final_constraints, ui_constraints,
+        ui_negotiation). Returns None when re-negotiation leaves no clean
+        set — the caller then fails closed without executing.
+        """
+        await self._agent_start(
+            deployment_id, "mediator",
+            f"Re-negotiating constraints (replan round {replan_count}).")
+        from app.core.perf import stage as _renego_timer
+
+        with _renego_timer("renegotiate", deployment_id=deployment_id) as renego_timer:
+            renegotiated = run_cnp(deployment_id, constraints, is_demo=False)
+        self._record_timing("renegotiate", renego_timer.elapsed)
+        await self._agent_done(
+            deployment_id, "mediator",
+            f"CNP re-run after replan round {replan_count}: {renegotiated.status}.",
+            ok=renegotiated.status == "resolved")
+        ui_constraints = [c.to_ui() for c in renegotiated.final_constraints]
+        ui_negotiation = renegotiated.to_ui()
+        await self._emit(
+            deployment_id,
+            EventType.NEGOTIATION_STARTED,
+            f"CNP re-run after replan round {replan_count}: {renegotiated.status}.",
+            stage=StageId.VERIFY.value,
+            metadata={
+                "simple": "MEDHA re-checked negotiated constraints after replanning.",
+                "technical": (
+                    f"cnp.rerun=true · replan.round={replan_count} · "
+                    f"status={renegotiated.status} · "
+                    f"rounds={renegotiated.rounds_used}"
+                ),
+                "constraints": ui_constraints,
+                "negotiation": ui_negotiation,
+                "replan": {"round": replan_count, "cnp_rerun": True},
+            },
+            include_agents=True,
+        )
+        if renegotiated.status != "resolved":
+            return None
+        return (
+            renegotiated,
+            list(renegotiated.final_constraints),
+            ui_constraints,
+            ui_negotiation,
+        )
+
+    async def _fail_replan_stopped(
+        self,
+        *,
+        deployment_id: str,
+        reason: str,
+        fix_report: dict,
+        verification,
+        constraints_resolved: int,
+    ) -> None:
+        """Fail closed when replanning cannot proceed honestly.
+
+        Used when no supported fix exists, a fix would repeat, or the plan
+        did not meaningfully change — burning further rounds would only
+        delay the honest failure. Never invokes the executor.
+        """
+        message = f"Bounded replan stopped: {reason} Execution blocked."
+        await self._fail(
+            deployment_id,
+            message,
+            technical=f"replan.stopped={reason}",
+            result={
+                "kind": "failed",
+                "title": "FAILED",
+                "final_status": "failed",
+                "message": message,
+                "durationLabel": "verify",
+                "servicesLabel": "0 / 0 started",
+                "verificationScore": verification.score if verification else None,
+                "constraintsResolved": constraints_resolved,
+                "rollbackScope": None,
+                "phase": PHASE_LABEL,
+                "is_demo": False,
+                "replan": {
+                    "applied": fix_report.get("applied", []),
+                    "rejected": fix_report.get("rejected", []),
+                },
+            },
+        )
+
     async def _run_verify_execute(
         self,
         *,
@@ -1027,6 +1420,9 @@ class PlanningPipeline:
         max_rounds = settings.max_verify_rounds
         final_constraints = list(negotiation.final_constraints)
         replan_count = 0
+        # Signatures of already-applied replan fixes: a round that would
+        # repeat one (or change nothing) stops instead of looping.
+        applied_fix_sigs: set = set()
         verification = None
         critic = None
         # CIG → verification: surface change-impact requirements in the gate.
@@ -1048,6 +1444,9 @@ class PlanningPipeline:
             fail_service = "backend"
 
         while True:
+            if self._cancel_observed(deployment_id):
+                await self._note_cancelled(deployment_id, "verify")
+                return
             self._status(
                 deployment_id,
                 DeploymentStatus.RUNNING,
@@ -1065,11 +1464,18 @@ class PlanningPipeline:
                     "simple": "MEDHA is checking the generated configuration before execution.",
                     "technical": f"gate=pre_exec · replan_count={replan_count}",
                 },
+                include_agents=True,
             )
+            await self._agent_start(
+                deployment_id, "verifier",
+                f"Verification round {replan_count + 1}.")
 
             from app.core.perf import stage as _verify_timer
 
-            with _verify_timer("verify", deployment_id=deployment_id):
+            # Verifier/critic are pure in-process deterministic functions:
+            # bounded by construction, so no timeout is applied — the cancel
+            # check above is the honest bound. Timings are still recorded.
+            with _verify_timer("verify", deployment_id=deployment_id) as verify_timer:
                 verification = run_verifier(
                     deployment_id=deployment_id,
                     profile=profile,
@@ -1082,6 +1488,12 @@ class PlanningPipeline:
                     change_requirements=change_requirements,
                     change_risk=change_risk,
                 )
+            self._record_timing("verify", verify_timer.elapsed)
+            await self._agent_done(
+                deployment_id, "verifier",
+                f"Verification {'passed' if verification.passed else 'failed'} "
+                f"(round {replan_count + 1}).",
+                ok=verification.passed)
             ui_verification = verification.to_ui()
             self.repo.save_artifacts(
                 deployment_id,
@@ -1108,15 +1520,23 @@ class PlanningPipeline:
                         "technical": f"passed=false · failures={verification.blocking_failures}",
                         "verification": ui_verification,
                     },
+                    include_agents=True,
                 )
-                critic = run_critic(
-                    deployment_id=deployment_id,
-                    profile=profile,
-                    constraints=final_constraints,
-                    negotiation=negotiation,
-                    verification=verification,
-                    config_fragments=config_fragments,
-                )
+                await self._agent_start(
+                    deployment_id, "critic", "Scoring the failed verification.")
+                with _verify_timer("critic", deployment_id=deployment_id) as critic_timer:
+                    critic = run_critic(
+                        deployment_id=deployment_id,
+                        profile=profile,
+                        constraints=final_constraints,
+                        negotiation=negotiation,
+                        verification=verification,
+                        config_fragments=config_fragments,
+                    )
+                self._record_timing("critic", critic_timer.elapsed)
+                await self._agent_done(
+                    deployment_id, "critic", critic.summary,
+                    ok=critic.recommendation != CriticRecommendation.ESCALATE)
                 self.repo.save_artifacts(
                     deployment_id, critic=critic.to_ui(), updated_at=utc_now_iso()
                 )
@@ -1141,9 +1561,82 @@ class PlanningPipeline:
                             "replan": {"round": replan_count, "max_rounds": max_rounds},
                         },
                     )
-                    # Deterministic fix: inject required env into compose fragment
-                    config_fragments = _apply_replan_fixes(config_fragments, verification)
+                    # Validated deterministic fixes only: supported patches are
+                    # applied, everything else is rejected with reasons, and
+                    # repeats/no-ops stop the loop instead of burning rounds.
+                    fixed, fix_report = _apply_replan_fixes(
+                        config_fragments, verification, final_constraints
+                    )
+                    fix_sig = tuple(
+                        sorted(
+                            (f.get("kind"), f.get("key"))
+                            for f in fix_report["applied"]
+                        )
+                    )
+                    if (
+                        (not fix_report["applied"] and fix_report["rejected"])
+                        or not fix_report["plan_changed"]
+                        or fix_sig in applied_fix_sigs
+                    ):
+                        reason = (
+                            "no supported fix for the blocking checks"
+                            if not fix_report["applied"]
+                            else (
+                                "replan produced no new plan change"
+                                if not fix_report["plan_changed"]
+                                else "replan would repeat an ineffective fix"
+                            )
+                        )
+                        await self._fail_replan_stopped(
+                            deployment_id=deployment_id,
+                            reason=reason,
+                            fix_report=fix_report,
+                            verification=verification,
+                            constraints_resolved=constraints_resolved,
+                        )
+                        return
+                    applied_fix_sigs.add(fix_sig)
+                    config_fragments = fixed
                     force_fail_env = False
+                    # Replanning must not bypass negotiation: re-run CNP over
+                    # the current constraint set before re-verification.
+                    rerun = await self._renegotiate_after_replan(
+                        deployment_id=deployment_id,
+                        constraints=final_constraints,
+                        replan_count=replan_count,
+                    )
+                    if rerun is None:
+                        await self._fail(
+                            deployment_id,
+                            "Constraint re-negotiation after replan failed. "
+                            "Execution blocked.",
+                            technical=(
+                                f"cnp.rerun=not_resolved · "
+                                f"replan.round={replan_count}"
+                            ),
+                            result={
+                                "kind": "failed",
+                                "title": "FAILED",
+                                "final_status": "failed",
+                                "message": "Constraint re-negotiation after replan "
+                                "left no clean set. Execution blocked.",
+                                "durationLabel": "verify",
+                                "servicesLabel": "0 / 0 started",
+                                "verificationScore": verification.score,
+                                "constraintsResolved": constraints_resolved,
+                                "rollbackScope": None,
+                                "phase": PHASE_LABEL,
+                                "is_demo": False,
+                            },
+                        )
+                        return
+                    (
+                        negotiation,
+                        final_constraints,
+                        ui_constraints,
+                        ui_negotiation,
+                    ) = rerun
+                    constraints_resolved = len(negotiation.decisions)
                     await self._emit(
                         deployment_id,
                         EventType.REPLAN_COMPLETED,
@@ -1152,6 +1645,12 @@ class PlanningPipeline:
                         metadata={
                             "simple": "Corrected configuration prepared for re-verification.",
                             "technical": f"replan.round={replan_count} · fix=env_present",
+                            "replan": {
+                                "round": replan_count,
+                                "max_rounds": max_rounds,
+                                "applied": fix_report["applied"],
+                                "rejected": fix_report["rejected"],
+                            },
                         },
                     )
                     continue
@@ -1169,6 +1668,7 @@ class PlanningPipeline:
                     "rollbackScope": None,
                     "phase": PHASE_LABEL,
                     "is_demo": False,
+                    "timings": self._result_timings(),
                 }
                 self.repo.save_artifacts(
                     deployment_id,
@@ -1185,21 +1685,24 @@ class PlanningPipeline:
                     "gate=blocked",
                     error=result["message"],
                 )
-                await self._emit(
-                    deployment_id,
-                    EventType.DEPLOYMENT_FAILED,
-                    result["message"],
-                    stage=StageId.COMPLETE.value,
-                    status=DeploymentStatus.FAILED.value,
-                    level="error",
-                    metadata={
-                        "simple": result["message"],
-                        "technical": "recommendation=ESCALATE",
-                        "result": result,
-                        "verification": ui_verification,
-                        "critic": critic.to_ui() if critic else None,
-                    },
-                )
+                self.tracker.fail_remaining(error=result["message"][:200])
+                if run_control.claim_terminal(deployment_id):
+                    await self._emit(
+                        deployment_id,
+                        EventType.DEPLOYMENT_FAILED,
+                        result["message"],
+                        stage=StageId.COMPLETE.value,
+                        status=DeploymentStatus.FAILED.value,
+                        level="error",
+                        metadata={
+                            "simple": result["message"],
+                            "technical": "recommendation=ESCALATE",
+                            "result": result,
+                            "verification": ui_verification,
+                            "critic": critic.to_ui() if critic else None,
+                        },
+                        include_agents=True,
+                    )
                 return
 
             await self._emit(
@@ -1213,17 +1716,13 @@ class PlanningPipeline:
                     "technical": f"passed=true · replan_count={replan_count}",
                     "verification": ui_verification,
                 },
+                include_agents=True,
             )
             await self._stage(deployment_id, StageId.VERIFY, "completed", delay * 0.2)
 
-            await self._emit(
-                deployment_id,
-                EventType.CRITIC_STARTED,
-                "Critic started.",
-                stage=StageId.VERIFY.value,
-                metadata={"simple": "MEDHA critic is scoring the negotiated plan."},
-            )
-            with _verify_timer("critic", deployment_id=deployment_id):
+            await self._agent_start(
+                deployment_id, "critic", "Scoring the negotiated plan.")
+            with _verify_timer("critic", deployment_id=deployment_id) as pass_critic_timer:
                 critic = run_critic(
                     deployment_id=deployment_id,
                     profile=profile,
@@ -1232,6 +1731,10 @@ class PlanningPipeline:
                     verification=verification,
                     config_fragments=config_fragments,
                 )
+            self._record_timing("critic", pass_critic_timer.elapsed)
+            await self._agent_done(
+                deployment_id, "critic", critic.summary,
+                ok=critic.recommendation != CriticRecommendation.ESCALATE)
             ui_critic = critic.to_ui()
             self.repo.save_artifacts(
                 deployment_id, critic=ui_critic, verification=ui_verification, updated_at=utc_now_iso()
@@ -1254,6 +1757,7 @@ class PlanningPipeline:
                     "critic": ui_critic,
                     "verification": ui_verification,
                 },
+                include_agents=True,
             )
 
             if critic.recommendation == CriticRecommendation.ESCALATE:
@@ -1291,7 +1795,77 @@ class PlanningPipeline:
                         "technical": f"replan.round={replan_count} · source=critic",
                     },
                 )
-                config_fragments = _apply_replan_fixes(config_fragments, verification)
+                fixed, fix_report = _apply_replan_fixes(
+                    config_fragments, verification, final_constraints
+                )
+                fix_sig = tuple(
+                    sorted(
+                        (f.get("kind"), f.get("key")) for f in fix_report["applied"]
+                    )
+                )
+                if (
+                    (not fix_report["applied"] and fix_report["rejected"])
+                    or not fix_report["plan_changed"]
+                    or fix_sig in applied_fix_sigs
+                ):
+                    reason = (
+                        "no supported fix for the blocking checks"
+                        if not fix_report["applied"]
+                        else (
+                            "replan produced no new plan change"
+                            if not fix_report["plan_changed"]
+                            else "replan would repeat an ineffective fix"
+                        )
+                    )
+                    await self._fail_replan_stopped(
+                        deployment_id=deployment_id,
+                        reason=reason,
+                        fix_report=fix_report,
+                        verification=verification,
+                        constraints_resolved=constraints_resolved,
+                    )
+                    return
+                applied_fix_sigs.add(fix_sig)
+                config_fragments = fixed
+                # Critic-driven replans re-negotiate too: no path may reach
+                # execution without a freshly negotiated constraint set.
+                rerun = await self._renegotiate_after_replan(
+                    deployment_id=deployment_id,
+                    constraints=final_constraints,
+                    replan_count=replan_count,
+                )
+                if rerun is None:
+                    await self._fail(
+                        deployment_id,
+                        "Constraint re-negotiation after critic replan failed. "
+                        "Execution blocked.",
+                        technical=(
+                            f"cnp.rerun=not_resolved · "
+                            f"replan.round={replan_count} · source=critic"
+                        ),
+                        result={
+                            "kind": "failed",
+                            "title": "FAILED",
+                            "final_status": "failed",
+                            "message": "Constraint re-negotiation after critic "
+                            "replan left no clean set. Execution blocked.",
+                            "durationLabel": "verify",
+                            "servicesLabel": "0 / 0 started",
+                            "verificationScore": verification.score,
+                            "constraintsResolved": constraints_resolved,
+                            "rollbackScope": None,
+                            "phase": PHASE_LABEL,
+                            "is_demo": False,
+                        },
+                    )
+                    return
+                (
+                    negotiation,
+                    final_constraints,
+                    ui_constraints,
+                    ui_negotiation,
+                ) = rerun
+                constraints_resolved = len(negotiation.decisions)
                 await self._emit(
                     deployment_id,
                     EventType.REPLAN_COMPLETED,
@@ -1300,6 +1874,13 @@ class PlanningPipeline:
                     metadata={
                         "simple": "Corrected configuration prepared for re-verification.",
                         "technical": f"replan.round={replan_count} · source=critic",
+                        "replan": {
+                            "round": replan_count,
+                            "max_rounds": max_rounds,
+                            "applied": fix_report["applied"],
+                            "rejected": fix_report["rejected"],
+                            "source": "critic",
+                        },
                     },
                 )
                 continue
@@ -1441,6 +2022,9 @@ class PlanningPipeline:
                         technical="SHA_MISMATCH",
                     )
                     return
+        if self._cancel_observed(deployment_id):
+            await self._note_cancelled(deployment_id, "execute_gate")
+            return
         if plan_only:
             await self._pause_for_approval(
                 deployment_id, canonical_plan, plan_digest, proposal_id, ai_ctx
@@ -1564,6 +2148,14 @@ class PlanningPipeline:
                 },
             )
             return
+        # Executor race guard: cancellation observed here wins — the
+        # executor is never invoked after a cancel, and completion paths
+        # below re-check terminal state before persisting success.
+        if self._cancel_observed(deployment_id):
+            await self._note_cancelled(deployment_id, "executor_gate")
+            return
+        await self._agent_start(
+            deployment_id, "executor", "Starting gated execution.")
         executor = choose_executor(is_demo=False, prefer_docker=False)
 
         async def on_event(etype: str, message: str, meta: dict) -> None:
@@ -1594,8 +2186,18 @@ class PlanningPipeline:
                     deployment_id, graph=meta["graph"], updated_at=utc_now_iso()
                 )
 
-        with _verify_timer("execute", deployment_id=deployment_id):
+        with _verify_timer("execute", deployment_id=deployment_id) as execute_timer:
             graph, exec_result, scope = await executor.execute(exec_plan, ceg, on_event=on_event)
+        self._record_timing("execute", execute_timer.elapsed)
+
+        # A cancel that landed during execution wins: no rollback handling,
+        # no success persistence, no terminal overwrite from this path.
+        if self._cancel_observed(deployment_id):
+            await self._agent_done(
+                deployment_id, "executor", "Execution superseded by cancellation.",
+                ok=False, status="cancelled", error="cancel_requested")
+            await self._note_cancelled(deployment_id, "execution")
+            return
 
         if scope is None and exec_result.status not in {"SUCCESS", "PARTIAL_FAILURE"}:
             message = "; ".join(exec_result.errors) or f"Execution failed ({exec_result.status})"
@@ -1624,6 +2226,10 @@ class PlanningPipeline:
             return
 
         if scope is not None:
+            await self._agent_done(
+                deployment_id, "executor",
+                f"Execution {exec_result.status}; scoped rollback engaged.",
+                ok=False)
             await self._stage(deployment_id, StageId.EXECUTE, "completed", 0)
             rollback_ok = exec_result.status != "ROLLBACK_FAILED"
             self._status(
@@ -1634,12 +2240,15 @@ class PlanningPipeline:
                 f"failed={scope.failed_node_id}",
             )
             await self._stage(deployment_id, StageId.RECOVER, "started", delay * 0.2)
+            await self._agent_start(
+                deployment_id, "rollback", "Applying scoped rollback.")
             await self._emit(
                 deployment_id,
                 EventType.ROLLBACK_STARTED,
                 "Scoped rollback started.",
                 stage=StageId.RECOVER.value,
                 metadata={"simple": scope.rationale, "technical": f"scope={scope.nodes_to_rollback}"},
+                include_agents=True,
             )
             ui_scope = scope.to_ui()
             details = getattr(scope, "_details", None)
@@ -1661,7 +2270,12 @@ class PlanningPipeline:
                     "rollback": ui_scope,
                     "graph": graph.to_ui(),
                 },
+                include_agents=True,
             )
+            await self._agent_done(
+                deployment_id, "rollback",
+                "SCOPED ROLLBACK COMPLETE" if rollback_ok else "ROLLBACK FAILED",
+                ok=rollback_ok)
             await self._emit(
                 deployment_id,
                 EventType.ROLLBACK_COMPLETED,
@@ -1677,6 +2291,7 @@ class PlanningPipeline:
                     "rollback": ui_scope,
                     "graph": graph.to_ui(),
                 },
+                include_agents=True,
             )
             await self._stage(deployment_id, StageId.RECOVER, "completed", delay * 0.2)
             message = scope.rationale if rollback_ok else "ROLLBACK_FAILED: " + scope.rationale
@@ -1687,6 +2302,13 @@ class PlanningPipeline:
                 message=message,
             )
             result["phase"] = PHASE_LABEL
+            result["timings"] = self._result_timings()
+            if self._current_status(deployment_id) == DeploymentStatus.CANCELLED.value:
+                logger.info(
+                    "Dropping late rollback terminal for cancelled run deployment_id=%s",
+                    deployment_id,
+                )
+                return
             self.repo.save_artifacts(
                 deployment_id,
                 graph=graph.to_ui(),
@@ -1709,41 +2331,47 @@ class PlanningPipeline:
                 message,
                 f"final_status={final_status.value}",
             )
-            await self._emit(
-                deployment_id,
-                EventType.DEPLOYMENT_COMPLETED
-                if rollback_ok
-                else EventType.DEPLOYMENT_FAILED,
-                message,
-                stage=StageId.COMPLETE.value,
-                status=final_status.value,
-                level="error" if not rollback_ok else "info",
-                metadata={
-                    "simple": message,
-                    "technical": f"final_status={final_status.value} · phase={PHASE_LABEL}",
-                    "result": result,
-                    "graph": graph.to_ui(),
-                    "rollback": ui_scope,
-                    "verification": verification.to_ui() if verification else None,
-                    "critic": critic.to_ui() if critic else None,
-                    "pipeline": {
-                        "VERIFY": {"status": "success", "detail": "Gate passed"},
-                        "EXECUTE": {"status": "failed", "detail": "Partial failure"},
-                        "RECOVER": {
-                            "status": "success" if rollback_ok else "failed",
-                            "detail": "Scoped rollback complete"
-                            if rollback_ok
-                            else "Rollback failed",
-                        },
-                        "COMPLETE": {
-                            "status": "warning" if rollback_ok else "failed",
-                            "detail": "Partial recovery" if rollback_ok else "Rollback failed",
+            if run_control.claim_terminal(deployment_id):
+                await self._emit(
+                    deployment_id,
+                    EventType.DEPLOYMENT_COMPLETED
+                    if rollback_ok
+                    else EventType.DEPLOYMENT_FAILED,
+                    message,
+                    stage=StageId.COMPLETE.value,
+                    status=final_status.value,
+                    level="error" if not rollback_ok else "info",
+                    metadata={
+                        "simple": message,
+                        "technical": f"final_status={final_status.value} · phase={PHASE_LABEL}",
+                        "result": result,
+                        "graph": graph.to_ui(),
+                        "rollback": ui_scope,
+                        "verification": verification.to_ui() if verification else None,
+                        "critic": critic.to_ui() if critic else None,
+                        "pipeline": {
+                            "VERIFY": {"status": "success", "detail": "Gate passed"},
+                            "EXECUTE": {"status": "failed", "detail": "Partial failure"},
+                            "RECOVER": {
+                                "status": "success" if rollback_ok else "failed",
+                                "detail": "Scoped rollback complete"
+                                if rollback_ok
+                                else "Rollback failed",
+                            },
+                            "COMPLETE": {
+                                "status": "warning" if rollback_ok else "failed",
+                                "detail": "Partial recovery" if rollback_ok else "Rollback failed",
+                            },
                         },
                     },
-                },
-            )
+                    include_agents=True,
+                )
             return
 
+        await self._agent_done(
+            deployment_id, "executor", "Execution completed successfully.")
+        self.tracker.finish("rollback", "skipped",
+                            activity="Rollback not required")
         await self._stage(deployment_id, StageId.EXECUTE, "completed", delay * 0.2)
         message = "Deployment completed successfully."
         result = exec_result.to_deployment_result(
@@ -1753,6 +2381,7 @@ class PlanningPipeline:
             message=message,
         )
         result["phase"] = PHASE_LABEL
+        result["timings"] = self._result_timings()
         result["execution_mode"] = "controlled_test" if exec_result.executor == "docker" else exec_result.executor
         result["synthetic_services"] = []
         result["expanded_to_canonical"] = False
@@ -1763,6 +2392,12 @@ class PlanningPipeline:
         result["requested_ref"] = requested_ref
         result["plan"] = canonical_plan
         result["plan_hash"] = plan_digest
+        if self._current_status(deployment_id) == DeploymentStatus.CANCELLED.value:
+            logger.info(
+                "Dropping late success terminal for cancelled run deployment_id=%s",
+                deployment_id,
+            )
+            return
         self.repo.save_artifacts(
             deployment_id,
             graph=graph.to_ui(),
@@ -1780,27 +2415,29 @@ class PlanningPipeline:
             message,
             f"final_status=succeeded · phase={PHASE_LABEL}",
         )
-        await self._emit(
-            deployment_id,
-            EventType.DEPLOYMENT_COMPLETED,
-            message,
-            stage=StageId.COMPLETE.value,
-            status=DeploymentStatus.COMPLETED.value,
-            metadata={
-                "simple": message,
-                "technical": f"final_status=succeeded · phase={PHASE_LABEL}",
-                "result": result,
-                "graph": graph.to_ui(),
-                "verification": verification.to_ui() if verification else None,
-                "critic": critic.to_ui() if critic else None,
-                "pipeline": {
-                    "VERIFY": {"status": "success", "detail": "Gate passed"},
-                    "EXECUTE": {"status": "success", "detail": "Services running"},
-                    "RECOVER": {"status": "skipped", "detail": "Not required"},
-                    "COMPLETE": {"status": "success", "detail": "Deployment finished"},
+        if run_control.claim_terminal(deployment_id):
+            await self._emit(
+                deployment_id,
+                EventType.DEPLOYMENT_COMPLETED,
+                message,
+                stage=StageId.COMPLETE.value,
+                status=DeploymentStatus.COMPLETED.value,
+                metadata={
+                    "simple": message,
+                    "technical": f"final_status=succeeded · phase={PHASE_LABEL}",
+                    "result": result,
+                    "graph": graph.to_ui(),
+                    "verification": verification.to_ui() if verification else None,
+                    "critic": critic.to_ui() if critic else None,
+                    "pipeline": {
+                        "VERIFY": {"status": "success", "detail": "Gate passed"},
+                        "EXECUTE": {"status": "success", "detail": "Services running"},
+                        "RECOVER": {"status": "skipped", "detail": "Not required"},
+                        "COMPLETE": {"status": "success", "detail": "Deployment finished"},
+                    },
                 },
-            },
-        )
+                include_agents=True,
+            )
 
     async def _run_real_execute(
         self,
@@ -1836,7 +2473,12 @@ class PlanningPipeline:
             "MEDHA is building and running the application in the isolated runtime.",
             "stage=EXECUTE · executor=real",
         )
+        if self._cancel_observed(deployment_id):
+            await self._note_cancelled(deployment_id, "real_execute")
+            return
         await self._stage(deployment_id, StageId.EXECUTE, "started", delay * 0.2)
+        await self._agent_start(
+            deployment_id, "executor", "Building in the isolated runtime.")
         await self._emit(
             deployment_id,
             EventType.EXECUTION_STARTED,
@@ -1847,13 +2489,25 @@ class PlanningPipeline:
                 "technical": f"executor=real · resolved_sha={resolved_sha}",
                 "graph": ceg.to_ui(),
             },
+            include_agents=True,
         )
         target_port = profile.target_port
+        # Scoped execution: build the selected application subdirectory, not
+        # the repo root, when a deployment target was chosen.
+        checkout = acquisition.path
+        try:
+            _target = (profile.inferred_stack.selected_target or "").strip()
+            if _target and _target != ".":
+                _scoped = acquisition.path / _target
+                if _scoped.is_dir() and acquisition.path in list(_scoped.parents):
+                    checkout = _scoped
+        except Exception:
+            checkout = acquisition.path
         try:
             real = RealExecutor()
             outcome = await real.deploy(
                 deployment_id=deployment_id,
-                checkout=acquisition.path,
+                checkout=checkout,
                 target_port=target_port,
                 readiness_timeout=settings.real_readiness_timeout_seconds,
                 build_timeout=settings.real_build_timeout_seconds,
@@ -2027,6 +2681,7 @@ class PlanningPipeline:
                 "proposal_id": proposal_id,
                 "result": result,
             },
+            include_agents=True,
         )
         if proposal_id:
             try:
@@ -2085,31 +2740,68 @@ class PlanningPipeline:
                     }
                 },
             },
+            include_agents=True,
         )
         if delay > 0:
             await asyncio.sleep(delay)
 
-    async def _agent_events(
+    async def _agent_start(
         self,
         deployment_id: str,
         agent: str,
-        summary: str,
-        delay: float,
+        activity: str,
     ) -> None:
+        """Record a real agent start (emitted at the true boundary)."""
+        tracker = getattr(self, "tracker", None)
+        row = None
+        if tracker is not None:
+            tracker.start(agent, activity)
+            row = tracker.snapshot_row(agent) if hasattr(tracker, "snapshot_row") else None
         await self._emit(
             deployment_id,
             EventType.AGENT_STARTED,
             f"{agent} started",
-            metadata={"agent": agent, "simple": f"{agent} agent started."},
+            metadata={
+                "agent": agent,
+                "simple": activity,
+                "technical": f"agent={agent} · transition=running",
+                **({"agent_state": row} if row is not None else {}),
+            },
+            include_agents=True,
         )
-        if delay > 0:
-            await asyncio.sleep(delay * 0.4)
+
+    async def _agent_done(
+        self,
+        deployment_id: str,
+        agent: str,
+        summary: str,
+        *,
+        ok: bool = True,
+        status: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record a real agent completion with measured duration."""
+        tracker = getattr(self, "tracker", None)
+        row = None
+        if tracker is not None:
+            tracker.finish(agent, status or ("complete" if ok else "failed"),
+                           activity=summary, error=error)
+            row = tracker.snapshot_row(agent) if hasattr(tracker, "snapshot_row") else None
         await self._emit(
             deployment_id,
             EventType.AGENT_COMPLETED,
             summary,
-            status="success",
-            metadata={"agent": agent, "simple": summary, "technical": f"agent={agent}"},
+            status="success" if (status or ("complete" if ok else "failed")) == "complete" else "failed",
+            metadata={
+                "agent": agent,
+                "simple": summary,
+                "technical": (
+                    f"agent={agent} · transition={status or ('complete' if ok else 'failed')}"
+                    + (f" · duration_ms={row['durationMs']}" if row and row.get("durationMs") is not None else "")
+                ),
+                **({"agent_state": row} if row is not None else {}),
+            },
+            include_agents=True,
         )
 
     async def _fail(
@@ -2120,6 +2812,22 @@ class PlanningPipeline:
         technical: str,
         result: dict | None = None,
     ) -> None:
+        # Late-result guard: a cancelled/completed run must never be flipped
+        # to failed by a racing stage (cancellation always wins the race).
+        # update_status refuses terminal overwrites as a second line of defense.
+        current_status = self._current_status(deployment_id)
+        if current_status is not None and current_status in {
+            DeploymentStatus.CANCELLED.value,
+            DeploymentStatus.COMPLETED.value,
+            DeploymentStatus.PARTIAL_RECOVERY.value,
+            DeploymentStatus.AWAITING_APPROVAL.value,
+        }:
+            logger.info(
+                "Dropping late failure for terminal run deployment_id=%s status=%s",
+                deployment_id,
+                current_status,
+            )
+            return
         payload = result or {
             "kind": "failed",
             "title": "FAILED",
@@ -2136,6 +2844,10 @@ class PlanningPipeline:
         payload.setdefault("message", message)
         payload.setdefault("phase", PHASE_LABEL)
         payload.setdefault("code", technical)
+        payload.setdefault("timings", self._result_timings())
+        tracker = getattr(self, "tracker", None)
+        if tracker is not None:
+            tracker.fail_remaining(error=message[:200])
         self.repo.update_status(
             deployment_id,
             status=DeploymentStatus.FAILED,
@@ -2146,18 +2858,20 @@ class PlanningPipeline:
             updated_at=utc_now_iso(),
         )
         self.repo.save_artifacts(deployment_id, result=payload, updated_at=utc_now_iso())
-        await self._emit(
-            deployment_id,
-            EventType.DEPLOYMENT_FAILED,
-            message,
-            status=DeploymentStatus.FAILED.value,
-            level="error",
-            metadata={
-                "simple": message,
-                "technical": technical,
-                "result": payload,
-            },
-        )
+        if run_control.claim_terminal(deployment_id):
+            await self._emit(
+                deployment_id,
+                EventType.DEPLOYMENT_FAILED,
+                message,
+                status=DeploymentStatus.FAILED.value,
+                level="error",
+                metadata={
+                    "simple": message,
+                    "technical": technical,
+                    "result": payload,
+                },
+                include_agents=True,
+            )
 
     async def _emit(
         self,
@@ -2169,7 +2883,13 @@ class PlanningPipeline:
         status: str | None = None,
         level: str = "info",
         metadata: dict | None = None,
+        include_agents: bool = False,
     ) -> None:
+        meta = dict(metadata or {})
+        if include_agents and "agents" not in meta:
+            tracker = getattr(self, "tracker", None)
+            if tracker is not None:
+                meta["agents"] = tracker.snapshot()
         event = make_event(
             deployment_id=deployment_id,
             event_type=event_type,
@@ -2177,84 +2897,129 @@ class PlanningPipeline:
             stage=stage,
             status=status,
             level=level,
-            metadata={**(metadata or {}), "is_demo": False},
+            metadata={**meta, "is_demo": False},
             is_demo=False,
         )
         self.repo.add_event(event)
         await event_bus.publish(event)
 
 
-def _apply_replan_fixes(config_fragments: dict, verification) -> dict:
-    """Deterministic bounded replan patches (no LLM)."""
+_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+
+
+def _fragment_hash(fragments: dict) -> str:
+    """Stable hash of the replan-mutable plan surface (compose + env refs)."""
+    canonical = {
+        "compose": (fragments.get("docker") or {}).get("compose_fragment") or {},
+        "env_present": fragments.get("env_present") or {},
+    }
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _apply_replan_fixes(
+    config_fragments: dict, verification, constraints: list | None = None
+) -> tuple[dict, dict]:
+    """Validated deterministic replan patches (no LLM).
+
+    Returns (fixed_fragments, report) where report holds `applied`,
+    `rejected` (with safe reasons), and `plan_changed`. Only `inject_env`
+    is supported by the real pipeline: a required ENV_VAR key missing from
+    every compose service is provided as a `${KEY}` reference (never an
+    inline secret value). All other failures are rejected explicitly —
+    security-sensitive and structural settings are never patched.
+    """
     fixed = {
         **config_fragments,
         "docker": {**(config_fragments.get("docker") or {})},
         "env_present": {**(config_fragments.get("env_present") or {})},
     }
-    compose = fixed["docker"].get("compose_fragment") or {"services": {}}
-    services = dict(compose.get("services") or {})
-    for failure in verification.blocking_failures:
-        if "DATABASE_URL" in failure:
-            fixed["env_present"]["DATABASE_URL"] = True
+    applied: list[dict] = []
+    rejected: list[dict] = []
+    try:
+        checks = list(verification.checks or [])
+    except AttributeError:
+        checks = []
+
+    required_keys: list[str] = []
+    for c in constraints or []:
+        try:
+            is_env = c.type.value == "ENV_VAR"
+            key = (c.payload or {}).get("key")
+            required = bool((c.payload or {}).get("required"))
+            active = c.status.value != "rejected"
+        except AttributeError:
+            continue
+        if is_env and required and active and isinstance(key, str) and _ENV_KEY_RE.match(key):
+            if key not in required_keys:
+                required_keys.append(key)
+
+    from app.models.execution import CheckStatus
+
+    env_failed = any(
+        getattr(ch, "id", "") == "env" and ch.status == CheckStatus.FAIL for ch in checks
+    )
+    if env_failed and required_keys:
+        compose = fixed["docker"].get("compose_fragment") or {"services": {}}
+        services = dict(compose.get("services") or {})
+        for key in required_keys:
+            targets: list[str] = []
             for name, svc in list(services.items()):
                 if not isinstance(svc, dict):
                     continue
-                env = dict(svc.get("environment") or {})
-                env["DATABASE_URL"] = "${DATABASE_URL}"
-                svc = {**svc, "environment": env}
-                services[name] = svc
-    fixed["docker"]["compose_fragment"] = {**compose, "services": services}
-    return fixed
+                env = svc.get("environment") or {}
+                if isinstance(env, dict):
+                    present = key in env
+                elif isinstance(env, list):
+                    present = any(str(item).startswith(f"{key}=") for item in env)
+                else:
+                    present = False
+                if not present:
+                    env = dict(env) if isinstance(env, dict) else {}
+                    env[key] = "${" + key + "}"
+                    svc = {**svc, "environment": env}
+                    services[name] = svc
+                targets.append(name)
+            fixed["env_present"][key] = True
+            applied.append(
+                {"kind": "inject_env", "key": key, "services": targets, "rule": "ENV-001"}
+            )
+        fixed["docker"]["compose_fragment"] = {**compose, "services": services}
+    elif env_failed:
+        rejected.append(
+            {
+                "kind": "inject_env",
+                "key": None,
+                "reason": "ENV-001 failed but no required ENV_VAR constraint names a key",
+            }
+        )
 
+    blocking_rules = {
+        (getattr(ch, "id", ""), getattr(ch, "rule", ""))
+        for ch in checks
+        if ch.status == CheckStatus.FAIL and str(getattr(ch, "message", "")).strip()
+    }
+    for check_id, rule in sorted(blocking_rules):
+        if check_id == "env":
+            continue
+        rejected.append(
+            {
+                "kind": "none",
+                "check": check_id,
+                "rule": rule,
+                "reason": (
+                    f"no supported automated fix for {rule or check_id}; "
+                    "bounded replan stops instead of guessing"
+                ),
+            }
+        )
 
-def _agents_snapshot(results) -> list[dict]:
-    by = {r.agent: r for r in results}
-    order = [
-        ("preflight", "Preflight"),
-        ("analyzer", "Code Analyzer"),
-        ("docker", "Docker"),
-        ("nginx", "Nginx"),
-        ("security", "Security"),
-        ("mediator", "Mediator"),
-        ("verifier", "Verifier"),
-        ("critic", "Critic"),
-        ("executor", "Executor"),
-        ("rollback", "Rollback"),
-    ]
-    rows = []
-    for aid, name in order:
-        if aid in by:
-            r = by[aid]
-            rows.append(
-                {
-                    "id": aid,
-                    "name": name,
-                    "status": "complete" if r.ok else "failed",
-                    "activity": r.summary,
-                    "lastEvent": r.summary,
-                }
-            )
-        elif aid == "mediator":
-            rows.append(
-                {
-                    "id": aid,
-                    "name": name,
-                    "status": "running",
-                    "activity": "Ready for CNP",
-                    "lastEvent": "—",
-                }
-            )
-        else:
-            rows.append(
-                {
-                    "id": aid,
-                    "name": name,
-                    "status": "skipped",
-                    "activity": "Deferred to later phase",
-                    "lastEvent": "—",
-                }
-            )
-    return rows
+    report = {
+        "applied": applied,
+        "rejected": rejected,
+        "plan_changed": _fragment_hash(fixed) != _fragment_hash(config_fragments),
+    }
+    return fixed, report
 
 
 def schedule_planning_pipeline(

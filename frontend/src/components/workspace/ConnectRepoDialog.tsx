@@ -1,146 +1,191 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   createProject,
   createProjectRun,
+  deleteProject,
   verifyProject,
-  type Project,
 } from "@/lib/api/client";
-import { Button, Dialog } from "@/components/ui/primitives";
+import { Dialog } from "@/components/ui/primitives";
 
 /**
- * Connect a GitHub repository to MEDHA as a project-scoped connection.
+ * Compact GitHub connection form: URL required, name and branch optional.
  *
- * A repository reference is configuration only — this dialog proves
- * readability with `git ls-remote` (verify step) and says so honestly when
- * the repository is unreachable or private. Private repositories stay
- * unsupported until a GitHub App exists; they are never accepted via pasted
- * tokens (the backend rejects embedded credentials outright).
+ * One submit does create → live readability check → first analysis, then
+ * closes and refreshes so the new card shows the real running state.
+ * The modal stays open with an actionable error on any failure, and only
+ * verified connections are kept — an unreachable repository never persists
+ * as a fake connection.
  */
 export function ConnectRepoDialog({ onClose, onDone }: {
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [name, setName] = useState("");
   const [repository, setRepository] = useState("");
-  const [branch, setBranch] = useState("main");
+  const [name, setName] = useState("");
+  const [branch, setBranch] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [project, setProject] = useState<Project | null>(null);
-  const [verified, setVerified] = useState<null | { reachable: boolean; reason?: string }>(null);
-  const [running, setRunning] = useState(false);
-  const [runId, setRunId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [connectedName, setConnectedName] = useState<string | null>(null);
+  // Ref guard: React state updates async, so rapid double-clicks could both
+  // pass the `busy` check before either sets it. The ref closes that gap.
+  const submitting = useRef(false);
 
-  async function connect() {
-    if (saving) return;
-    if (name.trim().length < 1) {
-      setError("Give the connection a name.");
+  function actionable(message: string, code?: string): string {
+    if (code === "PROJECT_EXISTS") {
+      return "This repository is already connected in this workspace. Search the project list for it instead of connecting again.";
+    }
+    if (code === "NON_GITHUB_REPOSITORY") {
+      return "V1 supports github.com repositories only.";
+    }
+    if (code === "INVALID_REPOSITORY_REF") {
+      return "Use 'owner/name' or a full github.com URL (e.g. https://github.com/octo/demo).";
+    }
+    if (code === "INVALID_BRANCH") {
+      return "That branch name is not acceptable. Leave it blank to auto-detect the default branch.";
+    }
+    if (code === "DEPLOYMENT_BUSY") {
+      return `The repository is connected, but another analysis is already running (V1 runs one at a time). Close this dialog and use “Re-analyze” on the new card once it finishes.`;
+    }
+    return message;
+  }
+
+  async function submit() {
+    if (busy || submitting.current) return;
+    const repoInput = repository.trim();
+    if (repoInput.length < 3 || !repoInput.includes("/")) {
+      setError("Enter a GitHub repository as 'owner/name' or a github.com URL.");
       return;
     }
-    if (repository.trim().length < 3 || !repository.includes("/")) {
-      setError("Repository must look like 'owner/name' or a github.com URL.");
-      return;
-    }
-    setSaving(true);
+    submitting.current = true;
+    setBusy(true);
     setError(null);
+    let projectId: string | null = null;
     try {
       const created = await createProject({
-        name: name.trim(),
-        repository: repository.trim(),
-        branch: branch.trim() || "main",
+        repository: repoInput,
+        ...(name.trim() ? { name: name.trim() } : {}),
+        ...(branch.trim() ? { branch: branch.trim() } : {}),
       });
-      setProject(created);
-      const result = await verifyProject(created.project_id);
-      setProject(result.project);
-      setVerified({ reachable: result.reachable, reason: result.reason });
+      projectId = created.project_id;
+      const verification = await verifyProject(created.project_id);
+      if (!verification.reachable) {
+        // Not a real connection — remove the pending row so a corrected
+        // retry does not collide with it, then explain what to do.
+        try {
+          await deleteProject(created.project_id);
+        } catch {
+          /* cleanup is best-effort; the error below is what matters */
+        }
+        projectId = null;
+        setError(
+          verification.reason ??
+            "Repository is unreachable or private. Private repositories need a configured GitHub App; public ones need network access from this host.",
+        );
+        return;
+      }
+      await createProjectRun(created.project_id, {});
+      setConnectedName(created.name);
+      onDone();
+      onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not connect this repository.");
+      const code = err instanceof Error && "code" in err
+        ? String((err as { code?: unknown }).code ?? "")
+        : "";
+      const message = err instanceof Error ? err.message : "Could not connect this repository.";
+      // A verified connection whose first run could not start is still a
+      // real connection: keep it, refresh the list, and let the user close.
+      if (projectId && (code === "DEPLOYMENT_BUSY" || code === "PROJECT_NOT_CONNECTED")) {
+        setConnectedName(repository.trim());
+        setError(actionable(message, code));
+        onDone();
+        return;
+      }
+      setError(actionable(message, code || undefined));
+      // Reconnect races and already-connected repos resolve to the existing
+      // project server-side: refresh the authoritative list so the one
+      // correct card is visible instead of manufacturing local state.
+      if (code === "PROJECT_EXISTS") {
+        onDone();
+      }
     } finally {
-      setSaving(false);
+      submitting.current = false;
+      setBusy(false);
     }
   }
 
-  async function startFirstRun() {
-    if (!project) return;
-    setRunning(true);
-    setError(null);
-    try {
-      const run = await createProjectRun(project.project_id, {});
-      setRunId(run.deployment_id);
-      onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start analysis.");
-    } finally {
-      setRunning(false);
-    }
-  }
+  const connectedKeepOpen = connectedName !== null;
 
   return (
     <Dialog
       title="Connect GitHub repository"
-      confirmLabel={saving ? "Connecting…" : project ? "Done" : "Connect + verify"}
-      confirmDisabled={saving || running}
-      onConfirm={() => void (project || saving ? onClose() : connect())}
+      confirmLabel={busy ? "Connecting…" : connectedKeepOpen ? "Done" : "Connect"}
+      confirmDisabled={busy}
+      onConfirm={() => {
+        if (busy || submitting.current) return;
+        if (connectedKeepOpen) onClose();
+        else void submit();
+      }}
       onCancel={onClose}
       body={
-        <div className="space-y-3">
+        <form
+          className="space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!busy && !submitting.current && !connectedKeepOpen) void submit();
+          }}
+        >
           <div>
-            <label htmlFor="cr-name" className="medha-label">Connection name</label>
+            <label htmlFor="cr-repo" className="medha-label">GitHub repository *</label>
             <input
-              id="cr-name" className="field-input mt-1" value={name}
-              onChange={(e) => setName(e.target.value)} placeholder="My service"
-              disabled={project !== null}
+              id="cr-repo"
+              className="field-input mt-1"
+              value={repository}
+              onChange={(e) => setRepository(e.target.value)}
+              placeholder="owner/name or https://github.com/owner/name"
+              autoComplete="off"
+              disabled={busy || connectedKeepOpen}
             />
           </div>
           <div>
-            <label htmlFor="cr-repo" className="medha-label">GitHub repository</label>
+            <label htmlFor="cr-name" className="medha-label">Connection name <span className="font-normal">(optional)</span></label>
             <input
-              id="cr-repo" className="field-input mt-1" value={repository}
-              onChange={(e) => setRepository(e.target.value)} placeholder="owner/name"
-              disabled={project !== null}
+              id="cr-name"
+              className="field-input mt-1"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Defaults to the repository name"
+              autoComplete="off"
+              disabled={busy || connectedKeepOpen}
+            />
+          </div>
+          <div>
+            <label htmlFor="cr-branch" className="medha-label">Branch <span className="font-normal">(optional)</span></label>
+            <input
+              id="cr-branch"
+              className="field-input mt-1"
+              value={branch}
+              onChange={(e) => setBranch(e.target.value)}
+              placeholder="Auto-detect default branch"
+              autoComplete="off"
+              disabled={busy || connectedKeepOpen}
             />
             <p className="mt-1 text-[12px] text-medha-secondary">
-              Public repositories only in V1. This registers configuration — access is
-              proven by a live readability check, never by pasting a token.
+              Public repositories only in V1. Stack and manifests are inferred
+              automatically during analysis — nothing else to configure. Access
+              is proven by a live readability check; never paste a token.
             </p>
-          </div>
-          <div>
-            <label htmlFor="cr-branch" className="medha-label">Watched branch</label>
-            <input
-              id="cr-branch" className="field-input mt-1" value={branch}
-              onChange={(e) => setBranch(e.target.value)} placeholder="main"
-              disabled={project !== null}
-            />
           </div>
           {error ? (
             <p role="alert" className="rounded-lg border border-medha-danger/30 bg-medha-danger-soft px-3 py-2 text-[13px] text-medha-danger">{error}</p>
           ) : null}
-          {project && verified ? (
-            <div
-              role="status"
-              className={`rounded-lg border px-3 py-2 text-[13px] ${verified.reachable
-                ? "border-medha-success/30 bg-medha-success-soft text-medha-success"
-                : "border-medha-danger/30 bg-medha-danger-soft text-medha-danger"}`}
-            >
-              {verified.reachable ? (
-                <>Connected — repository is readable. Pushes to {project.branch} will trigger approval-gated analysis.</>
-              ) : (
-                <>Not connected: {verified.reason ?? "repository unreachable or private."}</>
-              )}
-            </div>
-          ) : null}
-          {project && verified?.reachable && !runId ? (
-            <Button variant="secondary" onClick={() => void startFirstRun()} loading={running}>
-              {running ? "Starting…" : "Start first analysis now"}
-            </Button>
-          ) : null}
-          {runId ? (
-            <p role="status" className="text-[13px] text-medha-success">
-              Analysis started ({runId}). Watch it under Runs; pushes will create approval proposals.
+          {connectedKeepOpen && !error ? (
+            <p role="status" className="rounded-lg border border-medha-success/30 bg-medha-success-soft px-3 py-2 text-[13px] text-medha-success">
+              Connected as {connectedName}.
             </p>
           ) : null}
-        </div>
+        </form>
       }
     />
   );

@@ -32,6 +32,9 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bgsk_[A-Za-z0-9_-]{8,}"), REDACTED),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"), REDACTED),
     (re.compile(r"\bx-goog-[A-Za-z0-9_-]{8,}"), REDACTED),
+    # GitHub-shaped tokens (also covered by core deploy logs)
+    (re.compile(r"\b(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)"), REDACTED),
+    (re.compile(r"x-access-token:[^\s]+"), REDACTED),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*"), f"Bearer {REDACTED}"),
     # key = value assignments
     (

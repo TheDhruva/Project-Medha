@@ -20,6 +20,9 @@ router = APIRouter()
 # reachability bit. A real outage flips to degraded within 5s.
 _health_cache: dict[str, object] = {"ok": True, "at": 0.0}
 _HEALTH_TTL_S = 5.0
+# Docker probe cache for /api/config/status (subprocess spawns are slow).
+_config_cache: dict[str, object] = {"at": 0.0}
+_CONFIG_TTL_S = 30.0
 
 
 @router.get("/health")
@@ -75,20 +78,32 @@ _PRESENCE_VARS = (
 
 @router.get("/api/config/status")
 async def config_status() -> dict:
+    import time as _time
+
     settings = get_settings()
     configured = {name: bool((os.environ.get(name) or "").strip()) for name in _PRESENCE_VARS}
     from app.services.github_app import get_github_app_config
 
     app_config = get_github_app_config()
-    docker_cli = False
-    docker_daemon = False
-    try:
-        from app.execution import docker_ops
+    # Docker CLI/daemon probes spawn subprocesses (seconds on cold hosts).
+    # Cache presence bits briefly; diagnostics tolerate seconds of staleness.
+    cached = _config_cache.get("at") or 0.0
+    if _time.monotonic() - float(cached) < _CONFIG_TTL_S and "cli" in _config_cache:
+        docker_cli = bool(_config_cache.get("cli"))
+        docker_daemon = bool(_config_cache.get("daemon"))
+    else:
+        docker_cli = False
+        docker_daemon = False
+        try:
+            from app.execution import docker_ops
 
-        docker_cli = docker_ops.docker_cli_available()
-        docker_daemon = docker_ops.docker_daemon_running()
-    except Exception:  # noqa: BLE001 - diagnostics must never fail
-        pass
+            docker_cli = docker_ops.docker_cli_available()
+            docker_daemon = docker_ops.docker_daemon_running()
+        except Exception:  # noqa: BLE001 - diagnostics must never fail
+            pass
+        _config_cache["cli"] = docker_cli
+        _config_cache["daemon"] = docker_daemon
+        _config_cache["at"] = _time.monotonic()
     mode = (settings.executor_mode or "auto").strip().lower()
     execution = "unconfigured"
     execution_reason = (

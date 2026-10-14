@@ -28,6 +28,7 @@ def analyze_repository(
     target_host: str,
     target_port: int,
     intent: str | None = None,
+    deploy_target: str | None = None,
 ) -> tuple[ApplicationProfile, AgentResult]:
     started = _now()
     root = workspace_path
@@ -35,6 +36,38 @@ def analyze_repository(
     # readable workspace there is nothing to infer from.
     if not root.is_dir():
         raise RuntimeError(f"Analysis workspace is not available: {root}")
+    from app.core.app_discovery import discover_applications
+
+    discovery = discover_applications(root)
+    app_candidates = [c.path for c in discovery.candidates]
+    candidate_details = [
+        {"path": c.path, "technologies": c.technologies, "evidence": c.evidence}
+        for c in discovery.candidates
+    ]
+    # Explicit target wins; a lone subdir application is selected
+    # automatically (Case A). Genuine multi-app repos keep root scope so the
+    # support gate can require an explicit target with full candidate detail.
+    selected_target: str | None = None
+    effective = root
+    normalized_target = (deploy_target or "").strip().replace("\\", "/").strip("/")
+    if normalized_target and normalized_target != ".":
+        if normalized_target not in app_candidates:
+            raise ValueError(
+                f"INVALID_DEPLOYMENT_TARGET: '{normalized_target}' is not a detected "
+                f"application ({', '.join(app_candidates) or 'none'})."
+            )
+        scoped = root / normalized_target
+        if not scoped.is_dir():
+            raise ValueError(
+                f"INVALID_DEPLOYMENT_TARGET: '{normalized_target}' is not available in this checkout."
+            )
+        selected_target = normalized_target
+        effective = scoped
+    elif len(app_candidates) == 1 and app_candidates[0] != ".":
+        selected_target = app_candidates[0]
+        scoped = root / app_candidates[0]
+        if scoped.is_dir():
+            effective = scoped
     examined: list[str] = []
     notes: list[str] = []
     package_managers: list[str] = []
@@ -47,10 +80,12 @@ def analyze_repository(
     health_hints: list[str] = []
     framework: str | None = None
     framework_version: str | None = None
+    if selected_target:
+        notes.append(f"Deployment target '{selected_target}' selected for analysis.")
 
-    dockerfile = _find_first(root, ["Dockerfile", "dockerfile"])
+    dockerfile = _find_first(effective, ["Dockerfile", "dockerfile"])
     compose = _find_first(
-        root,
+        effective,
         [
             "docker-compose.yml",
             "docker-compose.yaml",
@@ -58,18 +93,18 @@ def analyze_repository(
             "compose.yaml",
         ],
     )
-    package_json = root / "package.json"
-    requirements = root / "requirements.txt"
-    pyproject = root / "pyproject.toml"
-    go_mod = root / "go.mod"
+    package_json = effective / "package.json"
+    requirements = effective / "requirements.txt"
+    pyproject = effective / "pyproject.toml"
+    go_mod = effective / "go.mod"
 
     has_dockerfile = dockerfile is not None
     has_compose = compose is not None
     if has_dockerfile:
-        examined.append(str(dockerfile.relative_to(root)))
+        examined.append(str(dockerfile.relative_to(effective)))
         ports.extend(_ports_from_dockerfile(dockerfile))
     if has_compose:
-        examined.append(str(compose.relative_to(root)))
+        examined.append(str(compose.relative_to(effective)))
         compose_services, compose_ports = _parse_compose_lightweight(compose)
         services.extend(compose_services)
         ports.extend(compose_ports)
@@ -103,7 +138,7 @@ def analyze_repository(
                 ServiceHint(
                     name="backend",
                     role="api",
-                    evidence_paths=[p for p in ["requirements.txt", "pyproject.toml"] if (root / p).exists()],
+                    evidence_paths=[p for p in ["requirements.txt", "pyproject.toml"] if (effective / p).exists()],
                     suggested_port=target_port,
                 )
             )
@@ -113,7 +148,7 @@ def analyze_repository(
         package_managers.append("go")
         language = language or "go"
 
-    evidence = _gather_evidence(root, examined)
+    evidence = _gather_evidence(effective, examined)
     lockfiles = evidence["lockfiles"]
     entry_points = evidence["entry_points"]
     env_names = evidence["env_names"]
@@ -142,12 +177,18 @@ def analyze_repository(
         notes.append(f"DB/migration hints: {', '.join(evidence['db_hints'][:3])}.")
     if evidence.get("openapi_hints"):
         notes.append(f"OpenAPI hints: {', '.join(evidence['openapi_hints'][:3])}.")
-    app_candidates = _detect_app_candidates(root)
-    if len(app_candidates) > 1:
-        notes.append(
-            "Multiple applications detected "
-            f"({', '.join(app_candidates)}); automatic selection is ambiguous."
-        )
+    if len(app_candidates) > 1 and not selected_target:
+        if discovery.relationship == "fullstack":
+            notes.append(
+                "Related frontend and backend detected "
+                f"({', '.join(app_candidates)}); V1 deploys one service at a time — "
+                "choose an explicit deployment target to continue."
+            )
+        else:
+            notes.append(
+                "Multiple applications detected "
+                f"({', '.join(app_candidates)}); automatic selection is ambiguous."
+            )
 
     # Always ensure network + primary app services for planning.
     if not any(s.name == "network" for s in services):
@@ -184,7 +225,7 @@ def analyze_repository(
         confidence += 0.05
     if entry_points:
         confidence += 0.05
-    if len(app_candidates) > 1:
+    if len(app_candidates) > 1 and not selected_target:
         # Ambiguity must reduce confidence so the supportability gate blocks.
         confidence -= 0.2
     confidence = min(0.95, max(0.1, confidence))
@@ -210,6 +251,9 @@ def analyze_repository(
         env_names=sorted(set(env_names))[:30],
         health_hints=health_hints[:10],
         app_candidates=app_candidates[:10],
+        app_candidate_details=candidate_details[:10],
+        app_relationship=discovery.relationship,
+        selected_target=selected_target,
         ci_configs=evidence.get("ci_configs", []),
         test_suites=evidence.get("test_suites", []),
         auth_hints=evidence.get("auth_hints", []),
@@ -611,25 +655,7 @@ def _version_hint(text: str, name: str) -> str | None:
 
 
 def _detect_app_candidates(root: Path) -> list[str]:
-    """Find directories that look like independent applications (max depth 1)."""
-    candidates: list[str] = []
-    search_roots = [root]
-    try:
-        children = [c for c in root.iterdir() if c.is_dir() and c.name not in _SKIP_DIRS]
-    except OSError:
-        children = []
-    search_roots.extend(children[:20])
-    for base in search_roots:
-        label = "." if base == root else base.name
-        try:
-            has_pkg = (base / "package.json").is_file()
-            has_py = ((base / "requirements.txt").is_file() or (base / "pyproject.toml").is_file()) and any(
-                (base / f"{n}.py").is_file() for n in ("app", "main", "wsgi", "asgi", "server")
-            )
-            has_static = (base / "index.html").is_file()
-            has_go = (base / "go.mod").is_file()
-        except OSError:
-            continue
-        if has_pkg or has_py or has_static or has_go:
-            candidates.append(label)
-    return sorted(set(candidates))[:10]
+    """Legacy entry point — delegates to centralized discovery."""
+    from app.core.app_discovery import discover_applications
+
+    return [c.path for c in discover_applications(root).candidates]

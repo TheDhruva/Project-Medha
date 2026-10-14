@@ -1,19 +1,25 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowLeft, CheckCircle2, XCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { RunDetailView } from "@/components/run/RunDetailNew";
-import { CommitGraph } from "@/components/history/CommitGraph";
+// CommitGraph pulls @xyflow: code-split so project pages paint without it.
+const CommitGraph = dynamic(
+  () => import("@/components/history/CommitGraph").then((m) => m.CommitGraph),
+  { ssr: false, loading: () => null },
+);
 import { ScoresPanel } from "@/components/scores/ScoresPanel";
 import {
-  Badge, Breadcrumbs, Button, DemoBadge, EmptyState, ErrorBox,
+  Badge, Breadcrumbs, Button, DemoBadge, Dialog, EmptyState, ErrorBox,
   PageHeader, Panel, Skeleton,
 } from "@/components/ui/primitives";
 import { decideProposal } from "@/lib/api/client";
 import {
-  deriveAgentsFromLogs, derivePipeline, summarizeVerification,
+  derivePipeline, resolveAgents, summarizeVerification,
   useProjectData,
 } from "@/lib/projects/useProjectData";
 import { formatActivity, isRunningStatus } from "@/lib/projects/projects";
@@ -277,15 +283,17 @@ export function OrchestrationView({ projectId }: { projectId: string }) {
   // O(10×N) log scan per render — memoize on the actual inputs.
   // (Hooks stay unconditional: the !repo early-return renders below them.)
   const agents = useMemo(
-    () => (hydration ? deriveAgentsFromLogs(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : []),
+    () => (hydration ? resolveAgents(hydration, selected?.current_stage ?? null, selected?.status ?? null) : { agents: [], source: "logs" as const }),
     [hydration, selected?.current_stage, selected?.status],
   );
+  const agentStates = agents.agents;
+  const agentSource = agents.source;
   const pipeline = useMemo(
     () => (hydration ? derivePipeline(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : []),
     [hydration, selected?.current_stage, selected?.status],
   );
   if (!repo) return <NotFound what="This project link does not decode to a known repository." />;
-  const activeAgents = agents.filter((a) => a.state === "active" || a.state === "blocked");
+  const activeAgents = agentStates.filter((a) => a.state === "active" || a.state === "blocked");
 
   return (
     <AppShell>
@@ -326,10 +334,10 @@ export function OrchestrationView({ projectId }: { projectId: string }) {
                 </ol>
                 <p className="mt-2 text-[12px] text-medha-tertiary">Stages never observed stay idle — progress is not inferred.</p>
               </Panel>
-              <Panel title="Agents" eyebrow={activeAgents.length > 0 ? `${activeAgents.length} need attention` : "All observed agents settled"}>
+              <Panel title="Agents" eyebrow={activeAgents.length > 0 ? `${activeAgents.length} need attention` : "All observed agents settled"} description={agentSource === "backend" ? "Live backend lifecycle state (durations measured server-side)." : "Backend snapshot unavailable — states inferred from stored event keywords; unobserved stages stay idle."}>
                 {hydrating ? <p className="text-[13px] text-medha-secondary">Loading events…</p> : (
                   <ul className="max-h-64 space-y-1 overflow-y-auto">
-                    {agents.map((a) => (
+                    {agentStates.map((a) => (
                       <li key={a.id} className="rounded-lg border border-medha-border bg-white px-2.5 py-1.5 text-[13px]">
                         <p className="flex items-center gap-2 font-medium text-medha-text">
                           <span className={cn("status-dot", a.state === "done" ? "bg-medha-success" : a.state === "active" ? "bg-medha-run" : a.state === "blocked" ? "bg-medha-danger" : "bg-medha-border-strong")} aria-hidden />
@@ -976,31 +984,195 @@ export function ProjectEvaluations({ projectId }: { projectId: string }) {
 /* ================= PROJECT SETTINGS ================= */
 
 export function ProjectSettings({ projectId }: { projectId: string }) {
-  const { repo, name, runs, loading, error, backendReachable, latest, refresh } = useProjectData(projectId);
+  const router = useRouter();
+  const { project, repo, name, runs, loading, error, backendReachable, latest, refresh } = useProjectData(projectId);
+  const [displayName, setDisplayName] = useState<string | null>(null);
+  const [branch, setBranch] = useState<string | null>(null);
+  const [deployTarget, setDeployTarget] = useState<string | null>(null);
+  const [targets, setTargets] = useState<{ path: string; technologies: string[]; evidence: string[] }[] | null>(null);
+  const [targetsNote, setTargetsNote] = useState<string | null>(null);
+  const [saving, setSaving] = useState<"name" | "branch" | "target" | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<"disconnect" | "delete" | null>(null);
+  const [acting, setActing] = useState(false);
+  // Load detected deployment candidates once the canonical project is known.
+  useEffect(() => {
+    if (!project || !projectId.startsWith("prj_")) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { fetchProjectTargets } = await import("@/lib/api/client");
+        const t = await fetchProjectTargets(project.project_id);
+        if (!cancelled) {
+          setTargets(t.candidates ?? []);
+          setTargetsNote(t.note ?? null);
+          setDeployTarget((prev) => prev ?? t.deploy_target ?? project.deploy_target ?? null);
+        }
+      } catch {
+        if (!cancelled) setTargets(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [project, projectId]);
   if (!repo) return <NotFound what="This project link does not decode to a known repository." />;
+  const canonical = projectId.startsWith("prj_") && project != null;
   const first = runs.length > 0 ? runs[runs.length - 1] : null;
+
+  async function save(field: "name" | "branch" | "target") {
+    if (!project) return;
+    if (field === "target") {
+      const raw = (deployTarget ?? project.deploy_target ?? "").trim();
+      setSaving(field);
+      setFeedback(null);
+      setActionError(null);
+      try {
+        const { updateProject } = await import("@/lib/api/client");
+        await updateProject(project.project_id, { deploy_target: raw || "." });
+        setFeedback("Deployment target updated. The next analysis uses it; prior plans are unchanged.");
+        await refresh();
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : "Could not save settings.");
+      } finally {
+        setSaving(null);
+      }
+      return;
+    }
+    const value = (field === "name" ? displayName ?? project.name : branch ?? project.branch).trim();
+    if (!value) {
+      setFeedback(field === "name" ? "Name cannot be empty." : "Branch cannot be empty.");
+      return;
+    }
+    setSaving(field);
+    setFeedback(null);
+    setActionError(null);
+    try {
+      const { updateProject } = await import("@/lib/api/client");
+      await updateProject(project.project_id, field === "name" ? { name: value } : { branch: value });
+      setFeedback(field === "name" ? "Display name updated." : "Watched branch updated. Future pushes route on the new branch.");
+      await refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not save settings.");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function runConfirm() {
+    if (!project || !confirm) return;
+    setActing(true);
+    setActionError(null);
+    try {
+      const { disconnectProject, deleteProject } = await import("@/lib/api/client");
+      if (confirm === "disconnect") {
+        await disconnectProject(project.project_id);
+        setConfirm(null);
+        await refresh();
+      } else {
+        await deleteProject(project.project_id);
+        router.push("/projects");
+      }
+    } catch (err) {
+      const code = err instanceof Error && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+      setActionError(
+        code === "ACTIVE_RUNS"
+          ? "A run is still in flight, so deletion was refused to protect it. Disconnect instead, or retry once the run finishes."
+          : err instanceof Error ? err.message : "Action failed.",
+      );
+      setConfirm(null);
+    } finally {
+      setActing(false);
+    }
+  }
 
   return (
     <AppShell>
       <div className="mx-auto max-w-2xl space-y-4">
         <PageHeader
           title="Project settings"
-          subtitle="Identity and scope for this project. Projects are derived from backend runs — there is no separate rename/delete store; runs are immutable records."
+          subtitle="Identity and scope for this project. Changes apply to the stored connection; recorded runs are immutable."
           breadcrumbs={crumbs(projectId, name, "Settings")}
         />
         {!backendReachable && !loading ? <ErrorBox message={error ?? "Cannot reach MEDHA backend."} onRetry={() => refresh()} /> : null}
+        {feedback ? <p role="status" className="rounded-xl border border-medha-success/30 bg-medha-success-soft px-4 py-2.5 text-sm text-medha-success-ink">{feedback}</p> : null}
+        {actionError ? <ErrorBox message={actionError} /> : null}
         {loading ? <LoadingGrid /> : (
           <>
-            <Panel title="Identity" eyebrow="Derived from backend state">
+            <Panel title="Identity" eyebrow="Stored connection">
               <dl className="space-y-1.5 text-sm">
                 <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Display name</dt><dd className="font-medium text-medha-text">{name}</dd></div>
-                <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Repository</dt><dd className="medha-mono break-all text-medha-text">{repo}</dd></div>
+                <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Repository</dt><dd className="medha-mono break-all text-medha-text">{project ? `${project.repo_owner}/${project.repo_name}` : repo}</dd></div>
+                <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Branch</dt><dd className="medha-mono text-medha-text">{project?.branch ?? "—"}</dd></div>
+                <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Connection</dt><dd className="text-medha-text">{project?.connection_status ?? "legacy URL group"}</dd></div>
                 <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Total runs</dt><dd className="text-medha-text">{runs.length}</dd></div>
                 <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">First recorded</dt><dd className="text-medha-text">{first ? formatActivity(first.created_at) : "—"}</dd></div>
                 <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Latest run</dt><dd className="text-medha-text">{latest ? `${latest.deployment_id} · ${latest.status}` : "—"}</dd></div>
                 <div className="flex gap-2"><dt className="w-32 shrink-0 text-medha-tertiary">Access</dt><dd className="text-medha-text">Owner-scoped when Clerk auth is enforced; single-operator otherwise.</dd></div>
               </dl>
             </Panel>
+            {canonical && project ? (
+              <Panel title="Connection" eyebrow="Rename · re-branch">
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div className="min-w-0 flex-1">
+                      <label htmlFor="ps-name" className="medha-label">Display name</label>
+                      <input
+                        id="ps-name" className="field-input mt-1"
+                        value={displayName ?? project.name}
+                        onChange={(e) => setDisplayName(e.target.value)}
+                        maxLength={80}
+                      />
+                    </div>
+                    <Button variant="secondary" loading={saving === "name"} onClick={() => void save("name")}>
+                      Save name
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div className="min-w-0 flex-1">
+                      <label htmlFor="ps-branch" className="medha-label">Watched branch</label>
+                      <input
+                        id="ps-branch" className="field-input mt-1"
+                        value={branch ?? project.branch}
+                        onChange={(e) => setBranch(e.target.value)}
+                        maxLength={120}
+                      />
+                    </div>
+                    <Button variant="secondary" loading={saving === "branch"} onClick={() => void save("branch")}>
+                      Save branch
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div className="min-w-0 flex-1">
+                      <label htmlFor="ps-target" className="medha-label">Deployment target (explicit single service)</label>
+                      <input
+                        id="ps-target" className="field-input mt-1"
+                        value={deployTarget ?? project.deploy_target ?? ""}
+                        onChange={(e) => setDeployTarget(e.target.value)}
+                        maxLength={120}
+                        placeholder="Auto (single app) — e.g. backend, frontend, ."
+                      />
+                      <p className="mt-1 text-[12px] text-medha-secondary">
+                        {targets && targets.length > 0
+                          ? `Detected: ${targets.map((t) => t.path).join(", ")}. V1 runs exactly one target.`
+                          : (targetsNote ?? "Single-application repos need no target; multi-app repos must set one.")}
+                      </p>
+                    </div>
+                    <Button variant="secondary" loading={saving === "target"} onClick={() => void save("target")}>
+                      Save target
+                    </Button>
+                  </div>
+                </div>
+              </Panel>
+            ) : (
+              <Panel title="Connection" eyebrow="Legacy URL group">
+                <p className="text-[13px] text-medha-secondary">
+                  This view groups runs recorded before project connections existed. It is read-only:
+                  connect the repository from Projects to manage it.
+                </p>
+              </Panel>
+            )}
             <Panel title="Safety gates in force" eyebrow="Server-enforced, not UI hints">
               <ul className="list-inside list-disc space-y-1 text-sm text-medha-secondary">
                 <li>Verification gate blocks execution until checks pass.</li>
@@ -1009,6 +1181,25 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
                 <li>Rollback is dependency-aware and preserves independent successes.</li>
               </ul>
             </Panel>
+            {canonical ? (
+              <Panel title="Danger zone" eyebrow="Irreversible for the mapping only">
+                <div className="flex flex-wrap gap-2">
+                  {project?.connection_status !== "disconnected" ? (
+                    <Button variant="secondary" onClick={() => setConfirm("disconnect")}>
+                      Disconnect repository
+                    </Button>
+                  ) : null}
+                  <Button variant="danger" onClick={() => setConfirm("delete")}>
+                    Delete project
+                  </Button>
+                </div>
+                <p className="mt-2 text-[13px] text-medha-secondary">
+                  Disconnect stops future routing but keeps this page. Delete removes the
+                  workspace entry; recorded run history stays in the backend. Deletion is
+                  refused while a run is in flight.
+                </p>
+              </Panel>
+            ) : null}
             <Panel title="Navigate" eyebrow="Project scope">
               <div className="flex flex-wrap gap-2">
                 <Link href={`/projects/${projectId}/runs`} className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">Runs & Executions</Link>
@@ -1019,6 +1210,21 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
           </>
         )}
       </div>
+      {confirm ? (
+        <Dialog
+          title={confirm === "disconnect" ? "Disconnect repository?" : "Delete project?"}
+          danger={confirm === "delete"}
+          confirmLabel={acting ? "Working…" : confirm === "disconnect" ? "Disconnect" : "Delete project"}
+          confirmDisabled={acting}
+          onConfirm={() => void runConfirm()}
+          onCancel={() => setConfirm(null)}
+          body={
+            confirm === "disconnect"
+              ? "Disconnect this repository? Recorded runs stay inspectable, but new pushes stop routing here."
+              : "Delete this project from the workspace? Run history is preserved in the backend; the connection mapping is removed."
+          }
+        />
+      ) : null}
     </AppShell>
   );
 }

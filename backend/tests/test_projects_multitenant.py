@@ -62,6 +62,14 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.fixture(autouse=True)
+def _stub_default_branch_detection(monkeypatch):
+    """Keep project creation hermetic: no real ls-remote in these tests."""
+    from app.services import git_service
+
+    monkeypatch.setattr(git_service, "ls_remote_default_branch", lambda url: None)
+
+
 # --- ref parsing (pure unit) ----------------------------------------------
 
 
@@ -116,10 +124,25 @@ def test_create_and_get_project(api_client):
 
 def test_duplicate_connection_rejected(api_client):
     payload = {"name": "Demo", "repository": "octo/demo"}
-    assert api_client.post("/api/projects", json=payload).status_code == 201
+    first = api_client.post("/api/projects", json=payload)
+    assert first.status_code == 201
+    # Idempotent reconnect: same owner + same canonical identity resolves to
+    # the existing project instead of inserting a duplicate row.
     again = api_client.post("/api/projects", json=payload)
-    assert again.status_code == 409
-    assert again.json()["error"]["code"] == "PROJECT_EXISTS"
+    assert again.status_code == 200
+    assert again.json()["project_id"] == first.json()["project_id"]
+    assert api_client.get("/api/projects").json()["total"] == 1
+    # URL variations resolve to the same identity.
+    for variant in [
+        "https://github.com/octo/demo.git",
+        "https://github.com/octo/demo/",
+        "OCTO/DEMO",
+        "git@github.com:octo/demo.git",
+    ]:
+        resolved = api_client.post("/api/projects", json={"repository": variant})
+        assert resolved.status_code == 200, (variant, resolved.text)
+        assert resolved.json()["project_id"] == first.json()["project_id"]
+    assert api_client.get("/api/projects").json()["total"] == 1
 
 
 def test_invalid_ref_rejected(api_client):
@@ -201,3 +224,71 @@ def test_delete_removes_mapping(api_client):
     project_id = created.json()["project_id"]
     assert api_client.delete(f"/api/projects/{project_id}").status_code == 200
     assert api_client.get(f"/api/projects/{project_id}").status_code == 404
+
+
+def test_create_defaults_name_to_repo_and_branch_to_main(api_client):
+    created = api_client.post("/api/projects", json={"repository": "octo/Demo"})
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["name"] == "Demo"
+    assert body["branch"] == "main"
+
+
+def test_create_detects_default_branch(api_client, monkeypatch):
+    from app.services import git_service
+
+    monkeypatch.setattr(git_service, "ls_remote_default_branch", lambda url: "develop")
+    created = api_client.post("/api/projects", json={"repository": "octo/demo"})
+    assert created.status_code == 201, created.text
+    assert created.json()["branch"] == "develop"
+
+
+def test_create_explicit_branch_skips_detection(api_client, monkeypatch):
+    from app.services import git_service
+
+    def _boom(url: str):
+        raise AssertionError("detection must not run when a branch is given")
+
+    monkeypatch.setattr(git_service, "ls_remote_default_branch", _boom)
+    created = api_client.post(
+        "/api/projects", json={"name": "X", "repository": "octo/demo", "branch": "release/1.x"}
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["branch"] == "release/1.x"
+
+
+def test_delete_blocked_while_run_in_flight(api_client):
+    from app.database.repositories import DeploymentRepository
+    from app.core.enums import DeployMode, DeploymentStatus
+    from app.core.events import utc_now_iso
+    from app.models.deployment import DeploymentRecord
+
+    created = api_client.post("/api/projects", json={"name": "X", "repository": "octo/demo"})
+    project_id = created.json()["project_id"]
+    now = utc_now_iso()
+    DeploymentRepository().create(
+        DeploymentRecord(
+            deployment_id="dep_active_1",
+            repository_url="https://github.com/octo/demo.git",
+            mode=DeployMode.REAL,
+            scenario=None,
+            target_host="localhost",
+            target_port=8080,
+            intent="test",
+            base_revision=None,
+            target_revision=None,
+            status=DeploymentStatus.RUNNING,
+            current_stage="ANALYZE",
+            owner_sub="local-operator",
+            project_id=project_id,
+            created_at=now,
+            updated_at=now,
+            is_demo=False,
+        )
+    )
+    blocked = api_client.delete(f"/api/projects/{project_id}")
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "ACTIVE_RUNS"
+    # Mapping survives; disconnect stays available while blocked.
+    assert api_client.get(f"/api/projects/{project_id}").status_code == 200
+    assert api_client.post(f"/api/projects/{project_id}/disconnect").status_code == 200

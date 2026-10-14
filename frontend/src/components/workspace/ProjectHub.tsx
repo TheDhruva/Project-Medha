@@ -10,16 +10,26 @@ import {
   FolderKanban,
   MoreHorizontal,
   Plus,
+  RefreshCw,
   Search,
   X,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { ConnectRepoDialog } from "@/components/workspace/ConnectRepoDialog";
+import { Dialog } from "@/components/ui/primitives";
+import {
+  createProjectRun,
+  deleteProject,
+  disconnectProject,
+} from "@/lib/api/client";
 import {
   PROJECT_CARD_STATUS_META,
+  connectionLabel,
   filterProjectsByStatus,
   formatActivity,
+  isRunningStatus,
   projectCardStatus,
+  shortSha,
   sortProjects,
   useProjects,
   type ProjectCardStatus,
@@ -51,7 +61,10 @@ function StatusBadge({ status }: { status: ProjectCardStatus }) {
     case "running":
       return (
         <span className={`${base} border-[#BFDBFE] bg-[#EFF6FF] text-[#1D4ED8]`}>
-          <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#2563EB]" />
+          <span
+            aria-hidden
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#2563EB] motion-safe:animate-pulse"
+          />
           Running
         </span>
       );
@@ -73,7 +86,14 @@ function StatusBadge({ status }: { status: ProjectCardStatus }) {
   }
 }
 
-function CardMenu({ project }: { project: ProjectSummary }) {
+interface CardActions {
+  onReanalyze: (p: ProjectSummary) => void;
+  onDisconnect: (p: ProjectSummary) => void;
+  onDelete: (p: ProjectSummary) => void;
+  acting: string | null;
+}
+
+function CardMenu({ project, actions }: { project: ProjectSummary; actions: CardActions }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -109,7 +129,12 @@ function CardMenu({ project }: { project: ProjectSummary }) {
   }
 
   const itemCls =
-    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[#334155] hover:bg-[#F1F5F9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#2563EB]";
+    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[#334155] hover:bg-[#F1F5F9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#2563EB] disabled:cursor-not-allowed disabled:opacity-50";
+  const busy = actions.acting != null && actions.acting.startsWith(`${project.id}:`);
+  // Legacy URL groups are read-only compatibility rows: only actions that
+  // genuinely work are shown (never a dead menu item).
+  const canonical = !project.legacy && project.projectId != null;
+  const connected = canonical && project.connectionStatus === "connected";
 
   return (
     <div ref={wrapRef} className="relative shrink-0">
@@ -131,7 +156,7 @@ function CardMenu({ project }: { project: ProjectSummary }) {
         <div
           role="menu"
           aria-label={`Actions for ${project.name}`}
-          className="absolute right-0 top-full z-30 mt-1 w-48 rounded-lg border border-[#E2E8F0] bg-white p-1 shadow-[0_8px_24px_rgba(17,24,39,0.12)]"
+          className="absolute right-0 top-full z-30 mt-1 w-52 rounded-lg border border-[#E2E8F0] bg-white p-1 shadow-[0_8px_24px_rgba(17,24,39,0.12)]"
           onClick={(e) => e.stopPropagation()}
         >
           <Link
@@ -150,14 +175,32 @@ function CardMenu({ project }: { project: ProjectSummary }) {
           >
             View runs
           </Link>
-          <Link
-            role="menuitem"
-            href={`/projects/${project.id}/settings`}
-            className={itemCls}
-            onClick={() => setOpen(false)}
-          >
-            Project settings
-          </Link>
+          {canonical ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={itemCls}
+              disabled={busy || !connected}
+              title={connected ? "Start a new analysis run" : "Reconnect the repository before re-analyzing"}
+              onClick={() => {
+                setOpen(false);
+                actions.onReanalyze(project);
+              }}
+            >
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+              {busy && actions.acting === `${project.id}:reanalyze` ? "Starting…" : "Re-analyze repository"}
+            </button>
+          ) : null}
+          {canonical ? (
+            <Link
+              role="menuitem"
+              href={`/projects/${project.id}/settings`}
+              className={itemCls}
+              onClick={() => setOpen(false)}
+            >
+              Project settings
+            </Link>
+          ) : null}
           <button type="button" role="menuitem" className={itemCls} onClick={() => void copyUrl()}>
             {copied ? (
               <Check className="h-3.5 w-3.5 text-[#059669]" aria-hidden />
@@ -166,23 +209,60 @@ function CardMenu({ project }: { project: ProjectSummary }) {
             )}
             {copied ? "Copied URL" : "Copy repository URL"}
           </button>
+          {canonical && project.connectionStatus !== "disconnected" ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={itemCls}
+              disabled={busy}
+              onClick={() => {
+                setOpen(false);
+                actions.onDisconnect(project);
+              }}
+            >
+              Disconnect repository
+            </button>
+          ) : null}
+          {canonical ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={`${itemCls} text-[#B91C1C] hover:bg-[#FEF2F2]`}
+              disabled={busy}
+              onClick={() => {
+                setOpen(false);
+                actions.onDelete(project);
+              }}
+            >
+              Delete project
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-function ProjectCard({ project }: { project: ProjectSummary }) {
+function ProjectCard({ project, actions }: { project: ProjectSummary; actions: CardActions }) {
   const status = projectCardStatus(project);
   const latest = project.latest;
+  const running = latest != null && isRunningStatus(latest.status);
+  const sha = shortSha(latest?.target_revision);
+  // Owner/name identity — the raw clone URL never sits in the visual
+  // hierarchy (copy-URL lives in the menu; full URL stays a tooltip).
+  const identity =
+    project.repoOwner && project.repoName
+      ? `${project.repoOwner}/${project.repoName}`
+      : project.repositoryUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
   const activity = latest
-    ? `${latest.status.replace(/_/g, " ")} · ${formatActivity(project.lastActivity)}`
-    : "No runs yet";
+    ? formatActivity(project.lastActivity)
+    : connectionLabel(project.connectionStatus);
+  const stage = (latest?.current_stage ?? "").trim();
 
   return (
     <article
       aria-label={project.name}
-      className="flex h-full flex-col rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(17,24,39,0.06)] transition-shadow hover:shadow-[0_4px_16px_rgba(17,24,39,0.08)] sm:aspect-square"
+      className="flex h-full flex-col rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_2px_rgba(17,24,39,0.06)] transition-shadow hover:shadow-[0_4px_16px_rgba(17,24,39,0.08)]"
     >
       <div className="flex items-start justify-between gap-2">
         <span
@@ -191,7 +271,7 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
         >
           <FolderKanban className="h-4 w-4" />
         </span>
-        <CardMenu project={project} />
+        <CardMenu project={project} actions={actions} />
       </div>
 
       <div className="mt-3 min-w-0">
@@ -202,16 +282,39 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
           {project.name}
         </h2>
         <p
-          title={project.repositoryUrl}
+          title={`${identity}${project.branch ? ` · ${project.branch}` : ""}\n${project.repositoryUrl}`}
           className="mt-0.5 truncate font-mono text-[11.5px] text-[#64748B]"
         >
-          {project.repositoryUrl}
+          {identity}
+          {project.branch ? <span className="text-[#94A3B8]"> · {project.branch}</span> : null}
         </p>
       </div>
 
-      <div className="mt-2.5">
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
         <StatusBadge status={status} />
+        {sha ? (
+          <span title={`Commit ${latest?.target_revision}`} className="inline-flex items-center rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 font-mono text-[11px] text-[#475569]">
+            #{sha}
+          </span>
+        ) : null}
       </div>
+
+      {running ? (
+        <div className="mt-2" role="status" aria-label={`Analysis running${stage ? ` at stage ${stage}` : ""}`}>
+          {/* Indeterminate progress: animated presence only — no invented %. */}
+          <div aria-hidden className="h-1 overflow-hidden rounded-full bg-[#DBEAFE]">
+            <div className="h-full w-1/3 rounded-full bg-[#2563EB] motion-safe:animate-pulse" />
+          </div>
+          <p className="mt-1 truncate text-[12px] text-[#1D4ED8]" title={stage || "Analysis running"}>
+            {stage ? `Analyzing · ${stage}` : "Analysis running…"}
+          </p>
+        </div>
+      ) : null}
+      {latest?.status === "failed" && latest.error_summary ? (
+        <p className="mt-2 line-clamp-2 break-words text-[12.5px] text-[#B91C1C]" title={latest.error_summary}>
+          {latest.error_summary}
+        </p>
+      ) : null}
 
       <p className="mt-2 min-w-0 truncate text-[12.5px] text-[#64748B]" title={activity}>
         {activity}
@@ -219,7 +322,6 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
       {project.totalRuns > 0 ? (
         <p className="mt-0.5 text-[12px] text-[#94A3B8]">
           {project.totalRuns} run{project.totalRuns === 1 ? "" : "s"}
-          {project.latest?.is_demo ? " · DEMO" : ""}
         </p>
       ) : null}
 
@@ -246,14 +348,14 @@ function SkeletonGrid() {
       {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
         <div
           key={i}
-          className="rounded-lg border border-[#E2E8F0] bg-white p-4 sm:aspect-square"
+          className="flex h-full flex-col rounded-lg border border-[#E2E8F0] bg-white p-4"
         >
           <div className="flex items-start justify-between">
             <div className="h-8 w-8 rounded-md bg-[#F1F5F9]" />
             <div className="h-6 w-6 rounded-md bg-[#F1F5F9]" />
           </div>
           <div className="mt-3 h-4 w-3/4 rounded bg-[#F1F5F9]" />
-          <div className="mt-2 h-3 w-full rounded bg-[#F1F5F9]" />
+          <div className="mt-2 h-3 w-1/2 rounded bg-[#F1F5F9]" />
           <div className="mt-3 h-5 w-24 rounded-full bg-[#F1F5F9]" />
           <div className="mt-auto pt-3">
             <div className="h-4 w-28 rounded bg-[#F1F5F9]" />
@@ -264,6 +366,10 @@ function SkeletonGrid() {
   );
 }
 
+type ConfirmState =
+  | { kind: "disconnect"; project: ProjectSummary }
+  | { kind: "delete"; project: ProjectSummary };
+
 export function ProjectHub() {
   const { projects, loading, error, backendReachable, refresh } = useProjects();
   const [query, setQuery] = useState("");
@@ -271,6 +377,9 @@ export function ProjectHub() {
   const [sort, setSort] = useState<ProjectSort>("recent");
   const [filterOpen, setFilterOpen] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [acting, setActing] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const filterWrapRef = useRef<HTMLDivElement>(null);
   const filterButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -321,6 +430,71 @@ export function ProjectHub() {
     setQuery("");
     setActive([]);
   }
+
+  async function reanalyze(project: ProjectSummary) {
+    if (!project.projectId) return;
+    setActing(`${project.id}:reanalyze`);
+    setActionError(null);
+    try {
+      await createProjectRun(project.projectId, {});
+      await refresh();
+    } catch (err) {
+      const code = err instanceof Error && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+      setActionError(
+        code === "DEPLOYMENT_BUSY"
+          ? "Another analysis is already running (V1 runs one at a time). Try again once it finishes."
+          : code === "PROJECT_NOT_CONNECTED"
+            ? `“${project.name}” is not connected, so no analysis can start. Verify or reconnect it first.`
+            : err instanceof Error ? err.message : "Could not start a new analysis.",
+      );
+    } finally {
+      setActing(null);
+    }
+  }
+
+  async function confirmAction() {
+    if (!confirm) return;
+    const pid = confirm.project.projectId;
+    if (pid == null) return;
+    const { kind, project } = confirm;
+    const id: string = pid;
+    setActing(`${project.id}:${kind}`);
+    setActionError(null);
+    try {
+      if (kind === "disconnect") await disconnectProject(id);
+      else await deleteProject(id);
+      setConfirm(null);
+      await refresh();
+    } catch (err) {
+      const code = err instanceof Error && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+      setActionError(
+        code === "ACTIVE_RUNS"
+          ? `“${project.name}” has a run still in flight, so deletion was refused to protect it. Disconnect instead, or retry once the run finishes.`
+          : err instanceof Error ? err.message : `Could not ${kind} this project.`,
+      );
+      setConfirm(null);
+    } finally {
+      setActing(null);
+    }
+  }
+
+  const actions: CardActions = useMemo(
+    () => ({
+      onReanalyze: (p) => void reanalyze(p),
+      onDisconnect: (p) => {
+        setActionError(null);
+        setConfirm({ kind: "disconnect", project: p });
+      },
+      onDelete: (p) => {
+        setActionError(null);
+        setConfirm({ kind: "delete", project: p });
+      },
+      acting,
+    }),
+    // reanalyze/refresh are stable enough per render; acting drives busy UI.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [acting],
+  );
 
   const failed = !!error && !backendReachable && !loading;
   const hasCache = projects.length > 0;
@@ -539,6 +713,24 @@ export function ProjectHub() {
             </div>
           ) : null}
 
+          {/* Action errors (mutations: re-analyze, disconnect, delete) */}
+          {actionError ? (
+            <div
+              role="alert"
+              className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-[13px]"
+            >
+              <p className="min-w-0 flex-1 break-words text-[#991B1B]">{actionError}</p>
+              <button
+                type="button"
+                aria-label="Dismiss error"
+                onClick={() => setActionError(null)}
+                className="shrink-0 rounded-md p-1 text-[#B91C1C] hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#2563EB]"
+              >
+                <X className="h-4 w-4" aria-hidden />
+              </button>
+            </div>
+          ) : null}
+
           {/* Content */}
           <div className="mt-4">
             {showSkeletons ? (
@@ -576,8 +768,8 @@ export function ProjectHub() {
                 </span>
                 <p className="mt-3 text-[15px] font-semibold text-[#111827]">No projects yet</p>
                 <p className="mt-1 max-w-md text-sm leading-relaxed text-[#64748B]">
-                  Connect a repository to record its first analysis. Projects appear
-                  here once the backend records a run for them.
+                  Connect a GitHub repository to record its first analysis. Only
+                  verified, readable repositories appear here — nothing simulated.
                 </p>
                 <button
                   type="button"
@@ -616,7 +808,7 @@ export function ProjectHub() {
                 className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
               >
                 {visible.map((p) => (
-                  <ProjectCard key={p.id} project={p} />
+                  <ProjectCard key={p.id} project={p} actions={actions} />
                 ))}
               </div>
             )}
@@ -625,12 +817,54 @@ export function ProjectHub() {
           <p className="mt-5 border-t border-[#E2E8F0] pt-3 text-[12px] leading-relaxed text-[#94A3B8]">
             Project status reflects recorded backend runs only. A finished run is
             reported as completed — never as healthy without observed health-check
-            evidence.
+            evidence. Analysis is not a deployment: MEDHA analyzes locally and
+            reports verification honestly.
           </p>
         </div>
       </div>
       {connecting ? (
         <ConnectRepoDialog onClose={() => setConnecting(false)} onDone={() => void refresh()} />
+      ) : null}
+      {confirm ? (
+        <Dialog
+          title={confirm.kind === "disconnect" ? "Disconnect repository?" : "Delete project?"}
+          danger={confirm.kind === "delete"}
+          confirmLabel={
+            acting
+              ? confirm.kind === "disconnect" ? "Disconnecting…" : "Deleting…"
+              : confirm.kind === "disconnect" ? "Disconnect" : "Delete project"
+          }
+          confirmDisabled={acting != null}
+          onConfirm={() => void confirmAction()}
+          onCancel={() => setConfirm(null)}
+          body={
+            <div className="space-y-2">
+              <p>
+                {confirm.kind === "disconnect" ? (
+                  <>
+                    Disconnect <span className="font-semibold text-medha-text">{confirm.project.name}</span>?
+                    Recorded runs stay inspectable, but new pushes stop routing here and
+                    analyses can no longer start until it is reconnected.
+                  </>
+                ) : (
+                  <>
+                    Delete <span className="font-semibold text-medha-text">{confirm.project.name}</span> from
+                    this workspace? Recorded run history is preserved in the backend, but
+                    the connection mapping is removed.
+                  </>
+                )}
+              </p>
+              {confirm.kind === "delete" &&
+              confirm.project.latest != null &&
+              isRunningStatus(confirm.project.latest.status) ? (
+                <p role="note" className="rounded-lg border border-medha-warning/30 bg-medha-warning-soft px-3 py-2 text-[13px] text-medha-warning">
+                  A run is currently in flight — deletion will be refused until it
+                  finishes. Disconnect instead, or wait and retry.
+                </p>
+              ) : null}
+            </div>
+          }
+        />
       ) : null}
     </AppShell>
   );

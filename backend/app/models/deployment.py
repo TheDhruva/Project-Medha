@@ -167,6 +167,7 @@ class ProjectRecord(BaseModel):
     branch: str = "main"
     visibility: str = "unverified"
     connection_status: str = "pending"
+    deploy_target: str | None = None
     created_at: str
     updated_at: str
 
@@ -182,6 +183,7 @@ class ProjectRecord(BaseModel):
             "branch": self.branch,
             "visibility": self.visibility,
             "connection_status": self.connection_status,
+            "deploy_target": self.deploy_target,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

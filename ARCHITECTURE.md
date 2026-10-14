@@ -92,7 +92,8 @@ Preflight · Analyzer · Docker · Nginx · Security · Mediator/CNP · Verifier
 
 ## 6. Data & Events
 
-- Deployments + events in SQLite (`DATA_MODEL.md`, `API_CONTRACT.md`).
+- Deployments + events in SQLite by default, Supabase Postgres when
+  `MEDHA_DATABASE_URL` is set (ADR-029) (`DATA_MODEL.md`, `API_CONTRACT.md`).
 - SSE streams stage/status/metadata for UI (no fake chain-of-thought).
 
 ---
@@ -101,7 +102,7 @@ Preflight · Analyzer · Docker · Nginx · Security · Mediator/CNP · Verifier
 
 | Mode | Path |
 |------|------|
-| Demo | `DemoRunner` fixtures |
+| Demo fixtures (test-only) | `app/demo/*` fixtures; product demo path removed (`410 DEMO_REMOVED`) |
 | Real + simulator | Default `choose_executor` path |
 | Real + Docker | `MEDHA_DOCKER_EXECUTE=true` |
 
@@ -109,4 +110,6 @@ Preflight · Analyzer · Docker · Nginx · Security · Mediator/CNP · Verifier
 
 ## 8. Out of scope (architecture)
 
-No Redis, PostgreSQL, Kafka, Celery, Kubernetes, cloud, SSH, DNS, CI/CD, multi-host.
+No Redis, Kafka, Celery, Kubernetes, cloud provisioning, SSH, DNS, CI/CD,
+multi-host. SQLite default; Supabase Postgres only via `MEDHA_DATABASE_URL`
+(ADR-029). No other database servers.

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from app.models.domain import _utc_now
+from app.core.events import utc_now_iso
 
 
 class CheckSeverity(str, Enum):
@@ -58,7 +58,7 @@ class VerificationResult(BaseModel):
     blocking_failures: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     score: int = 100
-    finished_at: str = Field(default_factory=_utc_now)
+    finished_at: str = Field(default_factory=utc_now_iso)
     replan_count: int = 0
     is_demo: bool = False
 
@@ -96,7 +96,7 @@ class CriticResult(BaseModel):
     recommendation: CriticRecommendation
     findings: list[str] = Field(default_factory=list)
     summary: str
-    finished_at: str = Field(default_factory=_utc_now)
+    finished_at: str = Field(default_factory=utc_now_iso)
     is_demo: bool = False
 
     def to_ui(self) -> dict[str, Any]:
@@ -162,7 +162,7 @@ class ExecutionNode(BaseModel):
     action: str
     service: str
     status: str = NodeStatus.PENDING.value
-    timestamp: str = Field(default_factory=_utc_now)
+    timestamp: str = Field(default_factory=utc_now_iso)
     parent_nodes: list[str] = Field(default_factory=list)
     child_nodes: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
@@ -223,7 +223,7 @@ class ExecutionGraph(BaseModel):
     deployment_id: str
     nodes: list[ExecutionNode] = Field(default_factory=list)
     edges: list[ExecutionEdge] = Field(default_factory=list)
-    updated_at: str = Field(default_factory=_utc_now)
+    updated_at: str = Field(default_factory=utc_now_iso)
     is_demo: bool = False
 
     def to_ui(self) -> dict[str, Any]:

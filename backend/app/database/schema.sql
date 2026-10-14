@@ -51,6 +51,12 @@ CREATE INDEX IF NOT EXISTS idx_deployments_owner_status
     ON deployments (owner_sub, status);
 CREATE INDEX IF NOT EXISTS idx_deployments_status
     ON deployments (status);
+CREATE INDEX IF NOT EXISTS idx_deployments_project
+    ON deployments (project_id);
+CREATE INDEX IF NOT EXISTS idx_deployments_project_status
+    ON deployments (project_id, status);
+CREATE INDEX IF NOT EXISTS idx_events_deployment
+    ON events (deployment_id);
 
 CREATE TABLE IF NOT EXISTS users (
     clerk_sub TEXT PRIMARY KEY,
@@ -116,6 +122,7 @@ CREATE TABLE IF NOT EXISTS projects (
     branch TEXT NOT NULL DEFAULT 'main',
     visibility TEXT NOT NULL DEFAULT 'unverified',
     connection_status TEXT NOT NULL DEFAULT 'pending',
+    deploy_target TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -151,6 +158,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_repo_branch_seq
     ON jobs (repository, branch, seq);
 CREATE INDEX IF NOT EXISTS idx_jobs_status
     ON jobs (status);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_created
+    ON jobs (status, created_at);
 
 -- Commit history metadata (Phase 7). Enough to render the graph without
 -- re-cloning; diff summaries attach per commit on demand.

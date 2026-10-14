@@ -1,6 +1,6 @@
 # UI_SPEC.md — Bright Mode Dashboard
 
-Status: **IMPLEMENTED** (Phase 1 UI with DEMO/MOCK data). Backend wiring is Phase 2–3.
+Status: **TESTED** (Phase 12; Bright Mode dashboard wired to the real backend via SSE + same-origin API. Demo playback removed; fixtures are test-only).
 
 ---
 

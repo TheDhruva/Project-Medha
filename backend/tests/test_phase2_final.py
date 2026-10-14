@@ -289,6 +289,22 @@ def test_real_execution_config_validation(monkeypatch):
         settings.medha_env, settings.executor_mode, settings.docker_execute = old
 
 
+def test_production_rejects_docker_execute_flag():
+    from app.core.config import Settings
+
+    prod = {
+        "MEDHA_ENV": "production",
+        "MEDHA_AUTH_MODE": "clerk",
+        "CLERK_DOMAIN": "x.clerk.accounts.dev",
+        "MEDHA_API_TOKEN": "t",
+        "MEDHA_DATABASE_URL": "postgresql://u:p@h:5432/db",
+        "MEDHA_EXECUTOR_MODE": "disabled",
+    }
+    assert Settings(**{**prod, "MEDHA_DOCKER_EXECUTE": "false"}).hosted_security_error() is None
+    err = Settings(**{**prod, "MEDHA_DOCKER_EXECUTE": "true"}).hosted_security_error()
+    assert err is not None and "MEDHA_DOCKER_EXECUTE" in err
+
+
 def test_cross_tenant_owned_record_blocked(monkeypatch):
     import asyncio
 

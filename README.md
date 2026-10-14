@@ -148,7 +148,7 @@ Troubleshooting:
 
 ## Configuration
 
-`.env.example` is the canonical template. Copy it to `.env`; do not commit local environment files. The default configuration is intentionally safe for demonstrations:
+`.env.example` is the canonical template. Copy it to `.env`; do not commit local environment files. Frontend variables use a separate template: copy `frontend/.env.example` to `frontend/.env.local` when split local development needs an API override, token auth, or Clerk keys. The default configuration is intentionally safe for demonstrations:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -160,7 +160,7 @@ Troubleshooting:
 | `MEDHA_DOCKER_CLEANUP` | `true` | Clean up Docker resources |
 | `MEDHA_MAX_VERIFY_ROUNDS` | `3` | Maximum verification/replan rounds |
 | `MEDHA_CORS_ORIGINS` | `http://localhost:3000` | Allowed frontend origin |
-| `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:8000` | Frontend API URL |
+| `NEXT_PUBLIC_API_BASE_URL` | *(unset: same-origin)* | Frontend API override for split local dev; set in `frontend/.env.local` (see `frontend/.env.example`) |
 | `MEDHA_AI_ENABLED` | `false` | AI advisories (Groq primary, Gemini fallback). Deterministic pipeline always works when off |
 | `GROQ_API_KEY` / `GROQ_MODEL` | *(unset)* / `openai/gpt-oss-20b` | Primary provider key (server-only) + model |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | *(unset)* / `gemini-3.8-flash` | Fallback provider key (server-only) + model |
@@ -173,7 +173,7 @@ Troubleshooting:
 
 Optional LLM mediation is disabled by default and is not required for the core workflow. With `MEDHA_AI_ENABLED=true` and provider keys set, runs gain schema-validated advisory notes (change summary, repo interpretation, plan suggestions, agent explanations, critic assist, review brief) recorded in run history as `ai_assisted`/`degraded`; without keys or on provider failure the pipeline continues deterministically (`rule_based`/`unavailable`). Never put real keys in `.env.example`, source files, issues, logs, or prompts. Provider keys are server-only: they never appear in frontend variables, API responses, or the UI (Settings → AI assistance shows safe status only).
 
-Push-triggered approval flow: connect a repository as an owner-scoped project (`POST /api/projects` or Project Hub → Connect GitHub repo, then Verify), then configure the GitHub webhook (`POST /api/webhooks/github`, push events, JSON) after deployment. Verified pushes check out the exact pushed SHA, analyze without executing, and persist a `ready` proposal; `POST /api/proposals/{id}/approve` revalidates project linkage, SHA, and the exact plan hash before execution. See the Proposals page. Private repositories are unsupported until a GitHub App exists (ADR-036). Clerk `clerk` mode scopes projects, runs, and proposals to the verified session user.
+Push-triggered approval flow: connect a repository as an owner-scoped project (`POST /api/projects` or Project Hub → Connect GitHub repo, then Verify), then configure the GitHub webhook (`POST /api/webhooks/github`, push events, JSON) after deployment. Verified pushes check out the exact pushed SHA, analyze without executing, and persist a `ready` proposal; `POST /api/proposals/{id}/approve` revalidates project linkage, SHA, and the exact plan hash before execution. See the Proposals page. Private repositories work through a configured GitHub App (`GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, ADR-036). Clerk `clerk` mode scopes projects, runs, and proposals to the verified session user.
 
 ## Testing
 
@@ -181,7 +181,7 @@ Backend tests:
 
 ```powershell
 cd backend
-\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 Frontend checks:
@@ -196,14 +196,14 @@ npm run build
 Evaluation runners can be started from `backend`:
 
 ```powershell
-\.venv\Scripts\python.exe -m app.evaluation.run_all
+.\.venv\Scripts\python.exe -m app.evaluation.run_all
 ```
 
 Docker tests are optional and require a running Docker daemon:
 
 ```powershell
 $env:MEDHA_DOCKER_EXECUTE = "true"
-\.venv\Scripts\python.exe -m pytest tests/test_docker_e2e.py -m docker -q
+.\.venv\Scripts\python.exe -m pytest tests/test_docker_e2e.py -m docker -q
 ```
 
 ## Repository layout
@@ -213,7 +213,8 @@ backend/        FastAPI service, agents, workflow, persistence, and tests
 frontend/       Next.js dashboard and UI tests
 docs/           Demo, validation, evaluation, and viva material
 *.md            Architecture, protocol, data, API, and scope specifications
-.env.example    Safe local configuration template
+.env.example    Safe local configuration template (backend + supervisor)
+frontend/.env.example  Frontend (Next.js) configuration template
 ```
 
 ## Documentation
