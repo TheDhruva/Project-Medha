@@ -39,6 +39,7 @@ def run_verifier(
     checks.append(_compose_check(config_fragments, profile))
     checks.append(_security_check(constraints, config_fragments))
     checks.append(_constraints_consistent(negotiation, constraints))
+    checks.append(_port_claims_distinct(constraints))
     checks.append(_exec_order_acyclic(constraints))
     checks.append(_env_required_check(constraints, config_fragments, force_fail_env=force_fail_env))
     checks.append(_target_local_check(profile))
@@ -287,6 +288,53 @@ def _constraints_consistent(negotiation: NegotiationResult, constraints: list[Co
             severity=CheckSeverity.HIGH,
         )
     return _ok("constraints", "Constraints", "constraints", "CNP-001", "Agreed set consistent")
+
+
+def _port_claims_distinct(constraints: list[Constraint]) -> VerificationCheck:
+    """Negotiated host ports must be distinct (PORT-001) and valid (PORT-002).
+
+    Runs on the post-CNP constraint set: two active PORT_CLAIMs sharing one
+    host port means negotiation did not actually resolve the conflict, and
+    the execution plan cannot publish both. Revalidates after every
+    host-port renegotiation before execution.
+    """
+    seen: dict[tuple[int, str], str] = {}
+    for c in constraints:
+        if c.type != ConstraintType.PORT_CLAIM:
+            continue
+        if c.status not in {
+            ConstraintStatus.ACCEPTED,
+            ConstraintStatus.PROPOSED,
+            ConstraintStatus.SUPERSEDED,
+        }:
+            continue
+        port = c.payload.get("port")
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= 65535
+        ):
+            return _fail(
+                "ports",
+                "Ports",
+                "constraints",
+                "PORT-002",
+                f"PORT_CLAIM '{c.constraint_id}' carries an invalid host port: {port!r}",
+                severity=CheckSeverity.HIGH,
+            )
+        key = (port, str(c.payload.get("protocol") or "tcp"))
+        if key in seen:
+            return _fail(
+                "ports",
+                "Ports",
+                "constraints",
+                "PORT-001",
+                f"Host port {port} is still claimed by '{seen[key]}' and "
+                f"'{c.constraint_id}' after negotiation; no clean publish mapping exists",
+                severity=CheckSeverity.HIGH,
+            )
+        seen[key] = c.constraint_id
+    return _ok("ports", "Ports", "constraints", "PORT-001", "Negotiated host ports are distinct")
 
 
 def _exec_order_acyclic(constraints: list[Constraint]) -> VerificationCheck:

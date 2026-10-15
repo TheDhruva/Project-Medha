@@ -145,7 +145,9 @@ export function ExecutionModeBadge({
           ? "SIMULATED"
           : mode === "demo"
             ? "DEMO"
-            : null;
+            : mode === "unconfigured"
+              ? "NOT CONFIGURED"
+              : null;
   if (!label) return null;
   const hot = mode === "real";
   return (
@@ -164,7 +166,9 @@ export function ExecutionModeBadge({
             ? "Controlled local execution (BusyBox), not a full application build"
             : mode === "simulator"
               ? "Deterministic simulation — no containers were started"
-              : "Deterministic demo fixture"
+              : mode === "unconfigured"
+                ? "Blocked before execution was selected — configure an executor and retry"
+                : "Deterministic demo fixture"
       }
     >
       <span

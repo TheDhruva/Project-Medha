@@ -533,6 +533,13 @@ describe("execution mode and runtime logs hydration", () => {
     });
     expect(snap.executionMode).toBe("controlled_test");
   });
+
+  it("passes through an explicit unconfigured mode instead of guessing simulator", () => {
+    const snap = buildBackendSnapshot({
+      api: { ...baseApi, result: { execution_mode: "unconfigured" } },
+    });
+    expect(snap.executionMode).toBe("unconfigured");
+  });
 });
 
 describe("terminal pipeline reconciliation", () => {

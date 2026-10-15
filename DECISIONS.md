@@ -574,3 +574,32 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
   recorded summary. Bun and conflicting-managers still fail closed before
   any Docker work; the Next.js build/readiness path is unchanged.
 - **Status:** Accepted
+
+## ADR-042 - Authoritative port contract (internal vs host) + bounded host renegotiation
+
+- **Decision:** The final validated execution plan owns one port contract
+  (`internal_port` from repository evidence, `host_port` from the CNP app
+  PORT_CLAIM). Only the host side is availability-checked/probed; a busy
+  host port triggers one bounded CNP `alternative` renegotiation
+  (`apply_decision` + verifier/critic revalidation), never a silent remap.
+  The contract binds the RuntimeSpec (`with_host_port` keeps PORT/HOSTNAME
+  and python `--port` on the internal port), Docker publish/probe mapping,
+  compose app-service entry, canonical plan hash, and every terminal result
+  payload (which also carry `target_sha`, `requested_ref`, and an explicit
+  `execution_mode`: `real` | `simulator` | `unconfigured`). Remote runs
+  without a pinned SHA fail closed (`NO_PINNED_REVISION`) before real
+  execution; simulator runs skip host availability claims entirely.
+- **Why:** Every repeat run failed with `Negotiated target port 8080 is no
+  longer available` because (a) the CNP host alternative was never
+  propagated past negotiation (plan, runtime, publish, and probe all reused
+  the stale requested port), (b) a busy *host* socket was treated as proof
+  the *container-internal* port was unusable, and (c) pre-execution failure
+  payloads omitted `target_sha`/`execution_mode`, so the UI fell back to
+  `Revision Unknown` / `Mode Simulated` for runs that never simulated.
+- **Consequences:** No CNP bypass (renegotiation reuses `apply_decision`
+  and the verifier/critic gate; max 3 CNP rounds unchanged). New verifier
+  rule `PORT-001/002` rejects unresolved/duplicate host claims. Old
+  approvals hash-mismatch closed (`STALE_PLAN`) since the plan identity now
+  includes the contracted mapping. Successful-container lifecycle, CEG,
+  rollback, and security checks are untouched.
+- **Status:** Accepted

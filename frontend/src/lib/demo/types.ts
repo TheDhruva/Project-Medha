@@ -381,7 +381,12 @@ export interface TraceEvent {
 }
 
 /** How the run actually executed — from GET /logs `execution_mode`, never guessed. */
-export type ExecutionMode = "demo" | "simulator" | "controlled_test" | "real";
+export type ExecutionMode =
+  | "demo"
+  | "simulator"
+  | "controlled_test"
+  | "real"
+  | "unconfigured";
 
 /** Real container stdout/stderr from GET /logs `runtime_logs` (null = none). */
 export interface RuntimeLogsView {

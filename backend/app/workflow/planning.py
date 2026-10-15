@@ -73,6 +73,90 @@ def _plan_hash(canonical: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _selected_execution_mode(settings: Any) -> str:
+    """Honest execution-mode label for run records (never a fallback guess).
+
+    "real" only when real execution is actually configured; "simulator" only
+    for the explicit test-only mode; otherwise "unconfigured" (blocked before
+    any execution was selected). Callers persist this on terminal payloads so
+    the UI never has to infer — or misreport — how a run executed.
+    """
+    mode = (getattr(settings, "executor_mode", None) or "auto").strip().lower()
+    if mode in {"real", "docker"} and bool(getattr(settings, "docker_execute", False)):
+        return "real"
+    if mode == "simulator":
+        return "simulator"
+    return "unconfigured"
+
+
+def _port_contract_hash(contract: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Binding-relevant slice of the port contract for the plan identity."""
+    if not isinstance(contract, dict):
+        return None
+    return {
+        "internal_port": contract.get("internal_port"),
+        "host_port": contract.get("host_port"),
+        "app_service": contract.get("app_service"),
+    }
+
+
+def _sync_compose_ports(config_fragments: dict, contract: Any) -> dict:
+    """Publish the contracted host→container mapping on the app service entry.
+
+    The legacy compose fragment still carries the pre-negotiation
+    `requested:requested` guess; the controlled-test executor reads these
+    entries, so a negotiated host alternative (or a script-pinned internal
+    port) must be reflected here — never edited silently elsewhere.
+    Copy-on-write: the caller's dict is never mutated in place.
+    """
+    try:
+        app_service = contract.app_service
+        mapping = f"{int(contract.host_port)}:{int(contract.internal_port)}"
+    except (AttributeError, TypeError, ValueError):
+        return config_fragments
+    if not app_service:
+        return config_fragments
+    fragments = dict(config_fragments or {})
+    docker = dict(fragments.get("docker") or {})
+    fragment = dict(docker.get("compose_fragment") or {})
+    services = dict(fragment.get("services") or {})
+    svc = services.get(app_service)
+    if not isinstance(svc, dict):
+        return config_fragments
+    services[app_service] = {**svc, "ports": [mapping]}
+    fragment["services"] = services
+    docker["compose_fragment"] = fragment
+    fragments["docker"] = docker
+    return fragments
+
+
+def _terminal_provenance(
+    *,
+    resolved_sha: str | None,
+    requested_ref: str | None,
+    repository_url: str | None,
+    selected_mode: str,
+    port_contract: dict[str, Any] | None,
+    repository_intelligence: dict | None = None,
+) -> dict[str, Any]:
+    """Explicit run identity for terminal payloads (no inferred mode/revision).
+
+    Every pre-execution and execution terminal result carries the pinned
+    source SHA (None only when the run genuinely has none), the requested
+    ref, the explicitly selected execution mode, and the effective port
+    contract — so the UI never falls back to "Unknown" revision or an
+    inferred "Simulated" mode.
+    """
+    return {
+        "execution_mode": selected_mode,
+        "target_sha": resolved_sha,
+        "requested_ref": requested_ref,
+        "repository_url": repository_url,
+        "port_contract": port_contract,
+        "repository_intelligence": repository_intelligence,
+    }
+
+
 def _exact_sha_or_none(value: str | None) -> str | None:
     """Return the SHA when it is an exact 40-hex commit, else None.
 
@@ -1467,6 +1551,294 @@ class PlanningPipeline:
             ui_negotiation,
         )
 
+    @staticmethod
+    def _scoped_checkout(profile, acquisition):
+        """Checkout the selected application subdirectory (shared by detect + execute)."""
+        checkout = acquisition.path
+        try:
+            target = (profile.inferred_stack.selected_target or "").strip()
+            if target and target != ".":
+                scoped = acquisition.path / target
+                if scoped.is_dir() and acquisition.path in list(scoped.parents):
+                    checkout = scoped
+        except Exception:  # noqa: BLE001 - fall back to the repo root
+            checkout = acquisition.path
+        return checkout
+
+    async def _ensure_host_port(
+        self,
+        *,
+        deployment_id: str,
+        profile,
+        constraints: list,
+        negotiation,
+        config_fragments: dict,
+        verification,
+        critic,
+        replan_count: int,
+        change_requirements,
+        change_risk,
+        acquisition,
+        delay: float,
+        ui_constraints: list,
+        ui_negotiation: dict,
+    ) -> dict:
+        """Derive the authoritative port contract and ensure the host side is usable.
+
+        The container-internal port comes from repository evidence (an
+        explicit start-script pin wins, otherwise the requested target) and is
+        never host-probed. The host-published port comes from the negotiated
+        app PORT_CLAIM. When real execution is not selected the contract is
+        recorded without any availability claim (the simulator binds nothing).
+
+        When real execution IS selected and the negotiated host port is
+        occupied, a supported alternative is negotiated through the existing
+        CNP alternative flow (``apply_decision``) and the updated plan is
+        revalidated by the verifier/critic gate before execution — never
+        remapped silently. Returns ``{"ok": True, ...}`` with the contract
+        and refreshed gate artifacts, or ``{"ok": False, ...}`` with a precise
+        diagnostic when no valid alternative exists.
+        """
+        from app.execution.ports import (
+            negotiate_host_alternative,
+            resolve_port_contract,
+        )
+
+        settings = get_settings()
+        selected_mode = _selected_execution_mode(settings)
+        real_requested = selected_mode == "real"
+
+        # Internal port: repository evidence, resolved once from the exact
+        # checkout that real execution will build (scoped to the deployment
+        # target). Detection failure here never invents a port — the executor
+        # owns the honest unsupported-stack diagnostic.
+        internal = profile.target_port
+        checkout = None
+        if acquisition is not None:
+            checkout = self._scoped_checkout(profile, acquisition)
+            try:
+                from app.execution.runtime import detect_runtime
+
+                probe_spec = detect_runtime(checkout, target_port=profile.target_port)
+                internal = probe_spec.internal_port
+            except Exception:  # noqa: BLE001 - executor reports the cause
+                internal = profile.target_port
+
+        contract = resolve_port_contract(profile, constraints, internal_port=internal)
+        fragments = _sync_compose_ports(config_fragments, contract)
+
+        def _ui() -> tuple[list, dict]:
+            refreshed_constraints = [c.to_ui() for c in constraints]
+            refreshed_negotiation = dict(ui_negotiation or {})
+            return refreshed_constraints, refreshed_negotiation
+
+        if not real_requested:
+            refreshed_constraints, refreshed_negotiation = _ui()
+            return {
+                "ok": True,
+                "contract": contract,
+                "constraints": constraints,
+                "config_fragments": fragments,
+                "verification": verification,
+                "critic": critic,
+                "ui_constraints": refreshed_constraints,
+                "ui_negotiation": refreshed_negotiation,
+                "real_requested": False,
+                "selected_mode": selected_mode,
+            }
+
+        # Host-side availability only: a busy host port says nothing about
+        # the container-internal port. (Best-effort preflight — the Docker
+        # publish is authoritative and still verified after start.)
+        if docker_ops.is_port_available(contract.host_port):
+            refreshed_constraints, refreshed_negotiation = _ui()
+            return {
+                "ok": True,
+                "contract": contract,
+                "constraints": constraints,
+                "config_fragments": fragments,
+                "verification": verification,
+                "critic": critic,
+                "ui_constraints": refreshed_constraints,
+                "ui_negotiation": refreshed_negotiation,
+                "real_requested": True,
+                "selected_mode": selected_mode,
+            }
+
+        blocked = contract.host_port
+        decision = negotiate_host_alternative(
+            constraints,
+            blocked,
+            is_available=docker_ops.is_port_available,
+        )
+        if decision is None:
+            return {
+                "ok": False,
+                "reason": (
+                    f"Host port {blocked} is occupied and no supported "
+                    "alternative host port is available. Execution blocked "
+                    "without mutating the validated plan."
+                ),
+                "technical": "PORT_UNAVAILABLE",
+                "code": "PORT_UNAVAILABLE",
+                "conflicting_resource": f"host:127.0.0.1:{blocked}",
+                "attempted": [],
+                "constraints": constraints,
+                "contract": contract.to_dict(),
+                "selected_mode": selected_mode,
+            }
+        from app.cnp.engine import apply_decision
+
+        apply_decision(constraints, decision)
+        import dataclasses as _dataclasses
+
+        contract = _dataclasses.replace(
+            resolve_port_contract(profile, constraints, internal_port=internal),
+            renegotiated=True,
+        )
+        fragments = _sync_compose_ports(config_fragments, contract)
+        refreshed_constraints, refreshed_negotiation = _ui()
+        refreshed_negotiation = {
+            **refreshed_negotiation,
+            "host_renegotiation": {
+                "method": decision.method,
+                "rationale": decision.rationale,
+                "updates": decision.updates,
+            },
+        }
+        await self._agent_start(
+            deployment_id, "mediator",
+            f"Negotiating alternative host port (blocked {blocked}).")
+        await self._agent_done(
+            deployment_id, "mediator", decision.rationale, ok=True)
+        await self._emit(
+            deployment_id,
+            EventType.NEGOTIATION_RESOLVED,
+            decision.rationale,
+            stage=StageId.VERIFY.value,
+            metadata={
+                "simple": decision.rationale,
+                "technical": (
+                    f"method={decision.method} · blocked_host_port={blocked} · "
+                    f"host_port={contract.host_port} · "
+                    f"container_port={contract.internal_port}"
+                ),
+                "decision": decision.model_dump(),
+                "constraints": refreshed_constraints,
+                "negotiation": refreshed_negotiation,
+                "port_contract": contract.to_dict(),
+            },
+            include_agents=True,
+        )
+        # Revalidation gate: the remapped plan must pass verification and
+        # critic approval again before execution — no bypass.
+        reverified = run_verifier(
+            deployment_id=deployment_id,
+            profile=profile,
+            constraints=constraints,
+            negotiation=negotiation,
+            config_fragments=fragments,
+            replan_count=replan_count,
+            is_demo=False,
+            change_requirements=change_requirements,
+            change_risk=change_risk,
+        )
+        self.repo.save_artifacts(
+            deployment_id,
+            verification=reverified.to_ui(),
+            constraints=refreshed_constraints,
+            negotiation=refreshed_negotiation,
+            updated_at=utc_now_iso(),
+        )
+        if not reverified.passed:
+            return {
+                "ok": False,
+                "reason": (
+                    f"Host port {blocked} was remapped to {contract.host_port}, "
+                    "but the updated plan failed revalidation: "
+                    + "; ".join(reverified.blocking_failures[:3])
+                ),
+                "technical": "PORT_REVERIFY_FAILED",
+                "code": "PORT_REVERIFY_FAILED",
+                "conflicting_resource": f"host:127.0.0.1:{blocked}",
+                "attempted": [contract.host_port],
+                "constraints": constraints,
+                "contract": contract.to_dict(),
+                "selected_mode": selected_mode,
+            }
+        await self._emit(
+            deployment_id,
+            EventType.VERIFICATION_PASSED,
+            "Verification passed after host-port renegotiation.",
+            stage=StageId.VERIFY.value,
+            status="success",
+            metadata={
+                "simple": "Re-checked the remapped configuration before execution.",
+                "technical": (
+                    f"passed=true · host_port={contract.host_port} · "
+                    f"container_port={contract.internal_port}"
+                ),
+                "verification": reverified.to_ui(),
+            },
+            include_agents=True,
+        )
+        recritic = run_critic(
+            deployment_id=deployment_id,
+            profile=profile,
+            constraints=constraints,
+            negotiation=negotiation,
+            verification=reverified,
+            config_fragments=fragments,
+        )
+        self.repo.save_artifacts(
+            deployment_id, critic=recritic.to_ui(), updated_at=utc_now_iso()
+        )
+        await self._emit(
+            deployment_id,
+            EventType.CRITIC_COMPLETED,
+            recritic.summary,
+            stage=StageId.VERIFY.value,
+            metadata={
+                "simple": recritic.summary,
+                "technical": (
+                    f"score={recritic.score} · "
+                    f"recommendation={recritic.recommendation.value}"
+                ),
+                "critic": recritic.to_ui(),
+                "verification": reverified.to_ui(),
+            },
+            include_agents=True,
+        )
+        if recritic.recommendation == CriticRecommendation.ESCALATE:
+            return {
+                "ok": False,
+                "reason": (
+                    "Critic escalated after host-port renegotiation — "
+                    "execution blocked."
+                ),
+                "technical": "CRITIC_ESCALATE",
+                "code": "CRITIC_ESCALATE",
+                "conflicting_resource": f"host:127.0.0.1:{blocked}",
+                "attempted": [contract.host_port],
+                "constraints": constraints,
+                "contract": contract.to_dict(),
+                "selected_mode": selected_mode,
+            }
+        if delay:
+            await asyncio.sleep(delay * 0.2)
+        return {
+            "ok": True,
+            "contract": contract,
+            "constraints": constraints,
+            "config_fragments": fragments,
+            "verification": reverified,
+            "critic": recritic,
+            "ui_constraints": refreshed_constraints,
+            "ui_negotiation": refreshed_negotiation,
+            "real_requested": True,
+            "selected_mode": selected_mode,
+        }
+
     async def _fail_replan_stopped(
         self,
         *,
@@ -2026,25 +2398,105 @@ class PlanningPipeline:
 
         ceg = build_ceg_from_plan(exec_plan)
 
-        # Pre-execution safety: port still usable (do not silently remapped).
-        # Hard-fail only when real Docker mutate is enabled.
-        if get_settings().docker_execute and not docker_ops.is_port_available(profile.target_port):
+        # Authoritative port contract: the final validated plan determines
+        # the effective container-internal port and host-published port. A
+        # busy host port triggers a bounded CNP alternative negotiation plus
+        # gate revalidation — never a silent remap, and never conflated with
+        # the internal port (a host conflict cannot invalidate it).
+        _sha_record = self.repo.get(deployment_id)
+        _sha_repo_url = _sha_record.repository_url if _sha_record else None
+        port_resolution = await self._ensure_host_port(
+            deployment_id=deployment_id,
+            profile=profile,
+            constraints=final_constraints,
+            negotiation=negotiation,
+            config_fragments=config_fragments,
+            verification=verification,
+            critic=critic,
+            replan_count=replan_count,
+            change_requirements=change_requirements,
+            change_risk=change_risk,
+            acquisition=acquisition,
+            delay=delay,
+            ui_constraints=ui_constraints,
+            ui_negotiation=ui_negotiation,
+        )
+        if not port_resolution["ok"]:
             await self._fail(
                 deployment_id,
-                (
-                    f"Negotiated target port {profile.target_port} is no longer available. "
-                    "Returning without undocumented plan mutation."
-                ),
-                technical="PORT_UNAVAILABLE",
+                port_resolution["reason"],
+                technical=port_resolution["technical"],
+                result={
+                    "kind": "failed",
+                    "title": port_resolution["code"],
+                    "final_status": "failed",
+                    "message": port_resolution["reason"],
+                    "durationLabel": "verify",
+                    "servicesLabel": "0 / 0 started",
+                    "verificationScore": verification.score if verification else None,
+                    "constraintsResolved": constraints_resolved,
+                    "rollbackScope": None,
+                    "phase": PHASE_LABEL,
+                    "is_demo": False,
+                    "code": port_resolution["code"],
+                    "conflicting_resource": port_resolution.get("conflicting_resource"),
+                    "attempted_host_ports": port_resolution.get("attempted", []),
+                    "blocked": True,
+                    "blocked_stage": "execute",
+                    **_terminal_provenance(
+                        resolved_sha=resolved_sha,
+                        requested_ref=requested_ref,
+                        repository_url=_sha_repo_url,
+                        selected_mode=port_resolution["selected_mode"],
+                        port_contract=port_resolution.get("contract").to_dict()
+                        if port_resolution.get("contract") is not None
+                        else None,
+                        repository_intelligence=repository_intelligence,
+                    ),
+                },
             )
             return
+        final_constraints = port_resolution["constraints"]
+        config_fragments = port_resolution["config_fragments"]
+        verification = port_resolution["verification"]
+        critic = port_resolution["critic"]
+        ui_constraints = port_resolution["ui_constraints"]
+        ui_negotiation = port_resolution["ui_negotiation"]
+        port_contract = port_resolution["contract"]
+        port_contract_dict = port_contract.to_dict()
+        selected_mode = port_resolution["selected_mode"]
 
-        # Pre-execution gate confirmation
+        # Pre-execution gate confirmation (revalidated above when the host
+        # port was renegotiated — never bypassed).
         if not verification or not verification.passed:
             await self._fail(
                 deployment_id,
                 "Refusing to execute an unverified plan.",
                 technical="UNVERIFIED_PLAN",
+                result={
+                    "kind": "failed",
+                    "title": "UNVERIFIED_PLAN",
+                    "final_status": "failed",
+                    "message": "Refusing to execute an unverified plan.",
+                    "durationLabel": "verify",
+                    "servicesLabel": "0 / 0 started",
+                    "verificationScore": None,
+                    "constraintsResolved": constraints_resolved,
+                    "rollbackScope": None,
+                    "phase": PHASE_LABEL,
+                    "is_demo": False,
+                    "code": "UNVERIFIED_PLAN",
+                    "blocked": True,
+                    "blocked_stage": "execute",
+                    **_terminal_provenance(
+                        resolved_sha=resolved_sha,
+                        requested_ref=requested_ref,
+                        repository_url=_sha_repo_url,
+                        selected_mode=selected_mode,
+                        port_contract=port_contract_dict,
+                        repository_intelligence=repository_intelligence,
+                    ),
+                },
             )
             return
         if critic and critic.recommendation == CriticRecommendation.ESCALATE:
@@ -2052,6 +2504,30 @@ class PlanningPipeline:
                 deployment_id,
                 "Critic escalated — execution blocked.",
                 technical="CRITIC_ESCALATE",
+                result={
+                    "kind": "failed",
+                    "title": "CRITIC_ESCALATE",
+                    "final_status": "failed",
+                    "message": "Critic escalated — execution blocked.",
+                    "durationLabel": "verify",
+                    "servicesLabel": "0 / 0 started",
+                    "verificationScore": critic.score if critic else None,
+                    "constraintsResolved": constraints_resolved,
+                    "rollbackScope": None,
+                    "phase": PHASE_LABEL,
+                    "is_demo": False,
+                    "code": "CRITIC_ESCALATE",
+                    "blocked": True,
+                    "blocked_stage": "execute",
+                    **_terminal_provenance(
+                        resolved_sha=resolved_sha,
+                        requested_ref=requested_ref,
+                        repository_url=_sha_repo_url,
+                        selected_mode=selected_mode,
+                        port_contract=port_contract_dict,
+                        repository_intelligence=repository_intelligence,
+                    ),
+                },
             )
             return
 
@@ -2080,6 +2556,9 @@ class PlanningPipeline:
             or _exact_sha_or_none(_sha_record.target_revision if _sha_record else None),
         )
         canonical_plan["requested_ref"] = requested_ref
+        # The validated port contract is part of the plan identity: the
+        # effective host/container mapping is decided, not incidental.
+        canonical_plan["port_contract"] = _port_contract_hash(port_contract_dict)
         plan_digest = _plan_hash(canonical_plan)
         if expected_plan_hash and expected_plan_hash != plan_digest:
             await self._fail(
@@ -2170,6 +2649,8 @@ class PlanningPipeline:
                 synthetic_services=synthetic_services,
                 expanded_to_canonical=expanded_to_canonical,
                 repository_intelligence=repository_intelligence,
+                port_contract=port_contract_dict,
+                selected_mode=selected_mode,
             )
             return
 
@@ -2213,6 +2694,7 @@ class PlanningPipeline:
                     "repository_url": _sha_record.repository_url if _sha_record else None,
                     "target_sha": resolved_sha,
                     "requested_ref": requested_ref,
+                    "port_contract": port_contract_dict,
                     "plan": canonical_plan,
                     "plan_hash": plan_digest,
                 },
@@ -2483,6 +2965,7 @@ class PlanningPipeline:
             _sha_record.target_revision if _sha_record else None
         )
         result["requested_ref"] = requested_ref
+        result["port_contract"] = port_contract_dict
         result["plan"] = canonical_plan
         result["plan_hash"] = plan_digest
         if self._current_status(deployment_id) == DeploymentStatus.CANCELLED.value:
@@ -2552,6 +3035,8 @@ class PlanningPipeline:
         synthetic_services: list[str],
         expanded_to_canonical: bool,
         repository_intelligence: dict | None = None,
+        port_contract: dict[str, Any] | None = None,
+        selected_mode: str = "real",
     ) -> None:
         """Real application build + run through the isolated RealExecutor."""
         from app.ceg.rollback import apply_scope_to_graph, compute_rollback_scope
@@ -2560,6 +3045,42 @@ class PlanningPipeline:
         from app.models.execution import NodeStatus
 
         settings = get_settings()
+        # Fail closed without a pinned revision: a remote run that reached
+        # real execution without an immutable SHA would deploy unreviewed
+        # state and report misleading evidence. Never substitute HEAD here —
+        # pinning happens before analysis; this gate only refuses to proceed.
+        _record = self.repo.get(deployment_id)
+        _repo_url = _record.repository_url if _record else None
+        if _repo_url is not None and resolve_local_repo_path(_repo_url) is None:
+            if not resolved_sha:
+                await self._fail(
+                    deployment_id,
+                    "No pinned source revision for this remote run: refusing "
+                    "real execution without an immutable commit SHA.",
+                    technical="NO_PINNED_REVISION",
+                    result={
+                        "kind": "failed", "title": "NO_PINNED_REVISION",
+                        "final_status": "failed",
+                        "message": "No pinned source revision for this remote run: "
+                                   "refusing real execution without an immutable commit SHA.",
+                        "durationLabel": "real", "servicesLabel": "0 / 1 healthy",
+                        "verificationScore": critic.score if critic else None,
+                        "constraintsResolved": constraints_resolved,
+                        "rollbackScope": None, "code": "NO_PINNED_REVISION",
+                        "blocked": True, "blocked_stage": "execute",
+                        **_terminal_provenance(
+                            resolved_sha=None,
+                            requested_ref=requested_ref,
+                            repository_url=_repo_url,
+                            selected_mode=selected_mode,
+                            port_contract=port_contract,
+                            repository_intelligence=repository_intelligence,
+                        ),
+                        "plan": canonical_plan, "plan_hash": plan_digest,
+                        "phase": PHASE_LABEL, "is_demo": False,
+                    },
+                )
+                return
         self._status(
             deployment_id,
             DeploymentStatus.RUNNING,
@@ -2585,24 +3106,24 @@ class PlanningPipeline:
             },
             include_agents=True,
         )
+        # Validated port contract owns the mapping: container-internal stays
+        # repository-owned, host-published may be a negotiated alternative.
+        contract_host = (port_contract or {}).get("host_port")
+        contract_internal = (port_contract or {}).get("internal_port")
         target_port = profile.target_port
+        host_port = int(contract_host) if contract_host else target_port
+        internal_port = int(contract_internal) if contract_internal else target_port
         # Scoped execution: build the selected application subdirectory, not
         # the repo root, when a deployment target was chosen.
-        checkout = acquisition.path
-        try:
-            _target = (profile.inferred_stack.selected_target or "").strip()
-            if _target and _target != ".":
-                _scoped = acquisition.path / _target
-                if _scoped.is_dir() and acquisition.path in list(_scoped.parents):
-                    checkout = _scoped
-        except Exception:
-            checkout = acquisition.path
+        checkout = self._scoped_checkout(profile, acquisition)
         try:
             real = RealExecutor()
             outcome = await real.deploy(
                 deployment_id=deployment_id,
                 checkout=checkout,
                 target_port=target_port,
+                host_port=host_port,
+                internal_port=internal_port,
                 readiness_timeout=settings.real_readiness_timeout_seconds,
                 build_timeout=settings.real_build_timeout_seconds,
                 # Pin execution to the analyzed commit SHA — never deploy a
@@ -2618,6 +3139,7 @@ class PlanningPipeline:
                     "kind": "failed", "title": exc.code, "final_status": "failed",
                     "message": exc.message, "execution_mode": "real",
                     "requested_ref": requested_ref, "target_sha": resolved_sha,
+                    "port_contract": port_contract,
                     "plan": canonical_plan, "plan_hash": plan_digest,
                     "phase": PHASE_LABEL, "is_demo": False, "code": exc.code,
                     "repository_intelligence": repository_intelligence,
@@ -2639,6 +3161,7 @@ class PlanningPipeline:
             "port": outcome.port,
             "readiness": outcome.readiness,
             "runtime_spec": outcome.runtime_spec or None,
+            "port_contract": port_contract,
             "plan": canonical_plan,
             "plan_hash": plan_digest,
             "phase": PHASE_LABEL,

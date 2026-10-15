@@ -535,6 +535,36 @@ def _python_spec(
     )
 
 
+def with_host_port(spec: RuntimeSpec, host_port: int) -> RuntimeSpec:
+    """Rebind only the host-published port; the container-internal port is kept.
+
+    Repository evidence (explicit script pin or requested target) owns the
+    internal listen port — a busy host port never moves it. PORT/HOSTNAME
+    stay bound to the internal port (what Next.js/node actually read), and
+    explicit server flags (python ``--port``) are rewritten to it. The
+    caller publishes ``host_port → internal_port`` and probes the host side.
+    """
+    if not 1 <= int(host_port) <= 65535:
+        raise ValueError(f"port out of range: {host_port!r}")
+    internal = int(spec.internal_port)
+    updated = spec.model_copy(deep=True)
+    updated.host_port = int(host_port)
+    env = dict(updated.env_defaults or {})
+    # Container env governs the in-container listener (never the host side).
+    if "PORT" in env:
+        env["PORT"] = str(internal)
+    if "HOSTNAME" in env:
+        env["HOSTNAME"] = "0.0.0.0"
+    updated.env_defaults = env
+    if updated.profile == "python-asgi":
+        command = list(updated.start.command or [])
+        for idx, token in enumerate(command):
+            if token == "--port" and idx + 1 < len(command):
+                command[idx + 1] = str(internal)
+        updated.start = updated.start.model_copy(update={"command": command})
+    return updated
+
+
 def _env_example_names(checkout: Path) -> list[str]:
     """Required env *names* from .env.example (never values)."""
     try:

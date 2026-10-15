@@ -151,6 +151,11 @@ class RealExecutor:
         build_timeout: float = 600.0,
         authorized_env: dict[str, str] | None = None,
         commit_sha: str | None = None,
+        # Validated port contract (planning pipeline): the container-internal
+        # listen port stays repository-owned while the host-published port may
+        # be a negotiated alternative. Absent → legacy single-port behavior.
+        host_port: int | None = None,
+        internal_port: int | None = None,
     ) -> RealDeployResult:
         """Build + run a supported app; block until the readiness contract passes.
 
@@ -164,14 +169,30 @@ class RealExecutor:
         # Policy gate first (mode flags, hosted guard, forbidden instructions).
         check_real_execution_policy(dockerfile_text="", compose_text="")
         try:
-            from app.execution.runtime import detect_runtime
+            from app.execution.runtime import detect_runtime, with_host_port
 
+            # Internal (repository evidence) and host (negotiated publish)
+            # sides are distinct: detection learns the internal port, then
+            # only the host side is rebound. Legacy callers pass neither and
+            # keep the single-port behavior.
+            internal = int(internal_port) if internal_port is not None else int(target_port)
+            host = int(host_port) if host_port is not None else int(target_port)
             spec = detect_runtime(
-                checkout, target_port=target_port, commit_sha=commit_sha,
+                checkout, target_port=internal, commit_sha=commit_sha,
                 readiness_deadline_s=readiness_timeout,
             )
+            if host != spec.host_port:
+                spec = with_host_port(spec, host)
             spec_evidence = spec.to_evidence()
-            resolved = profile or spec.to_build_profile()
+            if profile is not None and (
+                host_port is None and internal_port is None
+            ):
+                resolved = profile
+            else:
+                # The validated spec owns build/start/publish (an explicit
+                # caller profile predates the contract and may pin a stale
+                # port — never let it override the negotiated mapping).
+                resolved = spec.to_build_profile()
         except UnsupportedStack as exc:
             return RealDeployResult(
                 ok=False, code=exc.code, message=exc.message,
@@ -192,15 +213,15 @@ class RealExecutor:
         build_dir = checkout / ".medha-build"
         network = ""
         container = ""
-        probe_url = f"http://127.0.0.1:{target_port}{resolved.health_path}"
-        mapping = f"host 127.0.0.1:{target_port} → container:{resolved.port}"
+        probe_url = f"http://127.0.0.1:{host}{resolved.health_path}"
+        mapping = f"host 127.0.0.1:{host} → container:{resolved.port}"
 
         def _fail(code: str, message: str, **extra) -> RealDeployResult:
             return RealDeployResult(
                 ok=False, code=code, message=message,
                 profile=resolved.name, image=tag,
                 image_digest=extra.pop("image_digest", None),
-                container=container or None, port=target_port,
+                container=container or None, port=host,
                 started_at=started, finished_at=_now_iso(),
                 runtime_spec=spec_evidence, **extra,
             )
@@ -226,7 +247,7 @@ class RealExecutor:
                 image=tag,
                 network=network,
                 command=resolved.start_command or None,
-                publish_port=target_port,
+                publish_port=host,
                 container_port=resolved.port,
                 env=merged_env or None,
             )
@@ -241,7 +262,7 @@ class RealExecutor:
                     f"Container logs (tail, context only): {tail[-500:]}",
                     readiness={
                         "stage": "container_exited", "status": "exited",
-                        "probe_url": probe_url, "host_port": target_port,
+                        "probe_url": probe_url, "host_port": host,
                         "container_port": resolved.port, "mapping": mapping,
                         "container": {
                             "running": state.get("running"),
@@ -256,18 +277,18 @@ class RealExecutor:
             bound = await asyncio.to_thread(
                 docker_ops.published_host_port, state, resolved.port,
             )
-            if bound != target_port:
+            if bound != host:
                 tail = await asyncio.to_thread(_log_tail, container)
                 return _fail(
                     "PORT_MAPPING_FAILED",
                     f"Container port {resolved.port} is not published on "
-                    f"127.0.0.1:{target_port} (observed bindings: "
+                    f"127.0.0.1:{host} (observed bindings: "
                     f"{state.get('ports') or {}}). Probe target {probe_url} "
                     "cannot reach the app — refusing to probe a dead mapping. "
                     f"Logs (tail, context only): {tail[-300:]}",
                     readiness={
                         "stage": "port_unmapped", "status": "unmapped",
-                        "probe_url": probe_url, "host_port": target_port,
+                        "probe_url": probe_url, "host_port": host,
                         "container_port": resolved.port, "mapping": mapping,
                         "observed_ports": state.get("ports") or {},
                         "container": {"running": True,
@@ -277,7 +298,7 @@ class RealExecutor:
                 )
             readiness = await asyncio.to_thread(
                 docker_ops.wait_http_readiness,
-                target_port, path=resolved.health_path,
+                host, path=resolved.health_path,
                 timeout=readiness_timeout,
             )
             if readiness.get("status") != "ready":
@@ -286,7 +307,7 @@ class RealExecutor:
                 stage = _readiness_stage(readiness, running=running)
                 tail = await asyncio.to_thread(_log_tail, container)
                 cause = _classify_readiness_failure(
-                    readiness, host_port=target_port,
+                    readiness, host_port=host,
                     container_port=resolved.port, path=resolved.health_path,
                 )
                 if stage == "container_exited":
@@ -303,7 +324,7 @@ class RealExecutor:
                     "http_status": readiness.get("http_status"),
                     "attempts": readiness.get("attempts", 0),
                     "probe_url": readiness.get("probe_url", probe_url),
-                    "host_port": target_port,
+                    "host_port": host,
                     "container_port": resolved.port,
                     "mapping": mapping,
                     "container": {
@@ -325,14 +346,14 @@ class RealExecutor:
             final_state = await asyncio.to_thread(docker_ops.container_state, container)
             return RealDeployResult(
                 ok=True, profile=resolved.name, image=tag, image_digest=digest,
-                container=container, port=target_port,
+                container=container, port=host,
                 readiness={
                     "stage": "ready",
                     "status": "ready",
                     "http_status": readiness.get("http_status"),
                     "attempts": readiness.get("attempts", 0),
                     "probe_url": readiness.get("probe_url", probe_url),
-                    "host_port": target_port,
+                    "host_port": host,
                     "container_port": resolved.port,
                     "mapping": mapping,
                     "observed_ports": (final_state.get("ports") or {}
@@ -347,7 +368,7 @@ class RealExecutor:
             return RealDeployResult(
                 ok=False, code=exc.code, message=str(exc)[:1000],
                 profile=resolved.name, image=tag,
-                container=container or None, port=target_port,
+                container=container or None, port=host,
                 runtime_spec=spec_evidence,
                 started_at=started, finished_at=_now_iso(),
             )
@@ -357,7 +378,7 @@ class RealExecutor:
             return RealDeployResult(
                 ok=False, code="REAL_EXECUTION_FAILED", message=str(exc)[:500],
                 profile=resolved.name,
-                container=container or None, port=target_port,
+                container=container or None, port=host,
                 runtime_spec=spec_evidence,
                 started_at=started, finished_at=_now_iso(),
             )

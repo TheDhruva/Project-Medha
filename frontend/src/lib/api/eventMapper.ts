@@ -590,7 +590,8 @@ export function resolveExecutionMode(
     normalized === "demo" ||
     normalized === "simulator" ||
     normalized === "controlled_test" ||
-    normalized === "real"
+    normalized === "real" ||
+    normalized === "unconfigured"
   ) {
     return normalized;
   }

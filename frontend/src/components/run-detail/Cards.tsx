@@ -162,6 +162,8 @@ function modeLabel(mode: DeploymentSnapshot["executionMode"]): string | null {
       return "Controlled test";
     case "demo":
       return "Demo";
+    case "unconfigured":
+      return "Not configured";
     default:
       return null;
   }
