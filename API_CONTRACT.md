@@ -290,14 +290,14 @@ tokens, or repository contents appear in this surface.
 | POST | `/api/evaluation/run/cnp` | Execute CNP evaluation runner (token-guarded) |
 | POST | `/api/evaluation/run/ceg` | Execute CEG evaluation runner (token-guarded) |
 | GET | `/api/evaluation/latest/{kind}` | Fetch one artifact (`cnp`/`ceg`/`combined`) |
-| GET | `/api/deploys` | List runs (`status`, `mode`, `repository`, `limit`, `offset`) |
+| GET | `/api/deploys` | List runs (`status`, `mode`, `repository`, `project_id`, `limit`, `offset`); each summary carries `error_code` when the stored result has a structured failure/block code (e.g. `EXECUTION_NOT_CONFIGURED`) |
 | GET | `/api/deploy/{id}/verification` | Stored verification + critic artifacts |
 | GET | `/api/deploy/{id}/rollback` | Stored rollback scope |
 | GET | `/api/deploy/{id}/execution` | Stored result + graph + rollback |
 | GET | `/api/deploy/{id}/scores` | Four versioned evidence-backed scores (`scores-v1`; §18) |
 | GET | `/api/scores/history` | Score history by `run_id` or `project_id` (§18) |
 | GET | `/api/deploy/{id}/health` | Observed runtime health (live probe; `healthy` only on evidence, else `unhealthy`/`unknown`/`test_only`/`demo`) |
-| GET | `/api/config/status` | Presence-only environment diagnostics (booleans, never secret values) |
+| GET | `/api/config/status` | Presence-only environment diagnostics (booleans, never secret values) + structured `execution_readiness` (`status`/`reason_code`/`message`/`next_actions`/restart & operator flags; §17) |
 | GET | `/api/metrics` | Safe operational counters + LLM budgets (no secrets/source) |
 | GET | `/api/ai/status` | Safe AI provider status (no secrets; §11) |
 | POST | `/api/webhooks/github` | GitHub push receiver (HMAC-SHA256; full 40-hex SHA required; §12) |
@@ -491,10 +491,13 @@ Clerk subject (or the legacy single-operator subject); all rows carry
   runs (`disconnected`). `DELETE /api/projects/{id}` — removes the mapping;
   run/proposal history is preserved but no longer routable. Deletion is
   refused with `409 ACTIVE_RUNS` while a run is in flight.
-- `POST /api/projects/{id}/runs` `{intent?, target_revision? (40-hex),
-  target_host?, target_port?}` — starts a real-mode analysis bound to the
-  project (`connected` required, else `409 PROJECT_NOT_CONNECTED`).
-  `target_revision`, when given, is checked out exactly (see §12).
+- `POST /api/projects/{id}/runs` `{intent?, base_revision? (40-hex),
+  target_revision? (40-hex), target_host?, target_port?}` — starts a
+  real-mode analysis bound to the project (`connected` required, else
+  `409 PROJECT_NOT_CONNECTED`). Omitting both revisions runs a full
+  analysis of the project's current HEAD; when given, revisions must be
+  exact 40-hex SHAs (`400 INVALID_SHA`) and `target_revision` is checked
+  out exactly (see §12).
 
 ---
 

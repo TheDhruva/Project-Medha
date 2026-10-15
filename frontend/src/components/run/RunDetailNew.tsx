@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { ArrowLeft, CheckCircle2, XCircle, AlertTriangle, Loader2, ChevronDown } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { ArrowLeft, CheckCircle2, XCircle, AlertTriangle, Loader2, Copy, Check, PlayCircle, GitCommitHorizontal } from "lucide-react";
 import { ConstraintNegotiation } from "@/components/constraints/ConstraintNegotiation";
-// Heavy views load on demand: graph lib + trace list are not needed for
-// the initial run header/status paint.
+// Heavy views load on demand: graph lib is not needed for the initial paint.
 const ChangeImpactPanel = dynamic(
   () => import("@/components/changeintel/ChangeImpactPanel").then((m) => m.ChangeImpactPanel),
   { ssr: false, loading: () => null },
@@ -30,13 +30,24 @@ import { DeploymentProvider, useDeployment } from "@/context/DeploymentContext";
 import type { DeploymentSnapshot } from "@/lib/demo/types";
 import {
   DecisionCard,
-  JourneyCard,
   SummaryRow,
-  CollapsibleShell,
   SectionShell,
+  formatDuration,
 } from "@/components/run-detail/Cards";
 import { EnvBadge, ExecutionModeBadge } from "@/components/ui/Section";
 import { RuntimeLogsPanel } from "@/components/run-detail/RuntimeLogs";
+import {
+  createProjectRun,
+  fetchCommitDetail,
+  fetchCommitHistory,
+  fetchDeployment,
+  fetchProject,
+  type CommitDetail,
+  type HistoryCommit,
+  type Project,
+} from "@/lib/api/client";
+import { formatActivity } from "@/lib/projects/projects";
+import { labelStatus, statusGlyph } from "@/lib/ui/status";
 import { cn } from "@/lib/ui/cn";
 
 function runTitle(snapshot: DeploymentSnapshot, deploymentId: string): string {
@@ -74,85 +85,263 @@ function StatusLine({ snapshot }: { snapshot: DeploymentSnapshot }) {
   return <span className="text-xs text-medha-tertiary">Not started</span>;
 }
 
-function getEvidenceBullets(snapshot: DeploymentSnapshot): string[] {
-  const bullets: string[] = [];
-  const checks = snapshot.verification?.checks ?? [];
-  if (snapshot.verification?.passed === true && checks.length > 0) {
-    const passed = checks.filter((c) => c.status === "pass").length;
-    bullets.push(`All required verification checks passed (${passed} / ${checks.length}).`);
-  } else if (snapshot.verification?.passed === false) {
-    const failed = checks.filter((c) => c.status === "fail");
-    if (failed.length > 0) {
-      bullets.push(
-        `${failed.length} blocking check${failed.length === 1 ? "" : "s"} failed: ${failed.map((f) => f.name).join(", ")}.`,
-      );
-    } else if (snapshot.verification.summary) {
-      bullets.push(snapshot.verification.summary);
-    }
-  }
-  const neg = snapshot.negotiation;
-  if (neg?.status === "resolved" && neg.resolution) {
-    bullets.push(`Conflict resolved before execution (${neg.resolution}).`);
-  } else if (neg?.status === "resolved" && snapshot.constraints.length > 0) {
-    bullets.push("Constraints agreed before execution.");
-  }
-  if (snapshot.critic && (snapshot.critic.score > 0 || snapshot.critic.findings.length > 0)) {
-    bullets.push(
-      `Independent review scored ${snapshot.critic.score} / 100 (${snapshot.critic.recommendation}).`,
-    );
-  }
-  if (snapshot.rollback) {
-    bullets.push(
-      `Scoped rollback preserved ${snapshot.rollback.preserved} service${snapshot.rollback.preserved === 1 ? "" : "s"}.`,
-    );
-  }
-  const securityCheck = checks.find((c) => c.id === "security" || c.name.toLowerCase().includes("security"));
-  if (securityCheck?.status === "pass" && !bullets.some((b) => b.includes("verification checks passed"))) {
-    bullets.push("Security checks passed.");
-  }
-  return bullets;
+/* ------------------------- diagnosis helpers ------------------------- */
+
+function concise(message: string, limit = 240): string {
+  const oneLine = message.replace(/\s+/g, " ").trim();
+  return oneLine.length > limit ? `${oneLine.slice(0, limit)}…` : oneLine;
 }
 
-function EvidenceBullets({ snapshot }: { snapshot: DeploymentSnapshot }) {
-  const bullets = getEvidenceBullets(snapshot);
-  if (bullets.length === 0) return null;
+/** Split a backend failure message into a confirmed cause vs hypotheses. */
+function splitCause(message: string): { fact: string; hypothesis: string | null } {
+  const match = /likely[^.]*\./i.exec(message);
+  if (!match) return { fact: message.trim(), hypothesis: null };
+  return {
+    fact: message.slice(0, match.index).replace(/\s+/g, " ").trim(),
+    hypothesis: match[0].replace(/\s+/g, " ").trim(),
+  };
+}
+
+function probeInfo(message: string): { url: string | null; mapping: string | null } {
+  const url = /probing\s+(https?:\/\/[^\s)]+)/i.exec(message)?.[1] ?? null;
+  const mapping =
+    /published\s+host\s+([^\s]+)\s+→\s+container:([^\s)]+)/i.exec(message) != null
+      ? ((): string => {
+          const m = /published\s+host\s+([^\s]+)\s+→\s+container:([^\s)]+)/i.exec(message)!;
+          return `host ${m[1]} → container:${m[2]}`;
+        })()
+      : /published\s+([^.)]+)\)/i.exec(message)?.[1]?.trim() ?? null;
+  return { url, mapping };
+}
+
+function logTail(text: string | undefined, lines = 8): string {
+  if (!text) return "";
+  return text.trim().split("\n").slice(-lines).join("\n");
+}
+
+function shortSha(rev: string | null | undefined): string | null {
+  if (!rev) return null;
+  return rev.length > 12 ? rev.slice(0, 7) : rev;
+}
+
+/* ------------------------------ diagnosis ------------------------------ */
+
+function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
+  const failed = snapshot.runStatus === "failed" || snapshot.runStatus === "partial_recovery";
+  const running = snapshot.runStatus === "running";
+  const message = snapshot.result?.message ?? snapshot.explain.technicalText ?? "";
+  const { fact, hypothesis } = useMemo(() => splitCause(message), [message]);
+  const probe = useMemo(() => probeInfo(message), [message]);
+  const [copied, setCopied] = useState(false);
+
+  const stderrTail = logTail(snapshot.runtimeLogs?.stderr);
+  const stdoutTail = logTail(snapshot.runtimeLogs?.stdout);
+  const appLog = stderrTail || stdoutTail;
+  const revision =
+    shortSha(snapshot.changeIntel?.changeset.target_sha) ??
+    shortSha(snapshot.changeIntel?.changeset.target_revision);
+
+  const copyLogs = async () => {
+    if (!appLog) return;
+    try {
+      await navigator.clipboard.writeText(appLog);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable — selection still works */
+    }
+  };
+
   return (
-    <ul className="space-y-1.5">
-      {bullets.map((b) => (
-        <li key={b} className="flex items-start gap-2 text-sm leading-relaxed text-medha-text">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-medha-success" aria-hidden />
-          <span>{b}</span>
-        </li>
-      ))}
-    </ul>
+    <section aria-label={failed ? "Failure diagnosis" : "Run outcome"} className="rounded-xl border border-medha-border bg-white p-4 sm:p-5">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+        {failed ? "Diagnosis" : running ? "Current state" : "Outcome"}
+      </p>
+      {failed ? (
+        <div className="mt-2 space-y-2.5">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-danger">Failure</p>
+            <p className="mt-0.5 text-[13.5px] leading-relaxed text-medha-text">{concise(fact, 320)}</p>
+            {hypothesis ? (
+              <p className="mt-1 text-[12.5px] italic leading-relaxed text-medha-secondary">
+                Hypothesis (unverified): {hypothesis}
+              </p>
+            ) : null}
+          </div>
+          <div className="grid gap-2.5 sm:grid-cols-2">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">Readiness probe</p>
+              <p className="medha-mono mt-0.5 break-all text-[12px] text-medha-text">{probe.url ?? "Probe target not recorded for this run."}</p>
+              {probe.mapping ? <p className="mt-0.5 text-[12px] text-medha-secondary">Published {probe.mapping}</p> : null}
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">Execution</p>
+              <p className="mt-0.5 text-[12px] text-medha-secondary">
+                Stage {snapshot.explain.currentStage ?? snapshot.runStatus}
+                {snapshot.result?.durationLabel ? ` · ${snapshot.result.durationLabel}` : ""}
+                {snapshot.executionMode ? ` · ${snapshot.executionMode}` : ""}
+                {revision ? ` · rev ${revision}` : ""}
+              </p>
+            </div>
+          </div>
+          {appLog ? (
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
+                  Application logs {stderrTail ? "(stderr)" : "(stdout)"} — tail
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void copyLogs()}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-medha-secondary hover:bg-medha-muted hover:text-medha-text"
+                >
+                  {copied ? <Check className="h-3 w-3" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <pre className="medha-mono mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-medha-border bg-medha-muted p-2.5 text-[11px] leading-relaxed text-medha-text">
+                {appLog}
+              </pre>
+            </div>
+          ) : null}
+          {message.length > 340 ? (
+            <details>
+              <summary className="cursor-pointer text-[12.5px] font-semibold text-medha-accent">
+                Full diagnostic evidence
+              </summary>
+              <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-medha-secondary">
+                {message}
+              </p>
+            </details>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-1.5 space-y-1.5">
+          <p className="text-[13.5px] leading-relaxed text-medha-text">
+            {running ? snapshot.explain.simpleText : message || snapshot.explain.simpleText}
+          </p>
+          {!running && snapshot.runStatus === "succeeded" ? (
+            <p className="text-[12px] text-medha-tertiary">
+              Completed execution is not a health claim — application health is reported separately on the project overview.
+            </p>
+          ) : null}
+          <p className="text-[12px] text-medha-secondary">
+            Stage {snapshot.explain.currentStage ?? snapshot.runStatus}
+            {snapshot.result?.durationLabel ? ` · ${snapshot.result.durationLabel}` : ""}
+            {snapshot.executionMode ? ` · ${snapshot.executionMode}` : ""}
+            {revision ? ` · rev ${revision}` : ""}
+          </p>
+        </div>
+      )}
+    </section>
   );
 }
 
-function RunStory({ snapshot }: { snapshot: DeploymentSnapshot }) {
+/* ------------------------------ CEG preview ------------------------------ */
+
+const NODE_SEVERITY: Record<string, number> = {
+  failed: 0,
+  rolled_back: 1,
+  running: 2,
+  pending: 3,
+  success: 4,
+  preserved: 5,
+};
+
+function CegPreview({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; graphsHref: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const nodes = snapshot.graph.nodes;
+  const edges = snapshot.graph.edges;
+  const rollback = snapshot.rollback;
+
+  const services = useMemo(() => {
+    const byService = new Map<string, { status: string; count: number }>();
+    for (const n of nodes) {
+      const prev = byService.get(n.service);
+      const worse =
+        !prev || (NODE_SEVERITY[n.status] ?? 9) < (NODE_SEVERITY[prev.status] ?? 9) ? n.status : prev.status;
+      byService.set(n.service, { status: worse, count: (prev?.count ?? 0) + 1 });
+    }
+    return [...byService.entries()];
+  }, [nodes]);
+
+  const rollbackMembers = useMemo(
+    () => nodes.filter((n) => n.rollbackRequired || n.status === "rolled_back" || n.preserved).length,
+    [nodes],
+  );
+
+  if (nodes.length === 0 && !rollback) return null;
+
+  return (
+    <section aria-label="Execution graph summary" className="rounded-xl border border-medha-border bg-white p-4 sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+            Execution graph · CEG
+          </p>
+          <p className="mt-1 text-[13px] text-medha-secondary">
+            {nodes.length} node{nodes.length === 1 ? "" : "s"} · {edges.length} edge{edges.length === 1 ? "" : "s"}
+            {services.length > 0 ? ` · ${services.length} service${services.length === 1 ? "" : "s"}` : ""}
+            {rollback ? ` · ${rollback.rolledBack} rolled back, ${rollback.preserved} preserved` : ""}
+          </p>
+        </div>
+        {graphsHref ? (
+          <Link href={graphsHref} className="shrink-0 rounded text-[12px] font-semibold text-medha-accent hover:underline">
+            Architecture →
+          </Link>
+        ) : null}
+      </div>
+      {services.length > 0 ? (
+        <ul className="mt-2 flex flex-wrap gap-1.5">
+          {services.slice(0, 8).map(([service, info]) => (
+            <li
+              key={service}
+              className="inline-flex items-center gap-1.5 rounded-full border border-medha-border bg-medha-muted/50 px-2.5 py-1 text-[12px]"
+              title={`${info.count} node${info.count === 1 ? "" : "s"}${rollbackMembers > 0 ? " · rollback membership recorded" : ""}`}
+            >
+              <span aria-hidden className="text-[11px]">{statusGlyph(info.status as never)}</span>
+              <span className="font-medium text-medha-text">{service}</span>
+              <span className="text-medha-tertiary">{labelStatus(info.status as never).toLowerCase()}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {rollback?.simpleExplanation ? (
+        <p className="mt-2 text-[12.5px] leading-relaxed text-medha-secondary">{rollback.simpleExplanation}</p>
+      ) : null}
+      <details
+        className="mt-2"
+        onToggle={(e) => setExpanded((e.target as HTMLDetailsElement).open)}
+      >
+        <summary className="cursor-pointer text-[12.5px] font-semibold text-medha-accent">
+          Expand graph canvas
+        </summary>
+        {expanded ? (
+          <div className="mt-2">
+            <CausalExecutionGraph />
+          </div>
+        ) : null}
+      </details>
+    </section>
+  );
+}
+
+/* --------------------------------- story --------------------------------- */
+
+function RunStory({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; graphsHref: string | null }) {
   const { viewMode } = useDeployment();
+  const technical = viewMode === "technical";
   const evidenceRef = useRef<HTMLDivElement>(null);
   const recoveryRef = useRef<HTMLDivElement>(null);
-  const [changeOpen, setChangeOpen] = useState(false);
 
   const hasChangeIntel = snapshot.changeIntel != null;
   const hasNegotiation = snapshot.negotiation != null || snapshot.constraints.length > 0;
-  const conflictRelevant =
-    hasNegotiation &&
-    (snapshot.negotiation?.status === "resolving" ||
-      snapshot.negotiation?.status === "resolved" ||
-      snapshot.constraints.some((c) => c.status !== "accepted"));
-  const hasVerification = snapshot.verification != null;
-  const checks = snapshot.verification?.checks ?? [];
-  const passedChecks = checks.filter((c) => c.status === "pass").length;
+  const hasVerification = snapshot.verification != null || snapshot.critic != null;
   const hasGraph = snapshot.graph.nodes.length > 0;
   const hasRollback = snapshot.rollback != null;
   const failedNodes = snapshot.graph.nodes.filter(
     (n) => n.status === "failed" || n.status === "rolled_back",
   );
-  const showRecovery =
-    hasRollback || snapshot.runStatus === "partial_recovery" || failedNodes.length > 0;
-  const showCeg = hasGraph;
-  const technical = viewMode === "technical";
 
   const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
     ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -160,36 +349,29 @@ function RunStory({ snapshot }: { snapshot: DeploymentSnapshot }) {
 
   const changeIntel = snapshot.changeIntel;
   const fileCount = changeIntel?.changeset.files.length ?? 0;
-  const affectedCount = changeIntel
-    ? new Set([
-        ...changeIntel.traversal.direct_targets,
-        ...changeIntel.traversal.transitive_targets,
-      ]).size
-    : 0;
+  const changeOpen = technical;
+  const [changeExpanded, setChangeExpanded] = useState(false);
+  const showChangeDetail = technical || changeExpanded;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <DecisionCard
         snapshot={snapshot}
         onViewEvidence={() => scrollTo(evidenceRef)}
         onViewRecovery={() => scrollTo(recoveryRef)}
       />
       <SummaryRow snapshot={snapshot} />
-      <JourneyCard snapshot={snapshot} />
+      <Pipeline />
+      <DiagnosisCard snapshot={snapshot} />
 
-      {/* WHAT CHANGED — only when analysis exists */}
       {hasChangeIntel && changeIntel ? (
         <SectionShell eyebrow="What changed" title="What changed">
           <p className="text-sm text-medha-secondary">
-            {fileCount} file{fileCount === 1 ? "" : "s"} changed
-            {affectedCount > 0
-              ? ` · ${affectedCount} service${affectedCount === 1 ? "" : "s"} potentially affected`
-              : ""}
-            {changeIntel.risk.level !== "none" ? ` · risk ${changeIntel.risk.level}` : ""}
+            {fileCount} file{fileCount === 1 ? "" : "s"} changed · risk {changeIntel.risk.level}
           </p>
-          <ul className="mt-2 space-y-1">
-            {changeIntel.changeset.files.slice(0, 5).map((f) => (
-              <li key={f.path} className="medha-mono text-xs text-medha-text">
+          <ul className="mt-1.5 space-y-0.5">
+            {changeIntel.changeset.files.slice(0, 4).map((f) => (
+              <li key={f.path} className="medha-mono truncate text-xs text-medha-text">
                 {f.path}{" "}
                 <span className="text-medha-tertiary">
                   +{f.added_lines}/−{f.deleted_lines}
@@ -197,239 +379,281 @@ function RunStory({ snapshot }: { snapshot: DeploymentSnapshot }) {
               </li>
             ))}
           </ul>
-          <button
-            type="button"
-            onClick={() => setChangeOpen((v) => !v)}
-            aria-expanded={changeOpen}
-            className="mt-3 text-sm font-medium text-medha-accent hover:underline"
-          >
-            {changeOpen ? "Hide change impact ↑" : "View change impact →"}
-          </button>
-          {changeOpen ? (
-            <div className="mt-3">
-              <p className="mb-2 text-[11px] uppercase tracking-wide text-medha-tertiary">
-                Change impact · CIG — Change Impact Graph
-              </p>
+          {!changeOpen ? (
+            <button
+              type="button"
+              onClick={() => setChangeExpanded((v) => !v)}
+              aria-expanded={changeExpanded}
+              className="mt-2 text-sm font-medium text-medha-accent hover:underline"
+            >
+              {changeExpanded ? "Hide change impact ↑" : "View change impact →"}
+            </button>
+          ) : null}
+          {showChangeDetail ? (
+            <div className="mt-2">
               <ChangeImpactPanel analysis={changeIntel} />
             </div>
           ) : null}
         </SectionShell>
       ) : null}
 
-      {/* CONFLICT RESOLUTION — only when relevant */}
-      {conflictRelevant && snapshot.negotiation ? (
-        <CollapsibleShell
-          eyebrow="Conflict resolution · CNP — Constraint Negotiation Protocol"
-          title="Conflict resolution"
-          preview={
-            snapshot.negotiation.status === "resolved"
-              ? "Resolved before deployment"
-              : "A conflict needs attention"
-          }
-          actionLabel="See how Medha resolved it"
-        >
-          <ConstraintNegotiation />
-        </CollapsibleShell>
-      ) : null}
+      {hasNegotiation ? <ConstraintNegotiation /> : null}
 
-      {/* SAFETY VERIFICATION — only when verification data exists */}
       {hasVerification ? (
-        <CollapsibleShell
-          eyebrow="Safety verification"
-          title={
-            checks.length > 0
-              ? `${passedChecks} / ${checks.length} checks passed`
-              : "Safety verification"
-          }
-          preview={
-            snapshot.verification?.passed === true
-              ? "No blocking issues detected."
-              : snapshot.verification?.passed === false
-                ? "A blocking issue was found."
-                : "Verification has not finished."
-          }
-          actionLabel="View checks"
-        >
+        <div ref={evidenceRef} className="scroll-mt-20">
           <VerificationPanel />
-        </CollapsibleShell>
-      ) : null}
-
-      {/* EVIDENCE */}
-      <div ref={evidenceRef} className="scroll-mt-20">
-        <SectionShell eyebrow="Evidence" title="Why was this decision made?">
-          {getEvidenceBullets(snapshot).length > 0 ? (
-            <EvidenceBullets snapshot={snapshot} />
-          ) : (
-            <p className="text-sm text-medha-secondary">
-              Evidence is not available for this run yet.
-            </p>
-          )}
-          <CollapsibleShell
-            eyebrow="Supporting artifacts"
-            title="View evidence"
-            preview="Stored verification results and findings"
-          >
-            {hasVerification ? (
-              <VerificationPanel />
-            ) : (
-              <p className="text-sm text-medha-secondary">
-                Verification artifacts are not available for this run.
-              </p>
-            )}
-          </CollapsibleShell>
-        </SectionShell>
-      </div>
-
-      {/* RECOVERY — only when execution data exists */}
-      {showRecovery ? (
-        <div ref={recoveryRef} className="scroll-mt-20">
-          <SectionShell
-            eyebrow="Deployment recovery · CEG — Causal Execution Graph"
-            title="Deployment recovery"
-          >
-            {snapshot.rollback ? (
-              <>
-                <p className="text-sm leading-relaxed text-medha-text">
-                  {snapshot.rollback.simpleExplanation}
-                </p>
-                <p className="mt-2 text-sm text-medha-secondary">
-                  {snapshot.rollback.rolledBack} rolled back · {snapshot.rollback.preserved}{" "}
-                  preserved · {snapshot.rollback.failed} failed
-                </p>
-              </>
-            ) : (
-              <p className="text-sm text-medha-secondary">
-                Execution data is available below. Rollback details appear here when a
-                scoped recovery occurs.
-              </p>
-            )}
-            {showCeg ? (
-              <div className="mt-3">
-                <CausalExecutionGraph />
-              </div>
-            ) : null}
-          </SectionShell>
         </div>
       ) : null}
 
-      {/* RUNTIME LOGS — real container output; null when not applicable */}
-      <RuntimeLogsPanel
-        executionMode={snapshot.executionMode}
-        runtimeLogs={snapshot.runtimeLogs}
-      />
+      {hasGraph || hasRollback || failedNodes.length > 0 || technical ? (
+        <div ref={recoveryRef} className="scroll-mt-20">
+          <CegPreview snapshot={snapshot} graphsHref={graphsHref} />
+        </div>
+      ) : null}
 
-      {/* TECHNICAL DETAILS — collapsed by default in Simple mode */}
-      <TechnicalDetails snapshot={snapshot} />
+      {technical ? (
+        <>
+          <WhatMedhaIsDoing showToggle={false} />
+          <RuntimeLogsPanel
+            executionMode={snapshot.executionMode}
+            runtimeLogs={snapshot.runtimeLogs}
+          />
+        </>
+      ) : null}
+
+      <AgentActivity />
+      <LiveSystemTrace />
     </div>
   );
 }
 
-function TechnicalDetails({ snapshot }: { snapshot: DeploymentSnapshot }) {
-  const { viewMode } = useDeployment();
-  const technical = viewMode === "technical";
-  const [open, setOpen] = useState(technical);
-  useEffect(() => {
-    setOpen(technical);
-  }, [technical]);
+/* ------------------------- top-of-page context ------------------------- */
 
-  const hasChangeIntel = snapshot.changeIntel != null;
-  const hasNegotiation = snapshot.negotiation != null || snapshot.constraints.length > 0;
-  const hasVerification = snapshot.verification != null;
-  const hasGraph = snapshot.graph.nodes.length > 0;
+/**
+ * Compact run context: project/repo identity, branch, exact source SHA,
+ * persisted commit summary + changed files, run times, and the state
+ * action (Run analysis / Retry execution). Everything comes from existing
+ * records; missing metadata renders as unknown, never fabricated.
+ */
+function RunContextBar({ deploymentId, projectId }: { deploymentId: string; projectId?: string }) {
+  const { snapshot } = useDeployment();
+  const router = useRouter();
+  const isCanonical = (projectId ?? "").startsWith("prj_");
+  const [project, setProject] = useState<Project | null>(null);
+  const [record, setRecord] = useState<{
+    created_at: string;
+    updated_at: string;
+    repository_url: string;
+    target_sha: string | null;
+  } | null>(null);
+  const [commit, setCommit] = useState<HistoryCommit | null>(null);
+  const [detail, setDetail] = useState<CommitDetail | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchDeployment(deploymentId)
+      .then((api) => {
+        if (cancelled) return;
+        const result = (api.result ?? {}) as Record<string, unknown>;
+        setRecord({
+          created_at: api.created_at,
+          updated_at: api.updated_at,
+          repository_url: api.repository_url,
+          target_sha: typeof result["target_sha"] === "string" ? (result["target_sha"] as string) : null,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setRecord(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deploymentId]);
+
+  useEffect(() => {
+    if (!isCanonical || !projectId) {
+      setProject(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchProject(projectId)
+      .then((p) => {
+        if (!cancelled) setProject(p);
+      })
+      .catch(() => {
+        if (!cancelled) setProject(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, isCanonical]);
+
+  const sha =
+    record?.target_sha ??
+    snapshot.changeIntel?.changeset.target_sha ??
+    snapshot.changeIntel?.changeset.target_revision ??
+    null;
+
+  useEffect(() => {
+    if (!isCanonical || !projectId || !sha) {
+      setCommit(null);
+      setDetail(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const history = await fetchCommitHistory(projectId, { limit: 25 });
+        const match =
+          (history.commits ?? []).find((c) => c.sha === sha || c.sha.slice(0, 7) === sha.slice(0, 7)) ?? null;
+        if (cancelled) return;
+        setCommit(match);
+        if (match) {
+          try {
+            setDetail(await fetchCommitDetail(projectId, match.sha));
+          } catch {
+            if (!cancelled) setDetail(null);
+          }
+        }
+      } catch {
+        if (!cancelled) setCommit(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, isCanonical, sha]);
+
+  const legacyRepo = (() => {
+    if (!projectId || isCanonical) return null;
+    try {
+      const decoded = decodeURIComponent(projectId);
+      return decoded || null;
+    } catch {
+      return null;
+    }
+  })();
+  const repo = project?.canonical_url ?? record?.repository_url ?? legacyRepo;
+  const headline = commit?.message?.trim().split("\n")[0] ?? null;
+  const running = snapshot.runStatus === "running";
+  const failed = snapshot.runStatus === "failed";
+  const busy = starting || running;
+
+  const startRun = async () => {
+    if (!project || busy) return;
+    setStarting(true);
+    setStartError(null);
+    try {
+      const response = await createProjectRun(project.project_id);
+      router.push(`/projects/${projectId}/runs/${response.deployment_id}`);
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : "Cannot start the analysis run.");
+    } finally {
+      setStarting(false);
+    }
+  };
 
   return (
-    <section
-      aria-label="Technical details"
-      className="overflow-hidden rounded-xl border border-medha-border bg-white"
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition hover:bg-medha-muted/50"
-      >
-        <span>
-          <span className="block text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
-            Technical details
-          </span>
-          <span className="mt-0.5 block text-[15px] font-semibold text-medha-text">
-            Internal pipeline, graphs, agents, and event timeline
-          </span>
-          {!open ? (
-            <span className="mt-0.5 block text-[13px] text-medha-secondary">
-              {snapshot.isDemo ? "Deterministic demo fixture." : "Real backend data."} Expand for
-              expert inspection.
-            </span>
-          ) : null}
-        </span>
-        <span className="flex shrink-0 items-center gap-3">
-          <ViewModeToggle />
-          <ChevronDown
-            className={cn("h-4 w-4 text-medha-secondary transition-transform", open && "rotate-180")}
-            aria-hidden
-          />
-        </span>
-      </button>
-      {open ? (
-        <div className="space-y-4 border-t border-medha-border px-5 py-4">
-          <WhatMedhaIsDoing />
-          <Pipeline />
-          {/* CNP details live here for experts even when the simple summary hid them */}
-          <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
-              Conflict resolution detail · CNP
-            </p>
-            {hasNegotiation ? (
-              <ConstraintNegotiation />
-            ) : (
-              <p className="text-sm text-medha-secondary">
-                No constraint negotiation data for this run.
-              </p>
-            )}
-          </div>
-          {hasVerification || technical ? (
-            <div>
-              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
-                Verification detail
-              </p>
-              <VerificationPanel />
+    <section aria-label="Run context" className="rounded-xl border border-medha-border bg-white px-4 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <p title={repo ?? undefined} className="medha-mono truncate text-[12px] text-medha-secondary">
+            {repo ?? "Repository unknown"}
+            {project?.branch ? ` · ${project.branch}` : ""}
+          </p>
+          <dl className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-medha-secondary">
+            <div className="flex gap-1.5">
+              <dt className="text-medha-tertiary">Revision</dt>
+              <dd className="medha-mono font-medium text-medha-text" title={sha ?? undefined}>
+                {sha ? (sha.length > 12 ? sha.slice(0, 7) : sha) : "Unknown"}
+              </dd>
             </div>
-          ) : null}
-          {hasChangeIntel ? (
-            <div>
-              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
-                Change impact graph · CIG
-              </p>
-              <ChangeImpactPanel analysis={snapshot.changeIntel} />
+            <div className="flex gap-1.5">
+              <dt className="text-medha-tertiary">Started</dt>
+              <dd className="font-medium text-medha-text">
+                {record ? formatActivity(record.created_at) : "—"}
+              </dd>
             </div>
-          ) : null}
-          {hasGraph || technical ? (
-            <div>
-              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
-                Execution graph · CEG
-              </p>
-              <CausalExecutionGraph />
+            <div className="flex gap-1.5">
+              <dt className="text-medha-tertiary">Duration</dt>
+              <dd className="font-medium text-medha-text">{formatDuration(snapshot.durationSeconds)}</dd>
             </div>
+          </dl>
+          {headline ? (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[12.5px] text-medha-text">
+              <GitCommitHorizontal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-medha-secondary" aria-hidden />
+              <span className="min-w-0">
+                <span className="font-medium">{headline}</span>
+                {commit?.author ? <span className="text-medha-secondary"> · {commit.author}</span> : ""}
+                {detail ? (
+                  <span className="text-medha-secondary">
+                    {" "}· +{detail.added} −{detail.deleted} across {detail.files.length} file{detail.files.length === 1 ? "" : "s"}
+                  </span>
+                ) : null}
+              </span>
+            </p>
+          ) : (
+            <p className="mt-1.5 text-[12px] text-medha-tertiary">
+              {isCanonical ? "Commit summary unavailable for this revision." : "Commit metadata unavailable on this route."}
+            </p>
+          )}
+          {detail && detail.files.length > 0 ? (
+            <details>
+              <summary className="cursor-pointer text-[12px] font-semibold text-medha-accent">
+                Changed files ({detail.files.length})
+              </summary>
+              <ul className="medha-mono mt-1 max-h-32 space-y-0.5 overflow-y-auto text-[11px] text-medha-secondary">
+                {detail.files.slice(0, 20).map((f) => (
+                  <li key={f.path} className="flex justify-between gap-2">
+                    <span className="truncate">{f.path}</span>
+                    <span className="shrink-0">+{f.added} −{f.deleted}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
           ) : null}
-          <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
-              System activity · 10 specialized agents
-            </p>
-            <AgentActivity />
-          </div>
-          <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
-              Event timeline
-            </p>
-            <LiveSystemTrace />
-          </div>
         </div>
-      ) : null}
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          {project ? (
+            <button
+              type="button"
+              onClick={() => void startRun()}
+              disabled={busy}
+              title={
+                running
+                  ? "An analysis run is already active — wait for it instead of starting a duplicate."
+                  : failed
+                    ? "Retry execution for this repository and branch"
+                    : "Start a new analysis run for this repository and branch"
+              }
+              className="inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-3.5 py-2 text-[13px] font-semibold text-white transition hover:bg-medha-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {starting || running ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <PlayCircle className="h-3.5 w-3.5" aria-hidden />}
+              {starting ? "Starting…" : running ? "Run active" : failed ? "Retry execution" : "Run analysis"}
+            </button>
+          ) : (
+            <Link
+              href="/verify"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-3.5 py-2 text-[13px] font-semibold text-white transition hover:bg-medha-accent-hover"
+            >
+              <PlayCircle className="h-3.5 w-3.5" aria-hidden /> Run analysis
+            </Link>
+          )}
+          {running ? (
+            <p className="text-[11px] text-medha-tertiary">Live run in progress — status updates via SSE.</p>
+          ) : null}
+          {startError ? (
+            <p role="alert" className="max-w-[220px] text-right text-[11.5px] text-medha-danger">{startError}</p>
+          ) : null}
+        </div>
+      </div>
     </section>
   );
 }
 
-function RunBody({ deploymentId }: { deploymentId: string }) {
+function RunBody({ deploymentId, projectId }: { deploymentId: string; projectId?: string }) {
   const { snapshot, openDeployment, hydrating, connectionError } = useDeployment();
   const isHydratedFor = snapshot.deploymentId === deploymentId;
   const failedToLoad =
@@ -438,9 +662,10 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
     snapshot.runStatus === "failed" &&
     snapshot.explain.statusLabel === "Failed to load";
 
-  useEffect(() => {
-    void openDeployment(deploymentId);
-  }, [deploymentId, openDeployment]);
+  useEffectRef(deploymentId, openDeployment);
+
+  const backHref = projectId ? `/projects/${projectId}/runs` : "/runs";
+  const graphsHref = projectId ? `/projects/${projectId}/graphs` : null;
 
   if (hydrating || !isHydratedFor) {
     return (
@@ -478,7 +703,7 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
               Retry
             </button>
             <Link
-              href="/runs"
+              href={backHref}
               className="rounded-lg border border-medha-border bg-white px-4 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted"
             >
               Back to runs
@@ -490,17 +715,25 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
   }
 
   return (
-    <main className="mx-auto max-w-3xl space-y-4 px-4 py-6 sm:px-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link
-          href="/runs"
-          className="inline-flex items-center gap-1 text-sm text-medha-secondary hover:text-medha-text"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden /> Runs
-        </Link>
-        <div className="flex items-center gap-2">
+    <main className="mx-auto max-w-4xl space-y-3 px-4 py-6 sm:px-6">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <nav aria-label="Breadcrumb" className="flex flex-wrap items-center gap-1.5 text-sm text-medha-secondary">
+          {projectId ? (
+            <>
+              <Link href={`/projects/${projectId}`} className="inline-flex items-center gap-1 rounded hover:text-medha-text hover:underline">
+                <ArrowLeft className="h-3.5 w-3.5" aria-hidden /> Overview
+              </Link>
+              <span aria-hidden className="text-medha-border-strong">/</span>
+            </>
+          ) : null}
+          <Link href={backHref} className="rounded hover:text-medha-text hover:underline">
+            Runs
+          </Link>
+        </nav>
+        <div className="flex flex-wrap items-center gap-2">
           <EnvBadge isDemo={snapshot.isDemo} size="sm" />
           <ExecutionModeBadge mode={snapshot.executionMode} size="sm" />
+          <ViewModeToggle />
           <button
             type="button"
             onClick={() => void openDeployment(deploymentId)}
@@ -518,13 +751,13 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
             stage: snapshot.explain.currentStage,
             verificationPassed: snapshot.verification?.passed ?? null,
           })}
-          size={44}
+          size={40}
         />
         <div className="min-w-0">
-          <h1 className="text-2xl font-bold tracking-tight text-medha-text">
+          <h1 className="text-xl font-bold tracking-tight text-medha-text sm:text-2xl">
             {runTitle(snapshot, deploymentId)}
           </h1>
-          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             <StatusLine snapshot={snapshot} />
             <span className="medha-mono truncate text-[11px] text-medha-tertiary">
               {deploymentId}
@@ -532,6 +765,8 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
           </div>
         </div>
       </div>
+
+      <RunContextBar deploymentId={deploymentId} projectId={projectId} />
 
       {connectionError ? (
         <p
@@ -542,16 +777,23 @@ function RunBody({ deploymentId }: { deploymentId: string }) {
         </p>
       ) : null}
 
-      <RunStory snapshot={snapshot} />
+      <RunStory snapshot={snapshot} graphsHref={graphsHref} />
     </main>
   );
 }
 
-export function RunDetailView({ deploymentId }: { deploymentId: string }) {
+// Mode switches never refetch: ViewModeToggle only flips context state.
+function useEffectRef(deploymentId: string, openDeployment: (id: string) => Promise<void>) {
+  useEffect(() => {
+    void openDeployment(deploymentId);
+  }, [deploymentId, openDeployment]);
+}
+
+export function RunDetailView({ deploymentId, projectId }: { deploymentId: string; projectId?: string }) {
   return (
     <DeploymentProvider>
       <AppShell>
-        <RunBody deploymentId={deploymentId} />
+        <RunBody deploymentId={deploymentId} projectId={projectId} />
       </AppShell>
     </DeploymentProvider>
   );

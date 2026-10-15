@@ -15,7 +15,7 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _SCHEMA_PG_PATH = Path(__file__).with_name("schema_pg.sql")
 
 # Bump when schema.sql or migration steps change. Tracked via PRAGMA user_version.
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 
 _ARTIFACT_COLUMNS = (
     "result_json",
@@ -421,6 +421,11 @@ _V8_TABLES_SQL = (
         message TEXT,
         branch TEXT,
         recorded_at TEXT NOT NULL,
+        summary TEXT,
+        files_json TEXT NOT NULL DEFAULT '[]',
+        added INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        deployment_id TEXT,
         PRIMARY KEY (project_id, sha)
     )""",
     """CREATE INDEX IF NOT EXISTS idx_commits_project_time
@@ -494,6 +499,27 @@ def _ensure_deploy_target_column(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _ensure_commit_summary_columns(conn: sqlite3.Connection) -> None:
+    """Deterministic commit summaries (Issue 1): summary + diff evidence.
+
+    Idempotent: checks PRAGMA before ALTER. Existing rows keep NULL/empty
+    summaries (displayed as unavailable, never fabricated).
+    """
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(commits)")}
+    except Exception:
+        return
+    for column, ddl in (
+        ("summary", "TEXT"),
+        ("files_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("added", "INTEGER NOT NULL DEFAULT 0"),
+        ("deleted", "INTEGER NOT NULL DEFAULT 0"),
+        ("deployment_id", "TEXT"),
+    ):
+        if column not in cols:
+            conn.execute(f"ALTER TABLE commits ADD COLUMN {column} {ddl}")
+
+
 def _ensure_perf_indexes(conn: sqlite3.Connection) -> None:
     """Indexes on columns added by later migrations (project_id on the
     deployments table). Runs AFTER _ensure_v6_columns so legacy databases
@@ -536,6 +562,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _ensure_v6_columns(conn)
     _ensure_v8_tables(conn)
     _ensure_deploy_target_column(conn)
+    _ensure_commit_summary_columns(conn)
     _ensure_perf_indexes(conn)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
@@ -592,6 +619,12 @@ def _init_postgres() -> str:
             ("proposals", "project_id", "TEXT"),
             ("proposals", "push_json", "TEXT"),
             ("projects", "deploy_target", "TEXT"),
+            # Deterministic commit summaries + diff evidence.
+            ("commits", "summary", "TEXT"),
+            ("commits", "files_json", "TEXT"),
+            ("commits", "added", "INTEGER"),
+            ("commits", "deleted", "INTEGER"),
+            ("commits", "deployment_id", "TEXT"),
             # Jobs ordering counter for databases created before seq_num.
             ("jobs", "seq_num", "INTEGER NOT NULL DEFAULT 0"),
         ):

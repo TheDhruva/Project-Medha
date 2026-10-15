@@ -94,7 +94,12 @@ def test_reconcile_is_idempotent(tmp_path, monkeypatch):
     first = reconcile_interrupted(db_path)
     assert first["deployments"] == 1
     second = reconcile_interrupted(db_path)
-    assert second == {"deployments": 0, "proposals": 0, "events": 0}
+    # Core reconciliation is a no-op the second time. Housekeeping keys
+    # (stale-workspace prune, container observation) may vary with host
+    # state and are asserted separately.
+    assert second["deployments"] == 0
+    assert second["proposals"] == 0
+    assert second["events"] == 0
     get_settings.cache_clear()
 
 

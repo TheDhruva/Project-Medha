@@ -241,6 +241,77 @@ def container_running(name: str) -> bool:
     return proc.returncode == 0 and (proc.stdout or "").strip().lower() == "true"
 
 
+def container_state(name: str, *, timeout: float = 15.0) -> dict[str, Any]:
+    """Inspect actual container state: liveness, exit code, port bindings.
+
+    Never raises and never fabricates: unavailable containers report
+    `available: False` with the daemon's reason. Callers must treat startup
+    logs as context only — this state (plus the readiness probe) is the
+    health evidence.
+    """
+    proc = _run(["inspect", name], timeout=timeout, check=False)
+    if proc.returncode != 0:
+        return {
+            "available": False,
+            "reason": (proc.stderr or proc.stdout or "").strip()[:200]
+            or "inspect failed",
+        }
+    try:
+        data = json.loads(proc.stdout or "")
+        info = data[0] if isinstance(data, list) and data else {}
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return {"available": False, "reason": "unparseable inspect output"}
+    if not isinstance(info, dict):
+        return {"available": False, "reason": "unparseable inspect output"}
+    state = info.get("State") or {}
+    ports_raw = (info.get("NetworkSettings") or {}).get("Ports") or {}
+    bindings: dict[str, list[dict[str, str]]] = {}
+    if isinstance(ports_raw, dict):
+        for cport, binds in ports_raw.items():
+            if not isinstance(binds, list):
+                continue
+            bindings[str(cport)] = [
+                {"host_ip": str(b.get("HostIp", "")),
+                 "host_port": str(b.get("HostPort", ""))}
+                for b in binds if isinstance(b, dict)
+            ]
+    return {
+        "available": True,
+        "running": bool(state.get("Running", False)),
+        "exit_code": state.get("ExitCode", 0),
+        "oom_killed": bool(state.get("OOMKilled", False)),
+        "started_at": state.get("StartedAt", ""),
+        "finished_at": state.get("FinishedAt", ""),
+        "error": str(state.get("Error", "") or "")[:200],
+        "status": str(state.get("Status", "") or ""),
+        "ports": bindings,
+    }
+
+
+def published_host_port(state: dict[str, Any], container_port: int) -> int | None:
+    """Host port published for a container port (None when unmapped)."""
+    try:
+        wanted = int(container_port)
+    except (TypeError, ValueError):
+        return None
+    ports = (state or {}).get("ports") or {}
+    if not isinstance(ports, dict):
+        return None
+    for cport, binds in ports.items():
+        try:
+            cnum = int(str(cport).split("/")[0])
+        except ValueError:
+            continue
+        if cnum != wanted:
+            continue
+        for bind in binds if isinstance(binds, list) else []:
+            try:
+                return int(str((bind or {}).get("host_port", "")))
+            except ValueError:
+                continue
+    return None
+
+
 def stop_and_remove_container(name: str, *, deployment_id: str) -> bool:
     """Remove container only if it carries MEDHA labels for this deployment."""
     if not _is_medha_owned(name, deployment_id):
@@ -422,12 +493,14 @@ def wait_http_readiness(
             with urllib.request.urlopen(url, timeout=5) as resp:
                 code = getattr(resp, "status", 200)
             if code < expect_below:
-                return {"status": "ready", "http_status": code, "attempts": attempts}
+                return {"status": "ready", "http_status": code, "attempts": attempts,
+                        "probe_url": url}
             last_error = f"http_{code}"
         except Exception as exc:  # noqa: BLE001 - readiness polling
             last_error = str(exc)[:150]
         _time.sleep(interval)
-    return {"status": "timed_out", "reason": last_error[:200], "attempts": attempts}
+    return {"status": "timed_out", "reason": last_error[:200], "attempts": attempts,
+            "probe_url": url}
 
 
 def _run(

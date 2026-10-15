@@ -206,6 +206,8 @@ class DeploymentRepository:
             _DS.COMPLETED.value,
             _DS.FAILED.value,
             _DS.CANCELLED.value,
+            _DS.PARTIAL_RECOVERY.value,
+            _DS.AWAITING_APPROVAL.value,
         }
         new_status = status or None  # resolved after guard read below
 
@@ -217,7 +219,8 @@ class DeploymentRepository:
             params: list[Any] = []
             if new_status is not None:
                 where.append(
-                    "(status NOT IN ('completed', 'failed', 'cancelled') OR status = ?)"
+                    "(status NOT IN ('completed', 'failed', 'cancelled',"
+                    " 'partial_recovery', 'awaiting_approval') OR status = ?)"
                 )
                 params.append(new_status.value)
             if allowed_from is not None:
@@ -319,6 +322,32 @@ class DeploymentRepository:
                 updates["ai_json"] = json.dumps(ai)
             if not updates:
                 return self.get(deployment_id)
+            # Post-terminal guard: a terminal run's recorded result is final.
+            # Late artifact writes (racing stages, retries) must not overwrite
+            # it. Other artifact keys are still allowed through.
+            if result is not None:
+                from app.database.connection import get_connection as _get_conn
+
+                try:
+                    with _get_conn(self.db_path) as _conn:
+                        _row = _conn.execute(
+                            "SELECT status, result_json FROM deployments"
+                            " WHERE deployment_id = ?",
+                            (deployment_id,),
+                        ).fetchone()
+                    if _row is not None and _row["status"] in (
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "partial_recovery",
+                        "awaiting_approval",
+                    ):
+                        if _row["result_json"]:
+                            updates.pop("result_json", None)
+                            if not updates:
+                                return self.get(deployment_id)
+                except Exception:
+                    pass
             set_clause = ", ".join(f"{col} = ?" for col in updates) + ", updated_at = ?"
             with get_connection(self.db_path) as conn:
                 cursor = conn.execute(
@@ -1065,12 +1094,20 @@ class JobRepository:
             ).fetchone()
             if row is None:
                 return None
-            conn.execute(
-                    "UPDATE jobs SET status='running', attempts=attempts+1,"
-                    f" updated_at={now} WHERE job_id=? AND status='queued'",
-                    (row["job_id"],),
-                )
+            _claim = conn.execute(
+                "UPDATE jobs SET status='running', attempts=attempts+1,"
+                f" updated_at={now} WHERE job_id=? AND status='queued'",
+                (row["job_id"],),
+            )
+            # Lost the claim race (another worker claimed it first):
+            # report no job rather than running the same job twice.
+            try:
+                _lost_race = int(_claim.rowcount or 0) == 0
+            except (TypeError, ValueError):
+                _lost_race = False
             conn.commit()
+            if _lost_race:
+                return None
             updated = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (row["job_id"],)).fetchone()
         return dict(updated) if updated else None
 
@@ -1198,19 +1235,45 @@ class CommitRepository:
 
     def upsert(self, *, project_id: str, sha: str, parents: list[str],
                author: str | None, committed_at: str | None,
-               message: str | None, branch: str | None, recorded_at: str) -> None:
+               message: str | None, branch: str | None, recorded_at: str,
+               summary: str | None = None,
+               files: list[dict[str, Any]] | None = None,
+               added: int | None = None, deleted: int | None = None,
+               deployment_id: str | None = None) -> None:
+        # files=None means "no diff evidence supplied" — existing diff
+        # evidence is kept (bulk ancestry upserts must not wipe the analyzed
+        # summary). An explicit list (possibly empty) overwrites.
+        base = (
+            "INSERT INTO commits (project_id, sha, parents_json, author,"
+            " committed_at, message, branch, recorded_at,"
+            " summary, files_json, added, deleted, deployment_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(project_id, sha) DO UPDATE SET"
+            " parents_json=excluded.parents_json, author=excluded.author,"
+            " committed_at=excluded.committed_at, message=excluded.message,"
+            " branch=excluded.branch, recorded_at=excluded.recorded_at,"
+            " summary=COALESCE(excluded.summary, commits.summary),"
+            " deployment_id=COALESCE(excluded.deployment_id,"
+            " commits.deployment_id)"
+        )
         with get_connection(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO commits (project_id, sha, parents_json, author,
-                    committed_at, message, branch, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(project_id, sha) DO UPDATE SET
-                    parents_json=excluded.parents_json, author=excluded.author,
-                    committed_at=excluded.committed_at, message=excluded.message,
-                    branch=excluded.branch, recorded_at=excluded.recorded_at""",
-                (project_id, sha, json.dumps(parents), author, committed_at,
-                 message, branch, recorded_at),
-            )
+            if files is None:
+                conn.execute(base, (
+                    project_id, sha, json.dumps(parents), author,
+                    committed_at, message, branch, recorded_at,
+                    summary, "[]", 0, 0, deployment_id,
+                ))
+            else:
+                conn.execute(
+                    base + ", files_json=excluded.files_json,"
+                    " added=excluded.added, deleted=excluded.deleted",
+                    (
+                        project_id, sha, json.dumps(parents), author,
+                        committed_at, message, branch, recorded_at,
+                        summary, json.dumps(files),
+                        added or 0, deleted or 0, deployment_id,
+                    ),
+                )
             conn.commit()
 
     def history(self, *, project_id: str, since: str | None = None,
@@ -1227,12 +1290,29 @@ class CommitRepository:
                     "SELECT * FROM commits WHERE project_id=? ORDER BY committed_at DESC LIMIT ?",
                     (project_id, limit),
                 ).fetchall()
-        out = []
-        for row in rows:
-            item = dict(row)
-            item["parents"] = _loads(item.pop("parents_json", "[]"), [])
-            out.append(item)
-        return out
+        return [self._row_to_item(row) for row in rows]
+
+    def get(self, *, project_id: str, sha: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM commits WHERE project_id=? AND sha=?",
+                (project_id, sha.lower()),
+            ).fetchone()
+        return self._row_to_item(row) if row is not None else None
+
+    @staticmethod
+    def _row_to_item(row: Any) -> dict[str, Any]:
+        item = dict(row)
+        item["parents"] = _loads(item.pop("parents_json", "[]"), [])
+        item["files"] = _loads(item.pop("files_json", "[]"), [])
+        # Databases upgraded from older schemas always gain the columns via
+        # migration, but tolerate their absence regardless (unavailable state,
+        # never fabricated).
+        item.setdefault("summary", None)
+        item.setdefault("added", 0)
+        item.setdefault("deleted", 0)
+        item.setdefault("deployment_id", None)
+        return item
 
 
 class AnalysisCacheRepository:

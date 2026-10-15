@@ -135,7 +135,8 @@ export interface NegotiationView {
   resolution?: string;
   method?: string;
   status: "idle" | "detecting" | "resolving" | "resolved" | "failed" | "none";
-  involvedConstraintIds: string[];
+  /** Absent on older persisted runs — always guard before reading. */
+  involvedConstraintIds?: string[];
   simpleExplanation: string;
   technicalNotes?: string[];
 }
@@ -421,6 +422,8 @@ export interface DeploymentSnapshot {
   frameIndex: number;
   totalFrames: number;
   changeIntel: ChangeIntelAnalysis | null;
+  /** Measured wall-clock seconds (result timings, else created/updated diff); null when unknown. */
+  durationSeconds: number | null;
 }
 
 export interface DeployFormState {

@@ -55,9 +55,6 @@ export function getDecision(snapshot: DeploymentSnapshot): {
 
   if (runStatus === "failed") {
     const blockedByVerification = verification?.passed === false;
-    const blockedByCritic =
-      critic?.recommendation === "BLOCK" || critic?.recommendation === "WARN";
-    void blockedByCritic;
     const body =
       result?.message && result.message !== "Run did not complete."
         ? result.message
@@ -66,12 +63,21 @@ export function getDecision(snapshot: DeploymentSnapshot): {
           : blockedByVerification
             ? "A blocking check remains unresolved."
             : "This run did not complete.";
+    // Blocked-before-execution vs failed-after-execution: execution began
+    // when the pipeline left EXECUTE pending or the CEG recorded nodes.
+    // A critic score is a code-review assessment, never a deployment score —
+    // it stays in the verification panel under its own label, so a failed
+    // run never shows "100 / 100" beside its outcome.
+    const executeStage = snapshot.pipeline.find((p) => p.id === "EXECUTE")?.status;
+    const executed =
+      snapshot.graph.nodes.length > 0 ||
+      (executeStage != null && executeStage !== "pending" && executeStage !== "skipped");
     return {
       kind: "blocked",
-      title: "Deployment blocked",
+      title: executed ? "Deployment failed" : "Deployment blocked",
       body,
-      cta: "Inspect evidence",
-      score,
+      cta: executed ? "Inspect failure" : "Inspect evidence",
+      score: null,
       risk,
     };
   }

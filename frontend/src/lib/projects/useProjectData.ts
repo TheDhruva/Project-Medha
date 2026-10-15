@@ -7,12 +7,14 @@ import {
   fetchRunHealth,
   fetchRunHydration,
   fetchRunsList,
+  subscribeDeploymentEventsShared,
   type AgentSnapshotRow,
   type Project,
   type Proposal,
   type RunHealth,
   type RunLogLine,
   type RunSummary,
+  type RuntimeLogsResponse,
 } from "@/lib/api/client";
 import type {
   CegEdge,
@@ -41,6 +43,8 @@ export interface RunHydration {
   changeImpactIsDemo: boolean;
   /** Observed runtime health (live probe at hydration time); null when unobservable. */
   health: RunHealth | null;
+  /** Container stdout/stderr snapshot (real runs only); null when unobserved. */
+  runtimeLogs: RuntimeLogsResponse | null;
 }
 
 export interface ProjectData {
@@ -77,6 +81,7 @@ const EMPTY_HYDRATION: RunHydration = {
   changeImpactLabel: null,
   changeImpactIsDemo: false,
   health: null,
+  runtimeLogs: null,
 };
 
 export function useProjectData(projectId: string, initialRunId?: string | null): ProjectData {
@@ -212,6 +217,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
           changeImpactLabel: h.changeImpact?.label ?? null,
           changeImpactIsDemo: h.changeImpact?.is_demo ?? false,
           health,
+          runtimeLogs: h.runtimeLogs ?? null,
         });
       })
       .catch(() => {
@@ -226,6 +232,38 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
   }, [selectedId]);
 
   const latest = useMemo(() => runs[0] ?? null, [runs]);
+
+  // Live project-overview subscription: patch the tracked run's status from
+  // its SSE stream so the board reflects backend changes without refresh.
+  // REST stays authoritative — terminal events trigger a full reload.
+  const latestId = latest?.deployment_id ?? null;
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => {
+    if (!latestId) return;
+    const sub = subscribeDeploymentEventsShared(latestId, {
+      onEvent: (event) => {
+        const status = (event as { status?: string }).status;
+        if (typeof status === "string" && status) {
+          setRuns((prev) =>
+            prev.map((r) =>
+              r.deployment_id === latestId ? { ...r, status } : r,
+            ),
+          );
+        }
+      },
+      onTerminal: () => {
+        void loadRef.current();
+      },
+      onError: () => {
+        // Reconnects are handled by the stream; the next terminal or
+        // manual refresh reconciles from REST (authoritative).
+      },
+    });
+    return () => {
+      sub.close();
+    };
+  }, [latestId]);
 
   const selectRun = useCallback((id: string) => {
     setSelectedId(id);

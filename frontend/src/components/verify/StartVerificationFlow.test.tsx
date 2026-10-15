@@ -111,6 +111,16 @@ describe("StartVerificationFlow", () => {
     expect(startDeploymentMock).toHaveBeenCalled();
   });
 
+  it("rejects non-40-hex revisions before calling the API", () => {
+    render(<StartVerificationFlow />);
+    fireEvent.change(screen.getByLabelText("Base revision"), {
+      target: { value: "main" },
+    });
+    fireEvent.click(screen.getByText("Analyze change"));
+    expect(screen.getByText(/full 40-character commit SHA/)).toBeInTheDocument();
+    expect(startDeploymentMock).not.toHaveBeenCalled();
+  });
+
   describe("project-locked mode (?project=)", () => {
     beforeEach(() => {
       search = "project=prj_test";

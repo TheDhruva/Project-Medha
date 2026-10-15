@@ -168,6 +168,11 @@ CREATE TABLE IF NOT EXISTS commits (
     message TEXT,
     branch TEXT,
     recorded_at TEXT NOT NULL,
+    summary TEXT,
+    files_json TEXT NOT NULL DEFAULT '[]',
+    added INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    deployment_id TEXT,
     UNIQUE (project_id, sha)
 );
 

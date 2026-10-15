@@ -132,4 +132,58 @@ describe("SummaryRow", () => {
     const { container } = render(<SummaryRow snapshot={snap({ changeIntel: null, verification: null })} />);
     expect(container).toBeEmptyDOMElement();
   });
+
+  it("separates measured duration from execution mode", () => {
+    // Regression: result.durationLabel ("real") rendered as "Duration: real".
+    render(
+      <SummaryRow
+        snapshot={snap({
+          changeIntel: null,
+          verification: null,
+          executionMode: "real",
+          durationSeconds: 90,
+          negotiation: {
+            title: "CNP",
+            conflictSummary: "none",
+            round: 1,
+            maxRounds: 3,
+            status: "resolved",
+            involvedConstraintIds: [],
+            simpleExplanation: "ok",
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("Mode")).toBeInTheDocument();
+    expect(screen.getByText("Real")).toBeInTheDocument();
+    expect(screen.getByText("Duration")).toBeInTheDocument();
+    expect(screen.getByText("1m 30s")).toBeInTheDocument();
+    expect(screen.queryByText("real", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("shows an honest unavailable duration when unmeasured", () => {
+    render(
+      <SummaryRow
+        snapshot={snap({
+          changeIntel: null,
+          verification: null,
+          executionMode: "simulator",
+          durationSeconds: null,
+          constraints: [
+            {
+              id: "c1",
+              type: "PORT_CLAIM",
+              priority: "RESOURCE",
+              sourceAgent: "Docker",
+              summary: "port",
+              detail: "d",
+              status: "accepted",
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("Simulated")).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
 });

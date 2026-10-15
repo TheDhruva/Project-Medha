@@ -162,7 +162,9 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_created
     ON jobs (status, created_at);
 
 -- Commit history metadata (Phase 7). Enough to render the graph without
--- re-cloning; diff summaries attach per commit on demand.
+-- re-cloning; diff summaries attach per commit on demand. summary/files
+-- are recorded at analysis time from the pinned checkout (deterministic,
+-- evidence-based); NULL summary means not yet summarized, never fabricated.
 CREATE TABLE IF NOT EXISTS commits (
     project_id TEXT NOT NULL,
     sha TEXT NOT NULL,
@@ -172,6 +174,11 @@ CREATE TABLE IF NOT EXISTS commits (
     message TEXT,
     branch TEXT,
     recorded_at TEXT NOT NULL,
+    summary TEXT,
+    files_json TEXT NOT NULL DEFAULT '[]',
+    added INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    deployment_id TEXT,
     PRIMARY KEY (project_id, sha)
 );
 

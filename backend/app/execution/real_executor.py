@@ -27,7 +27,6 @@ from app.execution.policy import PolicyViolation, check_real_execution_policy
 from app.execution.profiles import (
     BuildProfile,
     UnsupportedStack,
-    detect_profile,
     render_dockerfile,
 )
 
@@ -48,6 +47,7 @@ class RealDeployResult:
     container: str | None = None
     port: int | None = None
     readiness: dict = field(default_factory=dict)
+    runtime_spec: dict = field(default_factory=dict)
     started_at: str | None = None
     finished_at: str | None = None
 
@@ -56,6 +56,65 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _classify_readiness_failure(
+    readiness: dict, *, host_port: int, container_port: int, path: str,
+) -> str:
+    """Distinguishable readiness diagnosis (connection vs HTTP vs timeout).
+
+    Connection-refused means nothing accepted on the published mapping —
+    typically the app listening on a different container port — not a slow
+    start. Startup log lines are never treated as health evidence.
+    """
+    probed = f"http://127.0.0.1:{host_port}{path}"
+    mapping = f"host 127.0.0.1:{host_port} → container:{container_port}"
+    reason = str(readiness.get("reason", "") or "")
+    lowered = reason.lower()
+    if "refused" in lowered or "errno 111" in lowered or "winerror 10061" in lowered:
+        return (
+            "Application did not become ready: connection refused at "
+            f"{probed} (published {mapping}). The container is running but "
+            "nothing accepts connections on the published port — the app is "
+            f"likely listening on a different container port. Probe error: {reason}."
+        )
+    if lowered.startswith("http_"):
+        return (
+            "Application did not become ready: unhealthy HTTP response probing "
+            f"{probed} (published {mapping}). Last probe result: {reason}."
+        )
+    if readiness.get("status") == "timed_out":
+        return (
+            "Application did not become ready: readiness timed out probing "
+            f"{probed} (published {mapping}). Last probe result: {reason}."
+        )
+    return (
+        "Application did not become ready: "
+        f"{reason or readiness} (probed {probed}, published {mapping})."
+    )
+
+
+def _readiness_stage(readiness: dict, *, running: bool | None) -> str:
+    """Machine-readable failure stage (facts only, no hypotheses)."""
+    if running is False:
+        return "container_exited"
+    reason = str(readiness.get("reason", "") or "")
+    lowered = reason.lower()
+    if "refused" in lowered or "errno 111" in lowered or "winerror 10061" in lowered:
+        return "connection_refused"
+    if lowered.startswith("http_"):
+        return "http_error"
+    if readiness.get("status") == "timed_out":
+        return "timeout"
+    return "unknown"
+
+
+def _log_tail(container: str, *, limit: int = 2000) -> str:
+    try:
+        logs = docker_ops.container_logs(container)
+    except Exception:  # noqa: BLE001 - diagnostics best effort
+        return ""
+    return ((logs.get("stderr") or "") + (logs.get("stdout") or ""))[-limit:]
 
 
 def runtime_available() -> tuple[bool, str]:
@@ -91,13 +150,28 @@ class RealExecutor:
         readiness_timeout: float = 90.0,
         build_timeout: float = 600.0,
         authorized_env: dict[str, str] | None = None,
+        commit_sha: str | None = None,
     ) -> RealDeployResult:
-        """Build + run a supported app; block until readiness passes."""
+        """Build + run a supported app; block until the readiness contract passes.
+
+        Deterministic, fail-closed stages: detection → build → start →
+        port-binding verification → bounded readiness probes. Success is
+        reported only when the probe passes on the published endpoint; every
+        failure records its stage, the actual probe target and port mapping,
+        container state/exit code, and a concise log tail.
+        """
         started = _now_iso()
         # Policy gate first (mode flags, hosted guard, forbidden instructions).
         check_real_execution_policy(dockerfile_text="", compose_text="")
         try:
-            resolved = profile or detect_profile(checkout, target_port=target_port)
+            from app.execution.runtime import detect_runtime
+
+            spec = detect_runtime(
+                checkout, target_port=target_port, commit_sha=commit_sha,
+                readiness_deadline_s=readiness_timeout,
+            )
+            spec_evidence = spec.to_evidence()
+            resolved = profile or spec.to_build_profile()
         except UnsupportedStack as exc:
             return RealDeployResult(
                 ok=False, code=exc.code, message=exc.message,
@@ -110,6 +184,7 @@ class RealExecutor:
                 message=f"Isolated runtime unavailable: {reason} "
                         "Configure Docker on an isolated builder host.",
                 profile=resolved.name, started_at=started, finished_at=_now_iso(),
+                runtime_spec=spec_evidence,
             )
 
         tag = f"medha_{docker_ops.short_deployment_id(deployment_id)}_{resolved.name}"
@@ -117,6 +192,19 @@ class RealExecutor:
         build_dir = checkout / ".medha-build"
         network = ""
         container = ""
+        probe_url = f"http://127.0.0.1:{target_port}{resolved.health_path}"
+        mapping = f"host 127.0.0.1:{target_port} → container:{resolved.port}"
+
+        def _fail(code: str, message: str, **extra) -> RealDeployResult:
+            return RealDeployResult(
+                ok=False, code=code, message=message,
+                profile=resolved.name, image=tag,
+                image_digest=extra.pop("image_digest", None),
+                container=container or None, port=target_port,
+                started_at=started, finished_at=_now_iso(),
+                runtime_spec=spec_evidence, **extra,
+            )
+
         try:
             build_dir.mkdir(parents=True, exist_ok=True)
             (build_dir / "Dockerfile.medha").write_text(dockerfile_text, encoding="utf-8")
@@ -127,6 +215,10 @@ class RealExecutor:
                 tag=tag, timeout=build_timeout,
             )
             network = await asyncio.to_thread(docker_ops.create_network, deployment_id)
+            # Profile env (e.g. node PORT/HOSTNAME) makes the app listen on
+            # the published container port; explicit operator env wins.
+            merged_env: dict[str, str] = dict(resolved.env or {})
+            merged_env.update(authorized_env or {})
             container = await asyncio.to_thread(
                 docker_ops.start_container,
                 deployment_id=deployment_id,
@@ -136,15 +228,52 @@ class RealExecutor:
                 command=resolved.start_command or None,
                 publish_port=target_port,
                 container_port=resolved.port,
-                env=authorized_env or None,
+                env=merged_env or None,
             )
-            running = await asyncio.to_thread(docker_ops.container_running, container)
-            if not running:
-                logs = await asyncio.to_thread(docker_ops.container_logs, container)
-                tail = ((logs.get("stderr") or "") + (logs.get("stdout") or ""))[-1000:]
-                raise docker_ops.DockerOpsError(
-                    f"Application container exited immediately. {tail}",
-                    code="START_FAILED",
+            state = await asyncio.to_thread(docker_ops.container_state, container)
+            if not state.get("available") or not state.get("running"):
+                tail = await asyncio.to_thread(_log_tail, container)
+                exit_code = state.get("exit_code", "?") if state.get("available") else "unknown"
+                return _fail(
+                    "START_FAILED",
+                    "Application container exited immediately "
+                    f"(exit_code={exit_code}, {mapping}). "
+                    f"Container logs (tail, context only): {tail[-500:]}",
+                    readiness={
+                        "stage": "container_exited", "status": "exited",
+                        "probe_url": probe_url, "host_port": target_port,
+                        "container_port": resolved.port, "mapping": mapping,
+                        "container": {
+                            "running": state.get("running"),
+                            "exit_code": state.get("exit_code"),
+                            "oom_killed": state.get("oom_killed"),
+                        } if state.get("available") else {"available": False},
+                        "log_tail": tail[-1000:],
+                    },
+                )
+            # Port-binding verification: the generated container port must
+            # actually be published, or the probe target is meaningless.
+            bound = await asyncio.to_thread(
+                docker_ops.published_host_port, state, resolved.port,
+            )
+            if bound != target_port:
+                tail = await asyncio.to_thread(_log_tail, container)
+                return _fail(
+                    "PORT_MAPPING_FAILED",
+                    f"Container port {resolved.port} is not published on "
+                    f"127.0.0.1:{target_port} (observed bindings: "
+                    f"{state.get('ports') or {}}). Probe target {probe_url} "
+                    "cannot reach the app — refusing to probe a dead mapping. "
+                    f"Logs (tail, context only): {tail[-300:]}",
+                    readiness={
+                        "stage": "port_unmapped", "status": "unmapped",
+                        "probe_url": probe_url, "host_port": target_port,
+                        "container_port": resolved.port, "mapping": mapping,
+                        "observed_ports": state.get("ports") or {},
+                        "container": {"running": True,
+                                      "exit_code": state.get("exit_code", 0)},
+                        "log_tail": tail[-1000:],
+                    },
                 )
             readiness = await asyncio.to_thread(
                 docker_ops.wait_http_readiness,
@@ -152,28 +281,74 @@ class RealExecutor:
                 timeout=readiness_timeout,
             )
             if readiness.get("status") != "ready":
-                logs = await asyncio.to_thread(docker_ops.container_logs, container)
-                tail = ((logs.get("stderr") or "") + (logs.get("stdout") or ""))[-1000:]
-                return RealDeployResult(
-                    ok=False, code="READINESS_FAILED",
-                    message=f"Application did not become ready: "
-                            f"{readiness.get('reason', readiness)} {tail[-300:]}",
-                    profile=resolved.name, image=tag, image_digest=digest,
-                    container=container, port=target_port, readiness=readiness,
-                    started_at=started, finished_at=_now_iso(),
+                state = await asyncio.to_thread(docker_ops.container_state, container)
+                running = state.get("running") if state.get("available") else None
+                stage = _readiness_stage(readiness, running=running)
+                tail = await asyncio.to_thread(_log_tail, container)
+                cause = _classify_readiness_failure(
+                    readiness, host_port=target_port,
+                    container_port=resolved.port, path=resolved.health_path,
+                )
+                if stage == "container_exited":
+                    cause = (
+                        "Application container exited during readiness probing "
+                        f"(exit_code={state.get('exit_code')}, "
+                        f"oom_killed={state.get('oom_killed')}, {mapping}). "
+                        f"Last probe result: {readiness.get('reason', '')}."
+                    )
+                evidence = {
+                    "stage": stage,
+                    "status": readiness.get("status"),
+                    "reason": readiness.get("reason", ""),
+                    "http_status": readiness.get("http_status"),
+                    "attempts": readiness.get("attempts", 0),
+                    "probe_url": readiness.get("probe_url", probe_url),
+                    "host_port": target_port,
+                    "container_port": resolved.port,
+                    "mapping": mapping,
+                    "container": {
+                        "running": running,
+                        "exit_code": state.get("exit_code"),
+                        "oom_killed": state.get("oom_killed"),
+                    } if state.get("available") else {"available": False},
+                    "log_tail": tail[-1000:],
+                }
+                return _fail(
+                    "READINESS_FAILED",
+                    f"{cause} Container logs (tail, context only — "
+                    "startup output is not proof of reachability): "
+                    f"{tail[-300:]}",
+                    image_digest=digest, readiness=evidence,
                 )
             logger.info("Real deploy ready deployment_id=%s profile=%s digest=%.12s",
                         deployment_id, resolved.name, digest)
+            final_state = await asyncio.to_thread(docker_ops.container_state, container)
             return RealDeployResult(
                 ok=True, profile=resolved.name, image=tag, image_digest=digest,
-                container=container, port=target_port, readiness=readiness,
+                container=container, port=target_port,
+                readiness={
+                    "stage": "ready",
+                    "status": "ready",
+                    "http_status": readiness.get("http_status"),
+                    "attempts": readiness.get("attempts", 0),
+                    "probe_url": readiness.get("probe_url", probe_url),
+                    "host_port": target_port,
+                    "container_port": resolved.port,
+                    "mapping": mapping,
+                    "observed_ports": (final_state.get("ports") or {}
+                                       if final_state.get("available") else {}),
+                },
+                runtime_spec=spec_evidence,
                 started_at=started, finished_at=_now_iso(),
             )
+        except UnsupportedStack as exc:
+            return _fail(exc.code, exc.message)
         except docker_ops.DockerOpsError as exc:
             return RealDeployResult(
                 ok=False, code=exc.code, message=str(exc)[:1000],
                 profile=resolved.name, image=tag,
                 container=container or None, port=target_port,
+                runtime_spec=spec_evidence,
                 started_at=started, finished_at=_now_iso(),
             )
         except PolicyViolation:
@@ -181,7 +356,10 @@ class RealExecutor:
         except Exception as exc:  # noqa: BLE001 - structured failure, never raw
             return RealDeployResult(
                 ok=False, code="REAL_EXECUTION_FAILED", message=str(exc)[:500],
-                profile=resolved.name, started_at=started, finished_at=_now_iso(),
+                profile=resolved.name,
+                container=container or None, port=target_port,
+                runtime_spec=spec_evidence,
+                started_at=started, finished_at=_now_iso(),
             )
         finally:
             # On any non-ready outcome, remove the failed workload. Success

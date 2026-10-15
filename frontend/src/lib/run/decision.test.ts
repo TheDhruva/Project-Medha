@@ -87,6 +87,75 @@ describe("getDecision", () => {
     expect(d.body).toContain("blocking security constraint");
   });
 
+  it("labels post-execution failures without any assessment score", () => {
+    // Regression: a critic 100/100 beside "Deployment blocked" read as a
+    // perfect deployment score on a failed run.
+    const d = getDecision(
+      base({
+        runStatus: "failed",
+        critic: {
+          score: 100,
+          breakdown: { security: 100, completeness: 100, constraints: 100, intentAlignment: 100 },
+          recommendation: "PASS",
+          findings: ["clean"],
+        },
+        graph: {
+          nodes: [
+            {
+              id: "n1",
+              service: "app",
+              action: "start",
+              status: "failed",
+              timestamp: "t",
+              dependencies: [],
+              position: { x: 0, y: 0 },
+            },
+          ],
+          edges: [],
+        },
+        result: {
+          kind: "failed",
+          title: "READINESS_FAILED",
+          message: "Application did not become ready: connection refused",
+          durationLabel: "real",
+          servicesLabel: "0 / 1 healthy",
+          verificationScore: 100,
+          constraintsResolved: 0,
+          rollbackScope: null,
+        },
+      }),
+    );
+    expect(d.kind).toBe("blocked");
+    expect(d.title).toBe("Deployment failed");
+    expect(d.body).toContain("connection refused");
+    expect(d.score).toBeNull();
+  });
+
+  it("labels pre-execution failures as blocked", () => {
+    const d = getDecision(
+      base({
+        runStatus: "failed",
+        verification: {
+          checks: [{ id: "v", name: "Gate", status: "fail", message: "nope" }],
+          passed: false,
+          summary: "Verification failed.",
+        },
+        result: {
+          kind: "failed",
+          title: "FAILED",
+          message: "Verification gate failed.",
+          durationLabel: "planning",
+          servicesLabel: "n/a",
+          verificationScore: null,
+          constraintsResolved: 0,
+          rollbackScope: null,
+        },
+      }),
+    );
+    expect(d.title).toBe("Deployment blocked");
+    expect(d.score).toBeNull();
+  });
+
   it("marks partial recovery runs as recovered", () => {
     const d = getDecision(
       base({

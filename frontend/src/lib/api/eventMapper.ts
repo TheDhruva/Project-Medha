@@ -83,6 +83,7 @@ export function createRunningSnapshot(
     frameIndex: 0,
     totalFrames: 0,
     changeIntel: null,
+    durationSeconds: null,
   };
 }
 
@@ -262,6 +263,9 @@ export function applyBackendEvent(
         });
       }
     }
+    // A terminal run never keeps executing: resolve stages the backend
+    // left "running" (e.g. real-path EXECUTE before the source fix).
+    pipeline = resolveTerminalPipeline(pipeline, runStatus, event.message, rollback);
     explain = {
       currentStage: "COMPLETE",
       round: negotiationRound(data, negotiation),
@@ -292,6 +296,7 @@ export function applyBackendEvent(
         COMPLETE: { status: "failed", detail: "Deployment failed" },
       });
     }
+    pipeline = resolveTerminalPipeline(pipeline, runStatus, event.message, rollback);
     explain = {
       currentStage: snapshot.explain.currentStage,
       round: null,
@@ -304,6 +309,35 @@ export function applyBackendEvent(
     result = (data.result as DeploymentResultView) || {
       kind: "failed",
       title: "FAILED",
+      message: event.message,
+      durationLabel: "demo",
+      servicesLabel: "n/a",
+      verificationScore: null,
+      constraintsResolved: 0,
+      rollbackScope: null,
+    };
+  }
+
+  if (event.type === "deployment.cancelled") {
+    runStatus = "failed";
+    if (!data.pipeline) {
+      pipeline = setStages(pipeline, {
+        COMPLETE: { status: "failed", detail: "Cancelled by owner" },
+      });
+    }
+    pipeline = resolveTerminalPipeline(pipeline, runStatus, event.message, rollback);
+    explain = {
+      currentStage: snapshot.explain.currentStage,
+      round: null,
+      statusLabel: "Cancelled",
+      simpleText: simpleFromEvent || event.message,
+      technicalText:
+        technicalFromEvent ||
+        `event=deployment.cancelled · deployment_id=${event.deployment_id}`,
+    };
+    result = (data.result as DeploymentResultView) || {
+      kind: "failed",
+      title: "CANCELLED",
       message: event.message,
       durationLabel: "demo",
       servicesLabel: "n/a",
@@ -383,6 +417,76 @@ const TERMINAL_RUN_STATUS: Record<string, DeploymentSnapshot["runStatus"]> = {
   awaiting_approval: "awaiting_approval",
 };
 
+/**
+ * Terminal pipeline reconciliation (the fix for "Execute: Running" on a
+ * terminal failed run).
+ *
+ * The backend historically left the in-flight stage "running" when the run
+ * terminated (real-path EXECUTE had no completed event before the source
+ * fix), so the log-derived pipeline contradicted the terminal status.
+ * At a terminal state a still-"running" stage cannot still be executing:
+ * on failure it is the failure point, on success the workflow finished.
+ * Completed stages are never touched — analysis/verification results stand.
+ * RECOVER resolves from the persisted rollback artifact (recorded scope vs
+ * none), never as an invented "pending".
+ */
+export function resolveTerminalPipeline(
+  pipeline: PipelineStage[],
+  runStatus: DeploymentSnapshot["runStatus"],
+  detail: string,
+  rollback: RollbackSummary | null,
+): PipelineStage[] {
+  if (runStatus !== "failed" && runStatus !== "succeeded" && runStatus !== "partial_recovery") {
+    return pipeline;
+  }
+  const updates: Partial<Record<StageId, Partial<PipelineStage>>> = {};
+  for (const stage of pipeline) {
+    if (stage.id === "COMPLETE" || stage.id === "RECOVER") continue;
+    if (stage.status !== "running") continue;
+    updates[stage.id] = {
+      status:
+        runStatus === "failed" ? "failed" : runStatus === "partial_recovery" ? "warning" : "success",
+      detail,
+    };
+  }
+  const recover = pipeline.find((p) => p.id === "RECOVER");
+  if (recover && (recover.status === "pending" || recover.status === "running")) {
+    if (rollback) {
+      const affected = (rollback.failed ?? 0) + (rollback.rolledBack ?? 0);
+      updates.RECOVER = {
+        status: affected > 0 ? "warning" : "success",
+        detail: `${rollback.rolledBack ?? 0} rolled back · ${rollback.preserved ?? 0} preserved`,
+      };
+    } else {
+      updates.RECOVER = {
+        status: "skipped",
+        detail: runStatus === "succeeded" ? "No recovery needed" : "No rollback recorded",
+      };
+    }
+  }
+  return Object.keys(updates).length > 0 ? setStages(pipeline, updates) : pipeline;
+}
+
+/**
+ * Measured run duration in seconds: backend stage timings first
+ * (`result.timings.totalMs`), else the persisted created/updated span.
+ * Null when neither is determinable — never the execution-mode label.
+ */
+export function durationFromApi(api: DeploymentApiSnapshot): number | null {
+  const result = api.result as Record<string, unknown> | null | undefined;
+  const timings = result?.["timings"] as Record<string, unknown> | undefined;
+  const totalMs = timings?.["totalMs"];
+  if (typeof totalMs === "number" && Number.isFinite(totalMs) && totalMs >= 0) {
+    return Math.round(totalMs / 1000);
+  }
+  const start = Date.parse(api.created_at);
+  const end = Date.parse(api.updated_at);
+  if (!Number.isNaN(start) && !Number.isNaN(end) && end >= start) {
+    return Math.round((end - start) / 1000);
+  }
+  return null;
+}
+
 /** True when a backend deployment status means the run cannot progress further. */
 export function isTerminalDeploymentStatus(status: string | null | undefined): boolean {
   return Boolean(status && status in TERMINAL_RUN_STATUS);
@@ -415,6 +519,14 @@ export function reconcileTerminalState(
     ...snapshot,
     runStatus,
     isDemo: api.is_demo,
+    pipeline: resolveTerminalPipeline(
+      snapshot.pipeline,
+      runStatus,
+      runStatus === "failed"
+        ? (api.error_summary || "Run failed")
+        : statusLabel,
+      snapshot.rollback,
+    ),
     explain: {
       currentStage: (api.current_stage as StageId) || "COMPLETE",
       round: null,
@@ -490,7 +602,18 @@ export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSn
   const isDemo = api.is_demo;
   const runStatus = TERMINAL_RUN_STATUS[api.status] ?? "running";
   const logs = input.logs ?? [];
-  const pipeline = pipelineFromLogs(logs, runStatus);
+  const terminalDetail =
+    runStatus === "failed"
+      ? api.error_summary || "Run failed"
+      : runStatus === "partial_recovery"
+        ? "Partial recovery after scoped rollback"
+        : "Run completed";
+  const pipeline = resolveTerminalPipeline(
+    pipelineFromLogs(logs, runStatus),
+    runStatus,
+    terminalDetail,
+    input.rollback ?? null,
+  );
   const trace: TraceEvent[] = logs.map((line, index) => ({
     id: `log-${index}`,
     time: formatClock(line.ts),
@@ -560,6 +683,7 @@ export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSn
     frameIndex: 0,
     totalFrames: 0,
     changeIntel: input.changeIntel ?? null,
+    durationSeconds: durationFromApi(api),
   };
 }
 

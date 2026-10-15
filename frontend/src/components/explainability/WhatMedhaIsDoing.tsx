@@ -3,7 +3,7 @@
 import { useDeployment } from "@/context/DeploymentContext";
 import { ViewModeToggle } from "./ViewModeToggle";
 
-export function WhatMedhaIsDoing() {
+export function WhatMedhaIsDoing({ showToggle = true }: { showToggle?: boolean }) {
   const { snapshot, viewMode } = useDeployment();
   const { explain } = snapshot;
   const text = viewMode === "simple" ? explain.simpleText : explain.technicalText;
@@ -14,7 +14,7 @@ export function WhatMedhaIsDoing() {
         <h2 className="font-display text-sm font-semibold tracking-wide text-medha-accent-hover">
           WHAT MEDHA IS DOING
         </h2>
-        <ViewModeToggle />
+        {showToggle ? <ViewModeToggle /> : null}
       </div>
       <div className="px-5 py-4">
         <p className="text-[15px] leading-relaxed text-medha-text">{text}</p>

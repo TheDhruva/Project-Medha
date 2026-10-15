@@ -440,7 +440,12 @@ export function subscribeDeploymentEventsShared(
           }
         }
       },
-      onError: handlers.onError,
+      onError: (message) => {
+        // Fatal stream error: drop the shared entry so the next mount
+        // starts a fresh stream instead of reusing a dead one.
+        sharedSubs.delete(deploymentId);
+        handlers.onError?.(message);
+      },
       onTerminal: () => {
         handlers.onTerminal?.();
         sharedSubs.delete(deploymentId);
@@ -917,6 +922,27 @@ export async function fetchCommitDetail(
     throw await parseError(response);
   }
   return response.json();
+}
+
+// --- Repository Intelligence (persisted run result, 404 until analyzed) ---
+
+export interface RepositoryIntelResponse {
+  deployment_id: string;
+  is_demo: boolean;
+  label: string | null;
+  repository_intelligence: Record<string, unknown>;
+}
+
+/**
+ * Evidence-backed repository intelligence for the analyzed revision.
+ * Null when the run has not produced one yet — never fabricated.
+ */
+export async function fetchRepositoryIntel(
+  deploymentId: string,
+): Promise<RepositoryIntelResponse | null> {
+  return cachedGetOrNull<RepositoryIntelResponse>(
+    `/api/deploy/${encodeURIComponent(deploymentId)}/repository-intelligence`,
+  );
 }
 
 // --- AI provider status (safe metadata only; never secrets) ---

@@ -36,6 +36,7 @@ function hydrationWith(agents: RunHydration["agents"]): RunHydration {
     changeImpactLabel: null,
     changeImpactIsDemo: false,
     health: null,
+    runtimeLogs: null,
   };
 }
 

@@ -877,7 +877,7 @@ export function ProjectRunDetail({ projectId, runId }: { projectId: string; runI
       </AppShell>
     );
   }
-  return <RunDetailView deploymentId={runId} />;
+  return <RunDetailView deploymentId={runId} projectId={projectId} />;
 }
 
 /* ================= PROJECT EVALUATIONS ================= */

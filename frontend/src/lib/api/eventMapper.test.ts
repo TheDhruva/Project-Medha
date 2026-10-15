@@ -4,9 +4,11 @@ import {
   applyBackendEvent,
   buildBackendSnapshot,
   createRunningSnapshot,
+  durationFromApi,
   isTerminalDeploymentStatus,
   mapVerificationArtifact,
   reconcileTerminalState,
+  resolveTerminalPipeline,
 } from "@/lib/api/eventMapper";
 import type {
   BackendSystemEvent,
@@ -58,6 +60,21 @@ describe("applyBackendEvent", () => {
     );
     expect(out.runStatus).toBe("running");
     expect(out.trace).toHaveLength(1);
+  });
+
+  it("reaches terminal state on deployment.cancelled", () => {
+    const snap = runningSnapshot();
+    const out = applyBackendEvent(
+      snap,
+      nextEvent({
+        type: "deployment.cancelled",
+        message: "Deployment cancelled by the owner.",
+        status: "cancelled",
+      }),
+    );
+    expect(out.runStatus).toBe("failed");
+    expect(out.explain.statusLabel).toBe("Cancelled");
+    expect(out.result?.title).toBe("CANCELLED");
   });
 
   it("handles malformed/empty data payloads gracefully", () => {
@@ -515,5 +532,167 @@ describe("execution mode and runtime logs hydration", () => {
       api: { ...baseApi, result: { execution_mode: "controlled_test" } },
     });
     expect(snap.executionMode).toBe("controlled_test");
+  });
+});
+
+describe("terminal pipeline reconciliation", () => {
+  const failedApi: DeploymentApiSnapshot = {
+    deployment_id: "dep_stale",
+    status: "failed",
+    mode: "real",
+    is_demo: false,
+    scenario: null,
+    repository_url: "https://github.com/example/app",
+    target: { host: "localhost", port: 8080 },
+    intent: null,
+    current_stage: "COMPLETE",
+    created_at: "2026-01-01T00:00:00+00:00",
+    updated_at: "2026-01-01T00:01:30+00:00",
+    error_summary: "Application did not become ready: connection refused",
+  };
+
+  // The screenshot defect: EXECUTE left "running" in the persisted log while
+  // the run is terminally failed (real path emitted no EXECUTE completed).
+  const staleLogs: RunLogLine[] = [
+    {
+      ts: "2026-01-01T00:00:01+00:00",
+      level: "info",
+      source: "executor",
+      message: "EXECUTE started",
+      type: "stage.started",
+      stage: "EXECUTE",
+      status: "running",
+      is_demo: false,
+    },
+    {
+      ts: "2026-01-01T00:01:30+00:00",
+      level: "error",
+      source: "executor",
+      message: "Application did not become ready",
+      type: "deployment.failed",
+      stage: "COMPLETE",
+      status: "failed",
+      is_demo: false,
+    },
+  ];
+
+  it("marks the stale running stage failed on a terminal failed run", () => {
+    const snap = buildBackendSnapshot({ api: failedApi, logs: staleLogs });
+    expect(snap.runStatus).toBe("failed");
+    expect(snap.pipeline.find((p) => p.id === "EXECUTE")?.status).toBe("failed");
+    expect(snap.pipeline.find((p) => p.id === "COMPLETE")?.status).toBe("failed");
+    // No rollback artifact: recovery is skipped, never pending.
+    expect(snap.pipeline.find((p) => p.id === "RECOVER")?.status).toBe("skipped");
+  });
+
+  it("resolves RECOVER from the persisted rollback artifact", () => {
+    const snap = buildBackendSnapshot({
+      api: failedApi,
+      logs: staleLogs,
+      rollback: {
+        headline: "SCOPED",
+        preserved: 1,
+        failed: 0,
+        rolledBack: 1,
+        details: [],
+        scopeNodeIds: ["a"],
+        simpleExplanation: "rolled back",
+      },
+    });
+    expect(snap.pipeline.find((p) => p.id === "RECOVER")?.status).toBe("warning");
+  });
+
+  it("leaves pre-execution stages pending on verification-gate failures", () => {
+    const snap = buildBackendSnapshot({ api: failedApi, logs: [] });
+    // Nothing ever started: EXECUTE honestly never began (blocked ≠ failed).
+    expect(snap.pipeline.find((p) => p.id === "EXECUTE")?.status).toBe("pending");
+    expect(snap.pipeline.find((p) => p.id === "COMPLETE")?.status).toBe("failed");
+  });
+
+  it("never touches completed analysis/verification stages", () => {
+    const withVerify: RunLogLine[] = [
+      {
+        ts: "2026-01-01T00:00:01+00:00",
+        level: "info",
+        source: "verifier",
+        message: "VERIFY completed",
+        type: "stage.completed",
+        stage: "VERIFY",
+        status: "success",
+        is_demo: false,
+      },
+      ...staleLogs,
+    ];
+    const snap = buildBackendSnapshot({ api: failedApi, logs: withVerify });
+    expect(snap.pipeline.find((p) => p.id === "VERIFY")?.status).toBe("success");
+    expect(snap.pipeline.find((p) => p.id === "EXECUTE")?.status).toBe("failed");
+  });
+
+  it("resolves live terminal events the same way", () => {
+    let snap = runningSnapshot(false, null);
+    snap = applyBackendEvent(snap, nextEvent({ type: "stage.started", stage: "EXECUTE" }));
+    expect(snap.pipeline.find((p) => p.id === "EXECUTE")?.status).toBe("running");
+    snap = applyBackendEvent(
+      snap,
+      nextEvent({ type: "deployment.failed", status: "failed", message: "readiness refused" }),
+    );
+    expect(snap.runStatus).toBe("failed");
+    expect(snap.pipeline.find((p) => p.id === "EXECUTE")?.status).toBe("failed");
+    expect(snap.pipeline.find((p) => p.id === "RECOVER")?.status).toBe("skipped");
+  });
+
+  it("leaves running snapshots untouched", () => {
+    const snap = buildBackendSnapshot({
+      api: { ...failedApi, status: "running", current_stage: "EXECUTE" },
+      logs: staleLogs.slice(0, 1),
+    });
+    expect(snap.runStatus).toBe("running");
+    expect(snap.pipeline.find((p) => p.id === "EXECUTE")?.status).toBe("running");
+  });
+
+  it("resolveTerminalPipeline ignores non-terminal states", () => {
+    const snap = buildBackendSnapshot({
+      api: { ...failedApi, status: "running", current_stage: "EXECUTE" },
+      logs: staleLogs.slice(0, 1),
+    });
+    const out = resolveTerminalPipeline(snap.pipeline, "running", "x", null);
+    expect(out.find((p) => p.id === "EXECUTE")?.status).toBe("running");
+  });
+});
+
+describe("durationFromApi", () => {
+  const base: DeploymentApiSnapshot = {
+    deployment_id: "dep_dur",
+    status: "failed",
+    mode: "real",
+    is_demo: false,
+    scenario: null,
+    repository_url: "https://github.com/example/app",
+    target: { host: "localhost", port: 8080 },
+    intent: null,
+    current_stage: "COMPLETE",
+    created_at: "2026-01-01T00:00:00+00:00",
+    updated_at: "2026-01-01T00:01:30+00:00",
+  };
+
+  it("prefers measured result timings over timestamp spans", () => {
+    expect(
+      durationFromApi({ ...base, result: { timings: { totalMs: 72400 } } }),
+    ).toBe(72);
+  });
+
+  it("falls back to the persisted created/updated span", () => {
+    expect(durationFromApi(base)).toBe(90);
+  });
+
+  it("returns null when nothing measurable exists", () => {
+    expect(
+      durationFromApi({ ...base, created_at: "bad", updated_at: "bad" }),
+    ).toBeNull();
+  });
+
+  it("hydrates durationSeconds on the snapshot", () => {
+    const snap = buildBackendSnapshot({ api: base });
+    expect(snap.durationSeconds).toBe(90);
   });
 });

@@ -133,6 +133,33 @@ def reconcile_interrupted(db_path: Path | None = None) -> dict[str, int]:
             counts["deployments"],
             counts["proposals"],
         )
+    # Reclaim abandoned local state without touching live successes:
+    # stale workspaces are removed; MEDHA-labelled Docker resources are only
+    # reported (successful deployments stay alive until explicit teardown).
+    try:
+        from app.services.workspace import prune_stale_workspaces
+
+        counts["workspaces_pruned"] = int(prune_stale_workspaces())
+    except Exception:  # noqa: BLE001 - bookkeeping must never raise
+        logger.exception("Recovery workspace prune failed")
+    try:
+        from app.execution import docker_ops
+
+        if docker_ops.docker_daemon_running():
+            import subprocess as _sp
+
+            _out = _sp.run(
+                ["docker", "ps", "-a", "--filter", "label=com.medha.managed=true",
+                 "--format", "{{.Names}}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if _out.returncode == 0:
+                _names = [n.strip() for n in (_out.stdout or "").splitlines() if n.strip()]
+                counts["labelled_containers_observed"] = len(_names)
+                if _names:
+                    logger.info("Recovery observed MEDHA-labelled containers: %s", _names[:10])
+    except Exception:  # noqa: BLE001 - bookkeeping must never raise
+        logger.exception("Recovery container observation failed")
     return counts
 
 

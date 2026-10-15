@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useDeployment } from "@/context/DeploymentContext";
 import { labelStatus, statusGlyph } from "@/lib/ui/status";
 import type { ConstraintStatus } from "@/lib/demo/types";
+import { cn } from "@/lib/ui/cn";
 
 type Filter = "all" | "conflicts" | "resolved" | "unresolved";
 
@@ -15,37 +16,88 @@ function matches(filter: Filter, status: ConstraintStatus): boolean {
   return status === "proposed" || status === "conflict";
 }
 
+function isResolved(status: ConstraintStatus): boolean {
+  return status === "accepted" || status === "rejected" || status === "superseded";
+}
+
+/**
+ * Consolidated CNP section: compact conflict counts, primary conflict with
+ * resolution method and affected services, expandable constraint records.
+ * Full negotiation history appears in Technical mode.
+ */
 export function ConstraintNegotiation() {
   const { snapshot, viewMode } = useDeployment();
   const [filter, setFilter] = useState<Filter>("all");
   const negotiation = snapshot.negotiation;
+  const technical = viewMode === "technical";
+
+  const counts = useMemo(() => {
+    const total = snapshot.constraints.length;
+    const conflicts = snapshot.constraints.filter((c) => c.status === "conflict").length;
+    const resolved = snapshot.constraints.filter((c) => isResolved(c.status)).length;
+    return { total, conflicts, resolved, unresolved: total - resolved };
+  }, [snapshot.constraints]);
+
   const filtered = useMemo(
     () => snapshot.constraints.filter((c) => matches(filter, c.status)),
     [snapshot.constraints, filter],
   );
 
+  const primary =
+    snapshot.constraints.find((c) => c.status === "conflict") ??
+    snapshot.constraints.find((c) => !isResolved(c.status)) ??
+    null;
+  // Older runs persist negotiation without involvedConstraintIds — never
+  // assume backend optional arrays exist.
+  const involvedIds = negotiation?.involvedConstraintIds ?? [];
+  const affectedServices = useMemo(
+    () => [...new Set(snapshot.constraints.map((c) => c.service).filter(Boolean))].slice(0, 4),
+    [snapshot.constraints],
+  );
+
+  if (!negotiation && snapshot.constraints.length === 0) {
+    return (
+      <section className="medha-panel animate-medha-in p-4">
+        <h2 className="font-display text-sm font-semibold tracking-wide text-medha-text">
+          CONFLICT RESOLUTION
+        </h2>
+        <p className="mt-2 text-sm text-medha-secondary">
+          No constraint negotiation data for this run.
+        </p>
+      </section>
+    );
+  }
+
   return (
-    <section className="medha-panel animate-medha-in p-4 sm:p-5">
-      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-        <div>
+    <section className="medha-panel animate-medha-in p-4" aria-label="Conflict resolution">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
           <h2 className="font-display text-sm font-semibold tracking-wide text-medha-text">
-            CONSTRAINT NEGOTIATION
+            CONFLICT RESOLUTION
           </h2>
-          <p className="mt-1 text-xs text-medha-secondary">
-            Pre-execution CNP — research contribution #1
+          <p className="mt-1 text-[13px] text-medha-secondary">
+            {counts.total} constraint{counts.total === 1 ? "" : "s"} · {counts.resolved} resolved
+            {counts.unresolved > 0 ? (
+              <span className="font-semibold text-medha-warning"> · {counts.unresolved} unresolved</span>
+            ) : (
+              " · none unresolved"
+            )}
+            {negotiation ? ` · round ${negotiation.round} / ${negotiation.maxRounds}` : ""}
           </p>
         </div>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Constraint filter">
           {(["all", "conflicts", "resolved", "unresolved"] as Filter[]).map((f) => (
             <button
               key={f}
               type="button"
               onClick={() => setFilter(f)}
-              className={`rounded-md px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+              aria-pressed={filter === f}
+              className={cn(
+                "rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition",
                 filter === f
                   ? "bg-medha-accent text-white"
-                  : "bg-medha-surface-muted text-medha-secondary"
-              }`}
+                  : "bg-medha-surface-muted text-medha-secondary hover:text-medha-text",
+              )}
             >
               {f}
             </button>
@@ -53,81 +105,79 @@ export function ConstraintNegotiation() {
         </div>
       </div>
 
-      {!negotiation && snapshot.constraints.length === 0 ? (
-        <p className="mt-4 rounded-md border border-medha-border bg-medha-surface text-medha-secondary py-3 text-center">
-          No constraints yet. Run a real repository analysis to see negotiation.
-        </p>
-      ) : (
-        <>
-          {negotiation ? (
-            <div className="mt-4 rounded-md border border-medha-border bg-medha-surface-muted p-3">
-              <p className="text-sm font-medium text-medha-text">{negotiation.conflictSummary}</p>
-              <p className="mt-2 text-xs leading-relaxed text-medha-secondary">
-                {viewMode === "simple"
-                  ? negotiation.simpleExplanation
-                  : (negotiation.technicalNotes ?? []).join(" · ") ||
-                    negotiation.simpleExplanation}
-              </p>
-              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                <span className="text-xs font-medium text-medha-secondary">Round</span>
-                <span className="text-xs font-semibold text-medha-text">{`${negotiation.round} / ${negotiation.maxRounds}`}</span>
-                <span className="text-xs font-medium text-medha-secondary">Status</span>
-                <span className="text-xs font-semibold text-medha-text">{negotiation.status.toUpperCase()}</span>
-                <span className="text-xs font-medium text-medha-secondary">Resolution</span>
-                <span className="text-xs font-semibold text-medha-text">{negotiation.resolution ?? "—"}</span>
-                <span className="text-xs font-medium text-medha-secondary">Method</span>
-                <span className="text-xs font-semibold text-medha-text">{negotiation.method ?? "—"}</span>
-              </div>
-            </div>
-          ) : null}
+      {primary ? (
+        <div
+          className={cn(
+            "mt-2.5 rounded-medha-sm border px-3 py-2",
+            primary.status === "conflict"
+              ? "border-medha-warning/30 bg-medha-warning-soft/50"
+              : "border-medha-border bg-medha-muted/50",
+          )}
+        >
+          <p className="text-[13px] font-semibold text-medha-text">
+            <span aria-hidden>{statusGlyph(primary.status)} </span>
+            {primary.summary}
+          </p>
+          <p className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-medha-secondary">
+            {negotiation?.method ? <span>Method: <span className="font-medium text-medha-text">{negotiation.method}</span></span> : null}
+            {negotiation?.resolution ? <span>Resolution: <span className="font-medium text-medha-text">{negotiation.resolution}</span></span> : null}
+            {affectedServices.length > 0 ? <span>Services: {affectedServices.join(", ")}</span> : null}
+          </p>
+        </div>
+      ) : null}
 
-          <ul className="mt-4 space-y-2">
-            {filtered.length === 0 ? (
-              <p className="mt-2 rounded-md border border-medha-border bg-medha-surface text-medha-secondary py-2 text-center">
-                No constraints match this filter.
-              </p>
-            ) : (
-              filtered.map((c) => (
-                <li
-                  key={c.id}
-                  className="rounded-md border border-medha-border bg-medha-surface px-3 py-3"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-xs font-semibold tracking-wide text-medha-accent">{c.type}</p>
-                    <p className="text-[9px] font-medium uppercase text-medha-secondary">
+      {technical && negotiation ? (
+        <div className="mt-2.5 rounded-medha-sm border border-medha-border bg-white px-3 py-2">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
+            Negotiation history
+          </p>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-medha-secondary">
+            {(negotiation.technicalNotes ?? []).join(" · ") || negotiation.simpleExplanation}
+          </p>
+          <p className="medha-mono mt-1 text-[11px] text-medha-tertiary">
+            status={negotiation.status} · {involvedIds.length} involved constraint{involvedIds.length === 1 ? "" : "s"}
+          </p>
+        </div>
+      ) : null}
+
+      <ul className="mt-2 space-y-1">
+        {filtered.length === 0 ? (
+          <li className="rounded-medha-sm border border-medha-border px-3 py-2 text-center text-[13px] text-medha-secondary">
+            No constraints match this filter.
+          </li>
+        ) : (
+          filtered.map((c) => (
+            <li key={c.id} className="rounded-medha-sm border border-medha-border bg-white">
+              <details>
+                <summary className="cursor-pointer list-none px-3 py-1.5 [&::-webkit-details-marker]:hidden">
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12.5px]">
+                    <span className="font-semibold text-medha-accent">{c.type}</span>
+                    <span className="min-w-0 flex-1 truncate font-medium text-medha-text">{c.summary}</span>
+                    <span className="shrink-0 text-[10px] font-semibold uppercase text-medha-secondary">
                       <span aria-hidden>{statusGlyph(c.status)} </span>
                       {labelStatus(c.status)}
-                    </p>
-                  </div>
-                  <p className="mt-1 text-sm font-medium text-medha-text">{c.summary}</p>
-                  <p className="mt-1 text-xs text-medha-secondary">{c.detail}</p>
-                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-medha-tertiary">
+                    </span>
+                  </span>
+                </summary>
+                <div className="border-t border-medha-border px-3 py-2">
+                  <p className="text-[12.5px] text-medha-secondary">{c.detail}</p>
+                  <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-medha-tertiary">
+                    <span className="medha-mono">{c.id}</span>
                     <span>{c.sourceAgent}</span>
                     <span>priority: {c.priority}</span>
                     {c.service ? <span>service: {c.service}</span> : null}
-                    {viewMode === "technical" ? (
-                      <span className="medha-mono">id={c.id}</span>
-                    ) : null}
-                  </div>
-                  {viewMode === "technical" && c.technical ? (
-                    <pre className="medha-mono mt-2 overflow-x-auto rounded bg-medha-surface p-2 text-[8px] text-medha-secondary">
+                  </p>
+                  {technical && c.technical ? (
+                    <pre className="medha-mono mt-1.5 overflow-x-auto rounded bg-medha-muted p-2 text-[10.5px] text-medha-secondary">
                       {JSON.stringify(c.technical.payload, null, 2)}
                     </pre>
                   ) : null}
-                </li>
-              ))
-            )}
-          </ul>
-        </>
-      )}
+                </div>
+              </details>
+            </li>
+          ))
+        )}
+      </ul>
     </section>
-  );
-}
-
-function EmptyState({ message }: { message: string }) {
-  return (
-    <p className="mt-4 rounded-md border border-medha-border bg-medha-surface py-3 text-center text-medha-secondary">
-      {message}
-    </p>
   );
 }

@@ -20,6 +20,102 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def build_repository_intelligence(
+    profile: ApplicationProfile,
+    *,
+    commit_sha: str | None,
+    repository_url: str | None = None,
+) -> dict:
+    """Evidence-backed Repository Intelligence from an analyzed revision.
+
+    Deterministic only: every claim cites analyzer evidence (manifest paths,
+    entry points, detected services). No LLM, no secret values — env names
+    only. Stored on the run result payload (no schema change) and served via
+    GET /api/deploy/{id}/repository-intelligence.
+    """
+    stack = profile.inferred_stack
+    services = [
+        {
+            "name": s.name,
+            "role": s.role,
+            "evidence_paths": list(s.evidence_paths or []),
+            "suggested_port": s.suggested_port,
+        }
+        for s in (stack.services or [])
+    ]
+    # Proposed deployment approach mirrors the isolated RealExecutor support
+    # matrix (static → nginx, python → uvicorn/gunicorn, node → npm/node)
+    # without executing anything: evidence only.
+    language = (stack.language_runtime or "").lower()
+    _manifests = list(stack.manifests_examined or [])
+    if "index.html" in _manifests or "dist/index.html" in _manifests:
+        approach, approach_evidence = "static", [
+            m for m in _manifests if m in ("index.html", "dist/index.html")
+        ] or ["index.html at checkout root"]
+    elif language == "node" or "npm" in (stack.package_managers or []):
+        approach, approach_evidence = "node", ["package.json with start script"]
+    elif language == "python" or any(
+        m in ("requirements.txt", "pyproject.toml") for m in (stack.manifests_examined or [])
+    ):
+        approach, approach_evidence = "python", [
+            *(stack.entry_points or []),
+            *[m for m in (stack.manifests_examined or []) if m in ("requirements.txt", "pyproject.toml")],
+        ]
+    elif stack.has_dockerfile or stack.has_compose:
+        approach, approach_evidence = "undecided-containerized", list(stack.manifests_examined or [])
+    else:
+        approach, approach_evidence = "undecided", list(stack.manifests_examined or [])
+    unknowns: list[str] = []
+    if not stack.entry_points:
+        unknowns.append("No explicit application entrypoint detected in manifests.")
+    if not stack.health_hints:
+        unknowns.append("No health-check hint found; readiness probes GET / by default.")
+    if (stack.app_relationship or "") == "monorepo" and not stack.selected_target:
+        unknowns.append("Multiple applications detected without an explicit deployment target.")
+    assumptions = [
+        f"Inferred from manifests: {', '.join(stack.manifests_examined or ['none'])}.",
+        "Repository Dockerfiles are never executed; MEDHA uses controlled build templates.",
+    ]
+    unsupported: list[str] = []
+    if language and language not in ("node", "python", "static", ""):
+        unsupported.append(f"Language runtime '{stack.language_runtime}' is outside the static/python/node matrix.")
+    return {
+        "schema": "repository-intelligence/v1",
+        "repository_url": repository_url or profile.repository_url,
+        "commit_sha": commit_sha,
+        "purpose": profile.intent or "Deploy the analyzed application revision.",
+        "tech_stack": {
+            "language_runtime": stack.language_runtime,
+            "framework": stack.framework,
+            "framework_version": stack.framework_version,
+            "package_managers": list(stack.package_managers or []),
+            "lockfiles": list(stack.lockfiles or []),
+        },
+        "components": services,
+        "entry_points": list(stack.entry_points or []),
+        "build_command": None,
+        "start_command": None,
+        "runtime_requirements": {
+            "suggested_ports": list(stack.suggested_ports or []),
+            "env_names": list(stack.env_names or []),
+            "health_hints": list(stack.health_hints or []),
+        },
+        "existing_deploy_config": {
+            "has_dockerfile": stack.has_dockerfile,
+            "has_compose": stack.has_compose,
+            "manifests_examined": list(stack.manifests_examined or []),
+            "ci_configs": list(stack.ci_configs or []),
+        },
+        "proposed_approach": approach,
+        "approach_evidence": approach_evidence,
+        "unknowns": unknowns,
+        "assumptions": assumptions,
+        "confidence": stack.confidence,
+        "unsupported": unsupported,
+        "notes": list(stack.notes or []),
+    }
+
+
 def analyze_repository(
     *,
     deployment_id: str,
@@ -97,6 +193,31 @@ def analyze_repository(
     requirements = effective / "requirements.txt"
     pyproject = effective / "pyproject.toml"
     go_mod = effective / "go.mod"
+    # Static-site evidence (matches the isolated RealExecutor `static`
+    # profile): an index.html at the effective root is deployable via the
+    # controlled nginx template — record it as first-class evidence instead
+    # of reporting "no known manifests".
+    index_html = effective / "index.html"
+    dist_index = effective / "dist" / "index.html"
+    static_docroot: str | None = None
+    if index_html.is_file():
+        static_docroot = "index.html"
+    elif dist_index.is_file():
+        static_docroot = "dist/index.html"
+    if static_docroot is not None:
+        examined.append(static_docroot)
+        language = language or "static"
+        entry_points.append(static_docroot)
+        health_hints.append("/")
+        services.append(
+            ServiceHint(
+                name="frontend",
+                role="web",
+                evidence_paths=[static_docroot],
+                suggested_port=target_port,
+            )
+        )
+        notes.append(f"Static site detected via {static_docroot} (nginx profile).")
 
     has_dockerfile = dockerfile is not None
     has_compose = compose is not None
@@ -111,7 +232,11 @@ def analyze_repository(
 
     if package_json.exists():
         examined.append("package.json")
-        package_managers.append("npm")
+        _pm_notes = _node_package_manager_notes(effective, package_json)
+        for _pm in _pm_notes[0]:
+            if _pm not in package_managers:
+                package_managers.append(_pm)
+        notes.extend(_pm_notes[1])
         language = language or "node"
         pkg_ports = _ports_from_package_json(package_json)
         ports.extend(pkg_ports)
@@ -219,6 +344,8 @@ def analyze_repository(
         confidence += 0.2
     if has_compose:
         confidence += 0.25
+    if static_docroot is not None:
+        confidence += 0.25
     if package_managers:
         confidence += 0.1
     if lockfiles:
@@ -286,6 +413,34 @@ def analyze_repository(
         is_demo=False,
     )
     return profile, result
+
+
+def _node_package_manager_notes(
+    effective: Path, package_json: Path,
+) -> tuple[list[str], list[str]]:
+    """Package-manager evidence shared with the runtime selector.
+
+    Best-effort and total: analysis never fails on strange manifests; a
+    conflict is recorded as an explicit note (the executor fails closed
+    with the diagnostic later).
+    """
+    try:
+        pkg = json.loads(package_json.read_text(encoding="utf-8"))
+        if not isinstance(pkg, dict):
+            return ["npm"], ["package.json is not valid JSON; assuming npm."]
+        from app.execution.runtime import select_package_manager as _select
+
+        pm, pinned, evidence, found, conflict = _select(effective, pkg)
+        managers = [pm] if pm else list(found)
+        notes = [f"Package manager: {line}." for line in evidence[:4]]
+        if pinned and pm:
+            notes.append(f"Pinned {pm}@{pinned} via packageManager.")
+        if conflict:
+            notes.append(f"Package-manager conflict: {conflict}")
+            return managers or ["npm"], notes
+        return managers or ["npm"], notes
+    except Exception:  # noqa: BLE001 - evidence only, never block analysis
+        return ["npm"], ["Package-manager evidence unreadable; assuming npm."]
 
 
 def _find_first(root: Path, names: list[str]) -> Path | None:

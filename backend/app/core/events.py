@@ -23,6 +23,10 @@ class EventBus:
     def __init__(self) -> None:
         self._subscribers: dict[str, set[asyncio.Queue[SystemEvent]]] = defaultdict(set)
         self._lock = asyncio.Lock()
+        # Consecutive-drop counter per queue: slow consumers are evicted
+        # (dead-stream cleanup) instead of silently missing events forever.
+        self._drops: dict[int, int] = {}
+        self._max_consecutive_drops = 20
 
     async def subscribe(self, deployment_id: str) -> asyncio.Queue[SystemEvent]:
         queue: asyncio.Queue[SystemEvent] = asyncio.Queue(maxsize=256)
@@ -45,6 +49,7 @@ class EventBus:
             subs.discard(queue)
             if not subs:
                 self._subscribers.pop(deployment_id, None)
+        self._drops.pop(id(queue), None)
 
     async def publish(self, event: SystemEvent) -> None:
         async with self._lock:
@@ -55,13 +60,28 @@ class EventBus:
         for queue in subscribers:
             try:
                 queue.put_nowait(event)
+                self._drops.pop(id(queue), None)
             except asyncio.QueueFull:
                 bump("sse.dropped")
+                consecutive = self._drops.get(id(queue), 0) + 1
+                self._drops[id(queue)] = consecutive
                 logger.warning(
-                    "Dropping event for slow SSE subscriber deployment_id=%s type=%s",
+                    "Dropping event for slow SSE subscriber deployment_id=%s type=%s (%d consecutive)",
                     event.deployment_id,
                     event.event_type,
+                    consecutive,
                 )
+                if consecutive >= self._max_consecutive_drops:
+                    # Dead stream: evict so the handler's disconnect check
+                    # fires and resources are released on both ends.
+                    async with self._lock:
+                        subs = self._subscribers.get(event.deployment_id)
+                        if subs is not None:
+                            subs.discard(queue)
+                            if not subs:
+                                self._subscribers.pop(event.deployment_id, None)
+                    self._drops.pop(id(queue), None)
+                    bump("sse.evicted")
 
 
 event_bus = EventBus()

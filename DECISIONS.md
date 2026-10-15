@@ -513,3 +513,64 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
   (`strftime` backoff is SQLite-dialect). Score history and commit metadata
   persist in `scores`/`commits` tables.
 - **Status:** Accepted
+
+## ADR-040 - Versioned runtime spec + staged real-execution readiness contract
+
+- **Decision:** (a) `backend/app/execution/runtime.py` defines the validated
+  `runtime-spec/v1` Pydantic contract (profile/version, pinned commit SHA,
+  app root, language/framework/package-manager, evidence + confidence,
+  internal/host ports, build/start/bind config, readiness deadline, env
+  names only, resource limits, base image). Detection returns
+  supported/unsupported/ambiguous — never a silent guess
+  (`AMBIGUOUS_TARGET` for multi-app roots without a target). (b) The
+  profile registry (`profiles.py`) extends the existing system with
+  `nextjs` (lockfile-aware npm/pnpm/yarn install + required `build` step +
+  glibc `node:22-slim` base) and `python-asgi` alongside unchanged
+  `node`/`python`/`static` behavior; bun fails closed (no V1 toolchain).
+  (c) `RealExecutor.deploy` enforces staged fail-closed evidence:
+  detection → build → start → published-port verification → bounded
+  readiness probes, recording probe URL, host→container mapping, attempts,
+  container state/exit code, and a bounded log tail. Post-start failures
+  keep code `READINESS_FAILED` with a machine-readable `stage`
+  (`connection_refused` / `timeout` / `http_error` / `container_exited`);
+  a missing published binding fails fast as `PORT_MAPPING_FAILED` and an
+  immediately-exited container as `START_FAILED` with its exit code.
+  Success requires a passed probe.
+- **Why:** Real Docker readiness repeatedly failed with `connection refused`
+  at the published port because the node template installed with npm
+  (ignoring pnpm lockfiles) and never ran the production build, so
+  `next start` had no `.next` output; failures were undiagnosable (no port
+  binding/state evidence). Verified against pinned Lead_Website
+  `ad51b8b3` (pnpm + `next build`): real build + readiness passed.
+- **Consequences:** `RealDeployResult`/`run result` gain optional
+  `runtime_spec` evidence (old runs without it stay readable). Pipeline
+  passes the analyzed commit SHA into the executor; CNP/verifier/CEG/
+  rollback/simulator paths are untouched.
+- **Status:** Accepted
+
+## ADR-041 - Analyzed-commit summaries + declaration-aware package managers
+
+- **Decision:** (a) The analysis pipeline records commit metadata
+  (SHA/message/author/timestamps) plus a deterministic, evidence-based
+  summary (headline + changed-file paths + diff stats) for the analyzed
+  revision, read from the already-acquired checkout — no extra clone, no
+  LLM, no paid APIs. New `commits` columns (`summary`, `files_json`,
+  `added`, `deleted`, `deployment_id`; schema v10 with migration) extend
+  the existing table; missing summaries render as unavailable, never
+  fabricated. (b) The history API serves persisted commits first
+  (`?refresh=1` forces a live re-acquire), so opening the overview causes
+  no new analysis or clone. (c) Package-manager selection honors a valid
+  `packageManager` declaration when consistent with lockfile evidence,
+  pins the declared version via Corepack (non-interactive bootstrap), and
+  fails closed with an explicit diagnostic on conflicting lockfiles or
+  declaration/lockfile mismatch. Repository intelligence reports the
+  selected manager + evidence from the same shared selector.
+- **Why:** The Latest-commit card was empty because the pipeline never
+  persisted commit metadata (only the history endpoint's live re-clone
+  wrote rows), and the overview reported npm for a pnpm repo because the
+  analyzer hardcoded npm while the executor used lockfile priority.
+- **Consequences:** Future analyses self-record; the existing Lead run was
+  backfilled from its pinned SHA. Bulk ancestry upserts never overwrite a
+  recorded summary. Bun and conflicting-managers still fail closed before
+  any Docker work; the Next.js build/readiness path is unchanged.
+- **Status:** Accepted

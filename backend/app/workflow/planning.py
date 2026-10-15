@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from app.agents.analyzer import analyze_repository
@@ -230,6 +231,9 @@ class PlanningPipeline:
             logger.error("PlanningPipeline missing deployment_id=%s", deployment_id)
             return
         ai_ctx = _ai_context(record, settings)
+        # Evidence-backed Repository Intelligence for this run (built after
+        # analysis from the pinned revision; persisted on events + results).
+        repository_intelligence: dict | None = None
 
         try:
             try_acquire_real_deploy(deployment_id)
@@ -448,6 +452,12 @@ class PlanningPipeline:
                     self._record_timing(
                         "acquire", time.perf_counter() - acquire_timer.t0
                     )
+                    # The detached thread may still finish late; its result is
+                    # dropped above, so remove any partial clone it leaves.
+                    try:
+                        cleanup_workspace(deployment_id)
+                    except Exception:
+                        pass
                     await self._fail(
                         deployment_id,
                         "Repository acquisition timed out; the run fails closed.",
@@ -596,6 +606,13 @@ class PlanningPipeline:
                         "technical": "tier=1 · llm_budget=0 · skipped=ai_assist",
                     },
                 )
+            from app.agents.analyzer import build_repository_intelligence as _build_intel
+
+            repository_intelligence = _build_intel(
+                profile,
+                commit_sha=acquisition.checked_sha or resolved_sha,
+                repository_url=record.repository_url,
+            )
             await self._emit(
                 deployment_id,
                 EventType.SYSTEM_MESSAGE,
@@ -624,9 +641,16 @@ class PlanningPipeline:
                         "app_relationship": profile.inferred_stack.app_relationship,
                         "selected_target": profile.inferred_stack.selected_target,
                     },
+                    "repository_intelligence": repository_intelligence,
                 },
             )
             await self._stage(deployment_id, StageId.ANALYZE, "completed", delay)
+            # Persist commit metadata + deterministic summary for the analyzed
+            # revision (from this checkout — no extra clone). Advisory only:
+            # analysis stands on its own when the checkout has no git history.
+            await self._record_analyzed_commit(
+                deployment_id, record, acquisition, resolved_sha,
+            )
 
             support = assess_plan_support(profile, selected_target=deploy_target)
             if not support.supported:
@@ -989,6 +1013,7 @@ class PlanningPipeline:
                 delay=delay,
                 intent=record.intent,
                 change_intel=change_intel,
+                repository_intelligence=repository_intelligence,
                 plan_only=plan_only,
                 expected_plan_hash=expected_plan_hash,
                 proposal_id=proposal_id,
@@ -1019,12 +1044,93 @@ class PlanningPipeline:
             except Exception:  # noqa: BLE001 - shutdown must never raise
                 pass
             try:
+                # Successful real deployments stay alive under MEDHA labels
+                # until explicit teardown: never remove a COMPLETED run's
+                # containers merely because the pipeline task is exiting.
+                # Failed/cancelled workloads are already cleaned at their
+                # failure sites; this is a best-effort sweep for leftovers.
                 if get_settings().docker_execute and get_settings().docker_cleanup:
-                    docker_ops.cleanup_deployment(deployment_id)
+                    try:
+                        _final = self.repo.get(deployment_id)
+                    except Exception:
+                        _final = None
+                    if _final is None or _final.status != DeploymentStatus.COMPLETED:
+                        try:
+                            if docker_ops.docker_cli_available():
+                                docker_ops.cleanup_deployment(deployment_id)
+                        except Exception:  # noqa: BLE001 - best effort
+                            pass
             except Exception:  # noqa: BLE001
                 logger.exception("Docker cleanup failed deployment_id=%s", deployment_id)
             if not get_settings().medha_debug:
                 cleanup_workspace(deployment_id)
+
+    async def _record_analyzed_commit(
+        self, deployment_id: str, record, acquisition, resolved_sha: str | None,
+    ) -> None:
+        """Persist commit metadata + deterministic summary (ANALYZE stage).
+
+        Uses the already-acquired pinned checkout — never re-clones. Runs
+        for analysis regardless of later deployment outcome (analysis,
+        deployment, and summarization state stay distinct). Best-effort:
+        a checkout without git history yields an honest warning, never a
+        pipeline failure and never a fabricated summary.
+        """
+        project_id = getattr(record, "project_id", None)
+        sha = ((getattr(acquisition, "checked_sha", None) or resolved_sha) or "")
+        sha = sha.strip().lower()
+        if not project_id or len(sha) != 40:
+            return
+        try:
+            from app.database.repositories import CommitRepository, ProjectRepository
+            from app.services import history_service as _hs
+
+            entry = await _read_commit_evidence(
+                record, acquisition, sha, _hs.commit_metadata,
+            )
+            try:
+                diff = await _read_commit_evidence(
+                    record, acquisition, sha, _hs.changed_files_summary,
+                )
+            except _hs.HistoryError:
+                diff = None
+            summary = _hs.build_commit_summary(entry, diff)
+            branch = None
+            try:
+                proj = await asyncio.to_thread(
+                    ProjectRepository(db_path=self.repo.db_path).get, project_id,
+                )
+                branch = proj.branch if proj is not None else None
+            except Exception:  # noqa: BLE001 - branch is decorative
+                branch = None
+            await asyncio.to_thread(
+                CommitRepository(db_path=self.repo.db_path).upsert,
+                project_id=project_id, sha=entry.sha, parents=entry.parents,
+                author=entry.author, committed_at=entry.committed_at,
+                message=entry.message, branch=branch,
+                recorded_at=utc_now_iso(), summary=summary,
+                files=(diff or {}).get("files") if diff else None,
+                added=(diff or {}).get("added", 0) if diff else 0,
+                deleted=(diff or {}).get("deleted", 0) if diff else 0,
+                deployment_id=deployment_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - advisory only
+            logger.warning(
+                "Commit summary unavailable deployment_id=%s: %s",
+                deployment_id, type(exc).__name__,
+            )
+            await self._emit(
+                deployment_id,
+                EventType.SYSTEM_MESSAGE,
+                "Commit summary unavailable for this checkout; "
+                "overview will show metadata as unavailable.",
+                stage=StageId.ANALYZE.value,
+                level="warning",
+                metadata={
+                    "simple": "Commit details could not be read from this checkout.",
+                    "technical": f"commit.summary=unavailable · sha={sha[:12]}",
+                },
+            )
 
     def _fresh_change_intel(self, deployment_id: str) -> dict[str, Any] | None:
         try:
@@ -1413,6 +1519,7 @@ class PlanningPipeline:
         delay: float,
         intent: str | None,
         change_intel=None,
+        repository_intelligence: dict | None = None,
         plan_only: bool = False,
         expected_plan_hash: str | None = None,
         proposal_id: str | None = None,
@@ -2062,6 +2169,7 @@ class PlanningPipeline:
                 ai_ctx=ai_ctx,
                 synthetic_services=synthetic_services,
                 expanded_to_canonical=expanded_to_canonical,
+                repository_intelligence=repository_intelligence,
             )
             return
 
@@ -2095,10 +2203,10 @@ class PlanningPipeline:
                     "is_demo": False,
                     "code": _code,
                     "execution_mode": "unconfigured",
+                    "repository_intelligence": repository_intelligence,
                     # Structured block markers: the execution stage never ran,
                     # upstream analysis/verification results remain valid.
-                    "blocked": True,
-                    "blocked_stage": "execute",
+                    "blocked": True,                    "blocked_stage": "execute",
                     "readiness": readiness,
                     "analysis_preserved": True,
                     "verification_preserved": verification is not None,
@@ -2443,6 +2551,7 @@ class PlanningPipeline:
         ai_ctx: dict | None,
         synthetic_services: list[str],
         expanded_to_canonical: bool,
+        repository_intelligence: dict | None = None,
     ) -> None:
         """Real application build + run through the isolated RealExecutor."""
         from app.ceg.rollback import apply_scope_to_graph, compute_rollback_scope
@@ -2496,6 +2605,9 @@ class PlanningPipeline:
                 target_port=target_port,
                 readiness_timeout=settings.real_readiness_timeout_seconds,
                 build_timeout=settings.real_build_timeout_seconds,
+                # Pin execution to the analyzed commit SHA — never deploy a
+                # newer revision than the one that was analyzed/verified.
+                commit_sha=resolved_sha,
             )
         except PolicyViolation as exc:
             await self._fail(
@@ -2508,6 +2620,7 @@ class PlanningPipeline:
                     "requested_ref": requested_ref, "target_sha": resolved_sha,
                     "plan": canonical_plan, "plan_hash": plan_digest,
                     "phase": PHASE_LABEL, "is_demo": False, "code": exc.code,
+                    "repository_intelligence": repository_intelligence,
                 },
             )
             return
@@ -2525,10 +2638,12 @@ class PlanningPipeline:
             "container": outcome.container,
             "port": outcome.port,
             "readiness": outcome.readiness,
+            "runtime_spec": outcome.runtime_spec or None,
             "plan": canonical_plan,
             "plan_hash": plan_digest,
             "phase": PHASE_LABEL,
             "is_demo": False,
+            "repository_intelligence": repository_intelligence,
         }
         if outcome.ok:
             # Mark CEG app nodes success with real provenance.
@@ -2566,6 +2681,9 @@ class PlanningPipeline:
                 ai=_ai_rollup(ai_ctx["notes"]) if ai_ctx and ai_ctx.get("notes") else None,
                 updated_at=utc_now_iso(),
             )
+            # Close the EXECUTE stage in the persisted log: without this the
+            # stage reads "running" forever while the run is terminal.
+            await self._stage(deployment_id, StageId.EXECUTE, "completed", delay * 0.2)
             self._status(
                 deployment_id, DeploymentStatus.COMPLETED, StageId.COMPLETE,
                 result["message"], f"final_status=succeeded · executor=real",
@@ -2615,6 +2733,16 @@ class PlanningPipeline:
             result=result,
             ai=_ai_rollup(ai_ctx["notes"]) if ai_ctx and ai_ctx.get("notes") else None,
             updated_at=utc_now_iso(),
+        )
+        # Close the EXECUTE stage as failed in the persisted log so the
+        # pipeline agrees with the terminal FAILED status (a failed
+        # readiness check after real execution stays a failure here).
+        # RECOVER needs no stage event: no rollback container work runs on
+        # this path (failed workload is cleaned up above); the persisted
+        # rollback scope artifact records the recovery outcome instead.
+        await self._stage(
+            deployment_id, StageId.EXECUTE, "completed", 0,
+            status="failed",
         )
         await self._fail(
             deployment_id, outcome.message,
@@ -2707,20 +2835,23 @@ class PlanningPipeline:
         stage: StageId,
         kind: str,
         delay: float,
+        *,
+        status: str | None = None,
     ) -> None:
         et = EventType.STAGE_STARTED if kind == "started" else EventType.STAGE_COMPLETED
+        resolved = status or ("running" if kind == "started" else "success")
         await self._emit(
             deployment_id,
             et,
             f"{stage.value} {kind}",
             stage=stage.value,
-            status="running" if kind == "started" else "success",
+            status=resolved,
             metadata={
                 "simple": f"Stage {stage.value} {kind}.",
                 "technical": f"stage={stage.value} · event={et.value}",
                 "pipeline": {
                     stage.value: {
-                        "status": "running" if kind == "started" else "success",
+                        "status": resolved,
                         "detail": kind,
                     }
                 },
@@ -2890,6 +3021,27 @@ class PlanningPipeline:
 
 
 _ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+
+
+async def _read_commit_evidence(record, acquisition, sha: str, reader):
+    """Read SHA-addressed git evidence from the pinned checkout first.
+
+    Local-archive checkouts are `git archive` exports without .git metadata;
+    fall back to the operator's local source repo for the same SHA (a commit
+    SHA is content-addressed, so the evidence is identical). Remote shallow
+    clones carry .git and serve directly. Raises HistoryError when neither
+    has the commit — the caller reports unavailable honestly.
+    """
+    from app.services import history_service as _hs
+    from app.services.workspace import resolve_local_repo_path
+
+    try:
+        return await asyncio.to_thread(reader, acquisition.path, sha)
+    except _hs.HistoryError:
+        source = resolve_local_repo_path(getattr(record, "repository_url", "") or "")
+        if source is None or source == acquisition.path:
+            raise
+        return await asyncio.to_thread(reader, Path(source), sha)
 
 
 def _fragment_hash(fragments: dict) -> str:

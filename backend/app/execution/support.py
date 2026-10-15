@@ -130,6 +130,16 @@ def assess_plan_support(
         )
 
     service_names = [s.name for s in stack.services if s.name != "network"]
+    # Static-site profile (index.html at the effective root, served by the
+    # controlled nginx template): same confidence bar as other inferred
+    # service plans, never a silent pass below it.
+    _manifests = list(stack.manifests_examined or [])
+    if (
+        "index.html" in _manifests or "dist/index.html" in _manifests
+    ) and stack.confidence >= 0.5:
+        return SupportDecision(
+            supported=True, message="Static-site plan supported (nginx profile)"
+        )
     if len(service_names) >= 1 and stack.confidence >= 0.55:
         return SupportDecision(
             supported=True,

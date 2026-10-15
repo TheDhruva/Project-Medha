@@ -22,10 +22,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_live_static_deploy_ready_with_logs(tmp_path):
+def test_live_static_deploy_ready_with_logs(tmp_path, monkeypatch):
     import asyncio
 
+    from app.core.config import get_settings
     from app.execution.real_executor import RealExecutor
+
+    # Pin real execution explicitly: the suite-wide autouse fixture selects
+    # the simulator, so declare the operator configuration here (same values
+    # as the documented .env: MEDHA_EXECUTOR_MODE=real + MEDHA_DOCKER_EXECUTE).
+    monkeypatch.setenv("MEDHA_EXECUTOR_MODE", "real")
+    monkeypatch.setenv("MEDHA_DOCKER_EXECUTE", "true")
+    get_settings.cache_clear()
 
     checkout = tmp_path / "site"
     checkout.mkdir()

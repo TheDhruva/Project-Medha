@@ -74,6 +74,13 @@ installation can access the requested repo, and passes it to git via
 
 ## 5. Troubleshooting
 
+Before starting a run, check the structured readiness preflight:
+`GET /api/config/status` → `execution_readiness` (same stable reason codes,
+plus `next_actions`, `requires_operator`, `restart_required`). The workspace
+Settings page and the project dashboard findings panel surface the same
+contract; a blocked gate fails at the execute stage with the upstream
+analysis/verification results preserved.
+
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `REAL_BUILDER_UNAVAILABLE` | no daemon / wrong host | run `docker version` on the backend host |

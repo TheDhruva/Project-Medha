@@ -29,6 +29,13 @@ repo = DeploymentRepository()
 
 TERMINAL_TYPES = TERMINAL_EVENT_TYPES
 
+# Bounded client idempotency map: (owner, Idempotency-Key) -> deployment_id.
+# Prevents double-click / retried POSTs from launching duplicate executions.
+# Entries are small and evicted FIFO past the cap; a restart may lose them
+# (duplicate then creates a new run, never corrupts an existing one).
+_IDEMPOTENCY_CAP = 500
+_idempotency_map: dict[tuple[str, str], str] = {}
+
 
 def _error(status_code: int, code: str, message: str, details: dict | None = None) -> JSONResponse:
     return JSONResponse(
@@ -231,6 +238,25 @@ async def create_deployment(
             "for a verified real analysis instead.",
         )
 
+    # Client idempotency: a retried POST with the same Idempotency-Key
+    # returns the original deployment instead of launching a duplicate run.
+    idempotency_key = (request.headers.get("Idempotency-Key") or "").strip()[:128]
+    if idempotency_key:
+        existing_id = _idempotency_map.get((subject, idempotency_key))
+        if existing_id:
+            existing = await _owned_record(existing_id, subject)
+            if existing is not None:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "deployment_id": existing.deployment_id,
+                        "status": existing.status.value,
+                        "mode": existing.mode.value,
+                        "is_demo": existing.is_demo,
+                        "duplicate": True,
+                    },
+                )
+
     deployment_id = f"dep_{uuid4().hex[:16]}"
     now = utc_now_iso()
     is_demo = False
@@ -303,6 +329,10 @@ async def create_deployment(
 
         schedule_planning_pipeline(deployment_id, repo=repo)
         logger.info("Created real planning deployment_id=%s", deployment_id)
+        if idempotency_key:
+            _idempotency_map[(subject, idempotency_key)] = deployment_id
+            while len(_idempotency_map) > _IDEMPOTENCY_CAP:
+                _idempotency_map.pop(next(iter(_idempotency_map)))
     except Exception:
         from app.core.deploy_lock import release_real_deploy
 
@@ -340,27 +370,45 @@ async def stream_events(
     async def event_generator():
         from app.core.perf import bump
 
-        replayed = await asyncio.to_thread(
-            repo.list_events, deployment_id, limit, after_event_id=after
-        )
-        bump("sse.replay_batches")
-        for _ in replayed:
-            bump("sse.replayed")
-        logger.info(
-            "SSE replay deployment_id=%s events=%d limit=%d after=%s",
-            deployment_id,
-            len(replayed),
-            limit,
-            "set" if after else "none",
-        )
-        for event in replayed:
-            payload = json.dumps(event.to_sse_payload())
-            yield f"data: {payload}\n\n"
-            if event.event_type in TERMINAL_TYPES:
-                return
-
+        # Subscribe FIRST, then replay: events published between replay and
+        # subscribe would otherwise be lost (replay race). Live arrivals
+        # during replay are buffered and drained with event_id dedup.
         queue = await event_bus.subscribe(deployment_id)
         try:
+            replayed = await asyncio.to_thread(
+                repo.list_events, deployment_id, limit, after_event_id=after
+            )
+            bump("sse.replay_batches")
+            for _ in replayed:
+                bump("sse.replayed")
+            logger.info(
+                "SSE replay deployment_id=%s events=%d limit=%d after=%s",
+                deployment_id,
+                len(replayed),
+                limit,
+                "set" if after else "none",
+            )
+            seen_ids: set[str] = set()
+            for event in replayed:
+                seen_ids.add(event.event_id)
+                payload = json.dumps(event.to_sse_payload())
+                yield f"data: {payload}\n\n"
+                if event.event_type in TERMINAL_TYPES:
+                    return
+            # Drain anything published while replaying (bounded: replay is fast).
+            while True:
+                try:
+                    buffered = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if buffered.event_id in seen_ids:
+                    continue
+                seen_ids.add(buffered.event_id)
+                payload = json.dumps(buffered.to_sse_payload())
+                yield f"data: {payload}\n\n"
+                if buffered.event_type in TERMINAL_TYPES:
+                    return
+
             while True:
                 if await request.is_disconnected():
                     break
@@ -370,6 +418,9 @@ async def stream_events(
                     yield ": ping\n\n"
                     continue
 
+                if event.event_id in seen_ids:
+                    continue
+                seen_ids.add(event.event_id)
                 payload = json.dumps(event.to_sse_payload())
                 yield f"data: {payload}\n\n"
                 if event.event_type in TERMINAL_TYPES:
@@ -385,6 +436,42 @@ async def stream_events(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get("/deploy/{deployment_id}/repository-intelligence", response_model=None)
+async def get_repository_intelligence(deployment_id: str, subject: str = RequireSubject):
+    """Evidence-backed Repository Intelligence for the analyzed revision.
+
+    Served from the persisted run result (no schema change: stored on the
+    result payload), falling back to the persisted ANALYZE event. 404 when
+    analysis has not produced one yet — never fabricated.
+    """
+    record = await _owned_record(deployment_id, subject)
+    if record is None:
+        return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
+    result = record.result if isinstance(record.result, dict) else {}
+    intel = result.get("repository_intelligence")
+    if not isinstance(intel, dict):
+        events = await asyncio.to_thread(repo.list_events, deployment_id, 500)
+        for event in events:
+            data = getattr(event, "data", None)
+            if isinstance(data, dict) and isinstance(data.get("repository_intelligence"), dict):
+                intel = data["repository_intelligence"]
+                break
+    if not isinstance(intel, dict):
+        return _error(
+            404,
+            "REPOSITORY_INTEL_NOT_FOUND",
+            "No Repository Intelligence has been recorded for this run yet.",
+        )
+    return JSONResponse(
+        {
+            "deployment_id": deployment_id,
+            "is_demo": record.is_demo,
+            "label": "DEMO/MOCK" if record.is_demo else None,
+            "repository_intelligence": intel,
+        }
     )
 
 
@@ -687,4 +774,82 @@ async def cancel_deployment(deployment_id: str, subject: str = RequireSubject):
         await event_bus.publish(event)
     return JSONResponse(
         {"deployment_id": deployment_id, "status": (updated.status.value if updated else "cancelled")}
+    )
+
+
+@router.post(
+    "/deploy/{deployment_id}/runtime/teardown",
+    dependencies=[Depends(require_mutation_token)],
+)
+async def teardown_runtime(deployment_id: str, subject: str = RequireSubject):
+    """Explicit, idempotent teardown of a run's real runtime resources.
+
+    Successful deployments stay alive after the pipeline completes; this is
+    the only path that removes them (plus cancel/failure cleanup). Safe to
+    retry: missing resources and non-real runs report `removed: []` with
+    `duplicate`-style honesty instead of an error.
+    """
+    record = await _owned_record(deployment_id, subject)
+    if record is None:
+        return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
+    result = record.result if isinstance(record.result, dict) else {}
+    if result.get("execution_mode") != "real":
+        return JSONResponse(
+            {
+                "deployment_id": deployment_id,
+                "torn_down": False,
+                "removed": [],
+                "reason": "No real runtime recorded for this run; nothing to tear down.",
+            }
+        )
+    from app.execution import docker_ops
+
+    container = result.get("container")
+    image = result.get("image")
+    removed: list[str] = []
+    if container:
+        try:
+            if await asyncio.to_thread(
+                docker_ops.stop_and_remove_container,
+                container,
+                deployment_id=deployment_id,
+            ):
+                removed.append(container)
+        except Exception:
+            pass
+    if image:
+        try:
+            if await asyncio.to_thread(
+                docker_ops.remove_image, image, deployment_id=deployment_id
+            ):
+                removed.append(image)
+        except Exception:
+            pass
+    try:
+        info = await asyncio.to_thread(docker_ops.cleanup_deployment, deployment_id)
+        for name in info.get("removed", []):
+            if name not in removed:
+                removed.append(name)
+    except Exception:
+        pass
+    event = make_event(
+        deployment_id=deployment_id,
+        event_type=EventType.SYSTEM_MESSAGE,
+        message=(
+            "Runtime torn down by the owner."
+            if removed
+            else "Teardown requested; no live runtime resources remained."
+        ),
+        stage="COMPLETE",
+        metadata={
+            "simple": "Runtime teardown completed.",
+            "technical": f"removed={removed}",
+            "removed": removed,
+        },
+        is_demo=record.is_demo,
+    )
+    await asyncio.to_thread(repo.add_event, event)
+    await event_bus.publish(event)
+    return JSONResponse(
+        {"deployment_id": deployment_id, "torn_down": True, "removed": removed}
     )

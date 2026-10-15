@@ -104,6 +104,63 @@ def changed_files_summary(repo_path: Path, sha: str) -> dict:
             "deleted": deleted, "truncated": len(files) >= 200}
 
 
+def commit_metadata(repo_path: Path, sha: str) -> CommitEntry:
+    """Metadata for one pinned commit (message/author/date/parents)."""
+    candidate = (sha or "").strip().lower()
+    if len(candidate) != 40 or any(c not in "0123456789abcdef" for c in candidate):
+        raise HistoryError("INVALID_SHA", "Commit SHA must be 40-char hex.")
+    out = _run_git(
+        ["show", "-s", "--format=%H%x1f%P%x1f%an%x1f%cI%x1f%s%x1e", candidate],
+        cwd=repo_path,
+    )
+    record = out.split("\x1e")[0].strip()
+    parts = record.split("\x1f")
+    if len(parts) < 5 or len(parts[0]) != 40:
+        raise HistoryError("GIT_COMMAND_FAILED", "Commit metadata unavailable.")
+    full_sha, parents, author, committed_at, subject = parts[0], parts[1], parts[2], parts[3], parts[4]
+    # Subject is first-line only; fetch the full body for the summary.
+    body = _run_git(["show", "-s", "--format=%B", candidate], cwd=repo_path)
+    message = body.strip()[:MAX_MESSAGE] or None
+    return CommitEntry(
+        sha=full_sha.lower(),
+        parents=[p.lower() for p in parents.split() if len(p) == 40],
+        author=author or None, committed_at=committed_at or None,
+        message=message or (subject or "")[:MAX_MESSAGE] or None,
+    )
+
+
+def build_commit_summary(entry: CommitEntry, diff: dict | None) -> str:
+    """Deterministic, evidence-based commit summary (no LLM, no paid APIs).
+
+    Headline from the actual commit message plus diff statistics and the
+    most-changed paths. Empty diff evidence yields a metadata-only summary —
+    never a fabricated claim.
+    """
+    headline = ((entry.message or "").strip().split("\n")[0].strip()) or "(no commit message recorded)"
+    files = (diff or {}).get("files") or [] if isinstance(diff, dict) else []
+    added = (diff or {}).get("added", 0) if isinstance(diff, dict) else 0
+    deleted = (diff or {}).get("deleted", 0) if isinstance(diff, dict) else 0
+    if not files:
+        return f"{headline} (file-level diff unavailable for {entry.sha[:12]})."
+    dirs: dict[str, int] = {}
+    for item in files:
+        path = str(item.get("path", ""))
+        top = path.rsplit("/", 1)[0] if "/" in path else "(root)"
+        dirs[top] = dirs.get(top, 0) + 1
+    top_dirs = ", ".join(
+        name for name, _ in sorted(dirs.items(), key=lambda kv: -kv[1])[:3]
+    )
+    ranked = sorted(files, key=lambda f: f.get("added", 0) + f.get("deleted", 0),
+                    reverse=True)[:5]
+    top_files = ", ".join(str(f.get("path", ""))[:60] for f in ranked)
+    pieces = [headline, f"+{added}/-{deleted} across {len(files)} file(s)"]
+    if top_dirs:
+        pieces.append(f"mostly {top_dirs}")
+    if top_files:
+        pieces.append(f"top: {top_files}")
+    return " — ".join(pieces)[:500]
+
+
 def github_commit_url(repository_url: str, sha: str) -> str | None:
     low = (repository_url or "").lower()
     if "github.com" not in low:

@@ -35,5 +35,6 @@ export function createIdleSnapshot(): DeploymentSnapshot {
     frameIndex: -1,
     totalFrames: 0,
     changeIntel: null,
+    durationSeconds: null,
   };
 }

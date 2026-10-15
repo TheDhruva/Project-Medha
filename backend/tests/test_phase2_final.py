@@ -228,7 +228,10 @@ def test_container_logs_never_fabricates():
 
     out = docker_ops.container_logs("medha_no_such_container_xyz", tail=10)
     assert out["available"] is False
-    assert out["stdout"] == "" and out["stderr"] == ""
+    # No fabricated stdout; stderr may carry the daemon's honest error text
+    # when a live daemon is reachable (empty when no daemon exists).
+    assert out["stdout"] == ""
+    assert out["stderr"] == "" or "No such container" in out["stderr"]
 
 
 def test_readiness_rejects_non_loopback():

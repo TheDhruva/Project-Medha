@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
+import { Code2, Rocket, ShieldCheck, Verified } from "lucide-react";
 import { scoreTone, type ScorecardMetric } from "@/lib/projects/metrics";
 import { cn } from "@/lib/ui/cn";
 
@@ -9,6 +11,13 @@ const TONE_CLASSES = {
   warning: { stroke: "stroke-medha-warning", text: "text-medha-warning", fill: "fill-medha-warning" },
   danger: { stroke: "stroke-medha-danger", text: "text-medha-danger", fill: "fill-medha-danger" },
   neutral: { stroke: "stroke-medha-border-strong", text: "text-medha-tertiary", fill: "fill-medha-tertiary" },
+} as const;
+
+const ICONS = {
+  "code-quality": Code2,
+  security: ShieldCheck,
+  verification: Verified,
+  readiness: Rocket,
 } as const;
 
 function formatMs(ts: string | null): string | null {
@@ -23,16 +32,49 @@ function formatMs(ts: string | null): string | null {
   });
 }
 
-/** Semicircular 0-100 gauge. `pathLength=100` makes the dash math trivial. */
+/** Restrained count-up: animates once toward the real value, then stays still. */
+function useCountUp(target: number | null): number | null {
+  const [shown, setShown] = useState<number | null>(target);
+  const first = useRef(true);
+  useEffect(() => {
+    if (target == null) {
+      setShown(null);
+      return;
+    }
+    if (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      setShown(target);
+      return;
+    }
+    if (first.current) {
+      first.current = false;
+    }
+    const from = 0;
+    const start = performance.now();
+    const dur = 550;
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - (1 - t) * (1 - t);
+      setShown(Math.round(from + (target - from) * eased));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target]);
+  return shown;
+}
+
+/** Compact semicircular 0-100 gauge. `pathLength=100` keeps the dash math trivial. */
 function Gauge({ value, label }: { value: number | null; label: string }) {
   const tone = TONE_CLASSES[scoreTone(value)];
-  const clamped = value == null ? null : Math.max(0, Math.min(100, value));
+  const shown = useCountUp(value);
+  const clamped = shown == null ? null : Math.max(0, Math.min(100, shown));
   return (
     <svg
       viewBox="0 0 120 66"
-      className="h-16 w-[120px] shrink-0"
+      className="h-[68px] w-[118px] shrink-0"
       role="img"
-      aria-label={clamped == null ? `${label}: not assessed` : `${label}: ${clamped} of 100`}
+      aria-label={value == null ? `${label}: not assessed` : `${label}: ${value} of 100`}
     >
       <path
         d="M 14 60 A 46 46 0 0 1 106 60"
@@ -50,15 +92,15 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
           strokeWidth={9}
           strokeLinecap="round"
           strokeDasharray={`${clamped} ${100 - clamped}`}
-          className={cn("transition-[stroke-dasharray] duration-500", tone.stroke)}
+          className={cn("medha-gauge-arc", tone.stroke)}
         />
       ) : null}
       <text
         x="60"
-        y="54"
+        y="55"
         textAnchor="middle"
         className={cn(
-          "font-display text-[19px] font-bold",
+          "font-display text-[20px] font-bold",
           clamped == null ? "fill-medha-tertiary" : tone.fill,
         )}
       >
@@ -70,32 +112,32 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
 
 export function MetricCard({ metric }: { metric: ScorecardMetric }) {
   const assessed = formatMs(metric.assessedAt);
+  const Icon = ICONS[metric.id] ?? Code2;
+  const toneText =
+    metric.value == null ? "text-medha-tertiary" : TONE_CLASSES[scoreTone(metric.value)].text;
   return (
     <Link
       href={metric.href}
-      className="group flex flex-col rounded-lg border border-medha-border bg-medha-surface p-3.5 text-left transition hover:border-medha-accent/50 hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+      aria-label={`${metric.title}: ${metric.value == null ? "not assessed" : `${metric.value} of 100`}. ${metric.evidence}`}
+      className="group flex flex-col rounded-lg border border-medha-border bg-medha-surface p-3 text-left transition hover:border-medha-accent/50 hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="medha-label">{metric.title}</p>
-          <p
-            className={cn(
-              "mt-1 text-[13px] font-semibold",
-              metric.value == null ? "text-medha-tertiary" : TONE_CLASSES[scoreTone(metric.value)].text,
-            )}
-          >
-            {metric.value == null ? "Not assessed" : `${metric.value}/100`}
-          </p>
-          {metric.isDemo ? (
-            <p className="mt-0.5 text-[10px] font-semibold text-medha-tertiary">DEMO/MOCK</p>
-          ) : null}
-        </div>
+      <div className="flex items-center gap-1.5">
+        <Icon className="h-3.5 w-3.5 shrink-0 text-medha-secondary" aria-hidden />
+        <p className="medha-label truncate">{metric.title}</p>
+        {metric.isDemo ? (
+          <span className="ml-auto shrink-0 text-[10px] font-semibold text-medha-tertiary">DEMO</span>
+        ) : null}
+      </div>
+      <div className="mt-1 flex items-center justify-center">
         <Gauge value={metric.value} label={metric.title} />
       </div>
-      <p className="mt-1 line-clamp-2 min-h-[32px] text-[12px] leading-snug text-medha-secondary">
+      <p className={cn("text-center text-[12.5px] font-semibold", toneText)}>
+        {metric.value == null ? "Not assessed" : `${metric.value}/100`}
+      </p>
+      <p className="mt-1 line-clamp-2 min-h-[30px] text-center text-[11.5px] leading-snug text-medha-secondary">
         {metric.evidence}
       </p>
-      <p className="mt-1 truncate text-[11px] text-medha-tertiary">
+      <p className="mt-1 truncate text-center text-[10.5px] text-medha-tertiary">
         {assessed ? `Assessed ${assessed}` : "No assessment recorded"}
         {metric.revision ? ` · ${metric.revision}` : ""}
       </p>

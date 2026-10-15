@@ -144,6 +144,29 @@ export function JourneyCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
   );
 }
 
+export function formatDuration(seconds: number | null): string {
+  if (seconds == null) return "—";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
+}
+
+function modeLabel(mode: DeploymentSnapshot["executionMode"]): string | null {
+  switch (mode) {
+    case "real":
+      return "Real";
+    case "simulator":
+      return "Simulated";
+    case "controlled_test":
+      return "Controlled test";
+    case "demo":
+      return "Demo";
+    default:
+      return null;
+  }
+}
+
 export function SummaryRow({ snapshot }: { snapshot: DeploymentSnapshot }) {
   const files = snapshot.changeIntel?.changeset.files.length;
   const counts = snapshot.changeIntel?.changeset.counts;
@@ -163,9 +186,13 @@ export function SummaryRow({ snapshot }: { snapshot: DeploymentSnapshot }) {
     (c) => c.status === "conflict" || c.status === "superseded" || c.status === "rejected",
   ).length;
   const hasNegotiation = snapshot.negotiation != null || snapshot.constraints.length > 0;
-  const duration = snapshot.result?.durationLabel;
+  // Duration is measured wall-clock time (result timings, else persisted
+  // timestamps) — never the execution-mode label the backend stores in
+  // result.durationLabel ("real"/"demo"). Mode renders as its own field.
+  const mode = modeLabel(snapshot.executionMode);
 
   const items: Array<{ label: string; value: string }> = [];
+  if (mode != null) items.push({ label: "Mode", value: mode });
   if (totalFiles != null) items.push({ label: "Files changed", value: `${totalFiles}` });
   if (services != null) items.push({ label: "Services affected", value: `${services}` });
   if (checks && checks.length > 0) {
@@ -178,7 +205,10 @@ export function SummaryRow({ snapshot }: { snapshot: DeploymentSnapshot }) {
       value: conflicts > 0 ? `${conflicts} resolved` : "None",
     });
   }
-  if (duration && duration !== "—") items.push({ label: "Duration", value: duration });
+  // Elapsed time only alongside real metrics; honest "—" when unmeasured.
+  if (items.length > 0) {
+    items.push({ label: "Duration", value: formatDuration(snapshot.durationSeconds) });
+  }
 
   if (items.length === 0) return null;
   return (
