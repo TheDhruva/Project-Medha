@@ -919,11 +919,17 @@ class ProjectRepository:
         visibility: str | None = None,
         connection_status: str | None = None,
         deploy_target: str | None = None,
+        clear_deploy_target: bool = False,
         updated_at: str,
     ) -> ProjectRecord | None:
         current = self.get(project_id)
         if current is None:
             return None
+        resolved_target = (
+            None
+            if clear_deploy_target
+            else (deploy_target if deploy_target is not None else current.deploy_target)
+        )
         with get_connection(self.db_path) as conn:
             try:
                 conn.execute(
@@ -940,7 +946,7 @@ class ProjectRepository:
                         connection_status
                         if connection_status is not None
                         else current.connection_status,
-                        deploy_target if deploy_target is not None else current.deploy_target,
+                        resolved_target,
                         updated_at,
                         project_id,
                     ),

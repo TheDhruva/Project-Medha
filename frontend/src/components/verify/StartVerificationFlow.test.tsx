@@ -10,12 +10,13 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(search),
 }));
 
-const { setFormMock, startDeploymentMock, createProjectRunMock, fetchProjectMock, sharedForm } =
+const { setFormMock, startDeploymentMock, createProjectRunMock, fetchProjectMock, fetchProjectTargetsMock, sharedForm } =
   vi.hoisted(() => ({
     setFormMock: vi.fn(),
     startDeploymentMock: vi.fn(),
     createProjectRunMock: vi.fn(),
     fetchProjectMock: vi.fn(),
+    fetchProjectTargetsMock: vi.fn(),
     sharedForm: {
       repositoryUrl: "https://github.com/example/app",
       targetHost: "localhost",
@@ -51,6 +52,7 @@ vi.mock("@/lib/api/client", async (importOriginal) => {
   return {
     ...actual,
     fetchProject: (...args: unknown[]) => fetchProjectMock(...args),
+    fetchProjectTargets: (...args: unknown[]) => fetchProjectTargetsMock(...args),
     fetchConfigStatus: vi.fn().mockResolvedValue(null),
     createProjectRun: (...args: unknown[]) => createProjectRunMock(...args),
   };
@@ -65,11 +67,13 @@ describe("StartVerificationFlow", () => {
     startDeploymentMock.mockClear();
     createProjectRunMock.mockClear();
     fetchProjectMock.mockClear();
+    fetchProjectTargetsMock.mockClear();
     Object.assign(sharedForm, { baseRevision: "", targetRevision: "" });
     fetchProjectMock.mockResolvedValue({
       project_id: "prj_test",
       repository: "https://github.com/example/locked",
     });
+    fetchProjectTargetsMock.mockRejectedValue(new Error("no runs yet"));
     createProjectRunMock.mockResolvedValue({ deployment_id: "dep_123", project_id: "prj_test" });
     search = "";
   });
@@ -161,6 +165,36 @@ describe("StartVerificationFlow", () => {
       expect(await screen.findByText(/full 40-character commit SHA/)).toBeInTheDocument();
       expect(createProjectRunMock).not.toHaveBeenCalled();
       expect(startDeploymentMock).not.toHaveBeenCalled();
+    });
+
+    it("offers no target picker when no candidates are known", async () => {
+      render(<StartVerificationFlow />);
+      await waitFor(() => expect(fetchProjectMock).toHaveBeenCalled());
+      expect(screen.queryByLabelText(/Deployment target/)).not.toBeInTheDocument();
+    });
+
+    it("passes the selected deployment target through to the run", async () => {
+      fetchProjectTargetsMock.mockResolvedValue({
+        project_id: "prj_test",
+        deploy_target: null,
+        candidates: [
+          { path: "backend", technologies: ["python-fastapi"], evidence: ["backend/app.py"] },
+          { path: "frontend", technologies: ["node-frontend"], evidence: ["frontend/package.json"] },
+        ],
+        relationship: "fullstack",
+        source_run: "dep_old",
+        note: "pick one",
+      });
+      render(<StartVerificationFlow />);
+      const picker = await screen.findByLabelText(/Deployment target/);
+      fireEvent.change(picker, { target: { value: "backend" } });
+      fireEvent.click(screen.getByText("Analyze change"));
+      await waitFor(() =>
+        expect(createProjectRunMock).toHaveBeenCalledWith(
+          "prj_test",
+          expect.objectContaining({ deployment_target: "backend" }),
+        ),
+      );
     });
   });
 });

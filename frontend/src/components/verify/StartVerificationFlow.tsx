@@ -18,8 +18,10 @@ import {
   createProjectRun,
   fetchConfigStatus,
   fetchProject,
+  fetchProjectTargets,
   type ExecutionReadiness,
   type Project,
+  type ProjectTargets,
 } from "@/lib/api/client";
 import { cn } from "@/lib/ui/cn";
 
@@ -35,6 +37,8 @@ function Flow() {
   const [startedId, setStartedId] = useState<string | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
+  const [targets, setTargets] = useState<ProjectTargets | null>(null);
+  const [deploymentTarget, setDeploymentTarget] = useState<string>("");
   const [readiness, setReadiness] = useState<ExecutionReadiness | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -60,6 +64,16 @@ function Flow() {
       })
       .catch(() => {
         if (!cancelled) setProjectError("Project could not be loaded — check the link or backend.");
+      });
+    fetchProjectTargets(projectId)
+      .then((value) => {
+        if (!cancelled) {
+          setTargets(value);
+          setDeploymentTarget(value.deploy_target ?? "");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTargets(null);
       });
     return () => {
       cancelled = true;
@@ -132,6 +146,7 @@ function Flow() {
         target_revision: target || undefined,
         ...(host ? { target_host: host } : {}),
         ...(port != null ? { target_port: port } : {}),
+        ...(deploymentTarget.trim() ? { deployment_target: deploymentTarget.trim() } : {}),
       })
         .then((response) => {
           router.push(`/projects/${projectId}/runs/${response.deployment_id}`);
@@ -234,6 +249,32 @@ function Flow() {
             ? "Revisions are optional full commit SHAs. Omit both to run a full analysis of the project's current HEAD."
             : "Change analysis runs against the repository you provide. For local git repositories, revisions scope the change-impact diff; otherwise the deployment proceeds without change-intel."}
         </p>
+        {projectId && (targets?.candidates?.length ?? 0) > 1 ? (
+          <div className="mt-3">
+            <label htmlFor="git-target-app" className="medha-label block">
+              Deployment target (one service per run)
+            </label>
+            <select
+              id="git-target-app"
+              className="field-input mt-1.5"
+              value={deploymentTarget}
+              onChange={(e) => setDeploymentTarget(e.target.value)}
+              disabled={busy}
+            >
+              <option value="">Saved target{targets?.deploy_target ? ` (${targets.deploy_target})` : " (none — choose one)"} </option>
+              {(targets?.candidates ?? []).map((c) => (
+                <option key={c.path} value={c.path}>
+                  {c.path}
+                  {c.technologies.length > 0 ? ` — ${c.technologies.join(", ")}` : ""}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[10.5px] text-medha-tertiary">
+              Multiple applications detected. The selection is saved to project
+              settings and used for this run; V1 executes exactly one service.
+            </p>
+          </div>
+        ) : null}
 
         <div className="mt-4 border-t border-medha-border pt-3">
           <button

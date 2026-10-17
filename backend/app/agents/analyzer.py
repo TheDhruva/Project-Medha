@@ -145,8 +145,14 @@ def analyze_repository(
     # support gate can require an explicit target with full candidate detail.
     selected_target: str | None = None
     effective = root
-    normalized_target = (deploy_target or "").strip().replace("\\", "/").strip("/")
-    if normalized_target and normalized_target != ".":
+    raw_target = (deploy_target or "").strip().replace("\\", "/").strip("/")
+    normalized_target = raw_target
+    if raw_target == "." and "." in app_candidates:
+        # Explicit root selection: the checkout root itself is a detected
+        # application alongside subdirectories. Scope stays root, marked.
+        selected_target = "."
+        normalized_target = "."
+    elif raw_target not in {"", "."}:
         if normalized_target not in app_candidates:
             raise ValueError(
                 f"INVALID_DEPLOYMENT_TARGET: '{normalized_target}' is not a detected "

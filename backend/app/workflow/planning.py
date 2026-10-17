@@ -171,6 +171,41 @@ def _exact_sha_or_none(value: str | None) -> str | None:
     return None
 
 
+def stale_target_selection(
+    checkout_path: Any, deploy_target: str | None, project_id: str | None,
+) -> dict[str, Any]:
+    """Candidate detail for a stale/invalid-target block (read-only).
+
+    Re-lists what the pinned checkout actually contains so the blocked run
+    (and GET /projects/{id}/targets) can offer the valid options. Never
+    raises: discovery failure yields an empty candidate list, never a
+    second failure mode.
+    """
+    candidates: list[dict] = []
+    relationship: str | None = None
+    try:
+        from app.core.app_discovery import discover_applications
+
+        discovery = discover_applications(checkout_path)
+        candidates = [
+            {"path": c.path, "technologies": c.technologies,
+             "evidence": c.evidence}
+            for c in discovery.candidates
+        ]
+        relationship = discovery.relationship
+    except Exception:  # noqa: BLE001 - advisory detail only
+        candidates = []
+    return {
+        "candidates": candidates,
+        "relationship": relationship,
+        "reason": "stale or unknown target",
+        "next_actions": ["select_target", "reanalyze"],
+        "supported_targets": [c["path"] for c in candidates],
+        "selected_target": deploy_target,
+        "project_id": project_id,
+    }
+
+
 def _ai_context(record: Any, settings: Any) -> dict[str, Any]:
     """Per-run AI state: shared service, call budget, notes, owner binding."""
     from app.ai.service import AIBudget, AIService
@@ -615,6 +650,12 @@ class PlanningPipeline:
                     self._record_timing("analyze", analyze_timer.elapsed)
                 await self._agent_done(
                     deployment_id, "analyzer", message, ok=False, error="invalid_target")
+                # Re-list what the pinned checkout actually contains so the
+                # blocked run (and GET /projects/{id}/targets) can offer the
+                # valid options instead of an empty picker.
+                target_selection = stale_target_selection(
+                    acquisition.path, deploy_target, record.project_id,
+                )
                 result = {
                     "kind": "failed",
                     "title": code,
@@ -628,11 +669,7 @@ class PlanningPipeline:
                     "phase": PHASE_LABEL,
                     "is_demo": False,
                     "code": code,
-                    "target_selection": {
-                        "candidates": [],
-                        "reason": "stale or unknown target",
-                        "next_actions": ["select_target", "reanalyze"],
-                    },
+                    "target_selection": target_selection,
                 }
                 self.repo.save_artifacts(
                     deployment_id, result=result, updated_at=utc_now_iso()

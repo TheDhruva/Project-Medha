@@ -39,10 +39,15 @@ def assess_plan_support(
     V1 service; coordinated multi-service deployment stays unsupported.
     """
     stack = profile.inferred_stack
-    effective_target = (selected_target or stack.selected_target or "").strip()
-    if effective_target == ".":
-        effective_target = ""
     candidates = list(stack.app_candidates or [])
+    raw_target = (selected_target or stack.selected_target or "").strip()
+    normalized = raw_target.replace("\\", "/").strip("/")
+    if normalized in {"", "."}:
+        # "." names the checkout root explicitly, but only when the root
+        # itself was detected as an application; otherwise it means unset.
+        effective_target = "." if (normalized == "." and "." in candidates) else ""
+    else:
+        effective_target = normalized
     details = _candidate_details(profile)
     relationship = stack.app_relationship or (
         "single" if len(candidates) <= 1 else "monorepo"

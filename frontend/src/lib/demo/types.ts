@@ -370,6 +370,26 @@ export interface DeploymentResultView {
   verificationScore: number | null;
   constraintsResolved: number;
   rollbackScope: string | null;
+  /** Structured failure/block code (e.g. MULTIPLE_APPS_REQUIRE_TARGET); absent on older payloads. */
+  code?: string | null;
+  /** Target-selection detail for target-related blocks; absent otherwise. */
+  target_selection?: TargetSelectionView | null;
+}
+
+export interface TargetCandidateView {
+  path: string;
+  technologies: string[];
+  evidence: string[];
+}
+
+export interface TargetSelectionView {
+  candidates: TargetCandidateView[];
+  relationship?: string | null;
+  reason?: string | null;
+  next_actions?: string[];
+  supported_targets?: string[];
+  selected_target?: string | null;
+  project_id?: string | null;
 }
 
 export interface TraceEvent {

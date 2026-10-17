@@ -336,14 +336,24 @@ def detect_runtime(
 
 
 def _is_app_dir(path: Path) -> bool:
-    if path.name.startswith(".") or path.name in {"node_modules", "dist", "build"}:
+    """One heuristic set for application roots (delegates to discovery).
+
+    Bare manifests (workspace-root package.json without scripts/deps,
+    dependency files without an entrypoint) are supporting files, not
+    independent applications — see app.core.app_discovery.
+    """
+    if path.name.startswith("."):
         return False
-    return (
-        (path / "package.json").is_file()
-        or (path / "requirements.txt").is_file()
-        or (path / "pyproject.toml").is_file()
-        or (path / "index.html").is_file()
-    )
+    from app.core.app_discovery import SKIP_DIRS, _inspect_dir
+
+    if path.name in SKIP_DIRS:
+        return False
+    try:
+        if not path.is_dir() or path.is_symlink():
+            return False
+    except OSError:
+        return False
+    return _inspect_dir(path, path.name) is not None
 
 
 def _read_pkg(pkg_path: Path) -> dict:

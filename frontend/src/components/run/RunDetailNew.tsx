@@ -36,6 +36,7 @@ import {
 } from "@/components/run-detail/Cards";
 import { EnvBadge, ExecutionModeBadge } from "@/components/ui/Section";
 import { RuntimeLogsPanel } from "@/components/run-detail/RuntimeLogs";
+import { TargetSelectionCard } from "@/components/run/TargetSelectionCard";
 import {
   createProjectRun,
   fetchCommitDetail,
@@ -767,6 +768,12 @@ function RunBody({ deploymentId, projectId }: { deploymentId: string; projectId?
       </div>
 
       <RunContextBar deploymentId={deploymentId} projectId={projectId} />
+
+      <TargetSelectionCard
+        snapshot={snapshot}
+        deploymentId={deploymentId}
+        projectId={projectId}
+      />
 
       {connectionError ? (
         <p

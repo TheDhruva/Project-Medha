@@ -482,7 +482,14 @@ Clerk subject (or the legacy single-operator subject); all rows carry
   only (`pending`/`unverified`) — never credentials, never proof of access.
   Duplicate `(owner, repository)` → `409 PROJECT_EXISTS`. → `201` project.
 - `GET /api/projects` — caller's projects only. `GET /api/projects/{id}` —
-  one project. `PATCH /api/projects/{id}` — rename / change branch.
+  one project. `PATCH /api/projects/{id}` — rename / change branch /
+  set `deploy_target` (repository-relative app path, `"."` for a detected
+  root application; empty string clears back to auto-resolution; anything
+  else → `400 INVALID_DEPLOYMENT_TARGET`). The saved target applies to the
+  next run; recorded runs are immutable.
+- `GET /api/projects/{id}/targets` — saved `deploy_target` plus the last
+  observed candidate list (`path`, `technologies`, `evidence`) from recent
+  run results; empty with an honest note when no run has reported one yet.
 - `POST /api/projects/{id}/verify` — bounded `git ls-remote HEAD`:
   reachable → `connected`/`public` (+ `head_sha`); otherwise `failed`/
   `unverified` with an honest reason. Private repositories are reported as
@@ -492,12 +499,18 @@ Clerk subject (or the legacy single-operator subject); all rows carry
   run/proposal history is preserved but no longer routable. Deletion is
   refused with `409 ACTIVE_RUNS` while a run is in flight.
 - `POST /api/projects/{id}/runs` `{intent?, base_revision? (40-hex),
-  target_revision? (40-hex), target_host?, target_port?}` — starts a
+  target_revision? (40-hex), target_host?, target_port?, deployment_target?}` — starts a
   real-mode analysis bound to the project (`connected` required, else
   `409 PROJECT_NOT_CONNECTED`). Omitting both revisions runs a full
   analysis of the project's current HEAD; when given, revisions must be
   exact 40-hex SHAs (`400 INVALID_SHA`) and `target_revision` is checked
-  out exactly (see §12).
+  out exactly (see §12). Target resolution order: explicit
+  `deployment_target` (persisted to the project for later runs; blank
+  means "use the saved target") → saved `deploy_target` → automatic
+  single-application selection. Multiple detected applications with no
+  valid target block with `MULTIPLE_APPS_REQUIRE_TARGET` and the candidate
+  list; stale targets block with `INVALID_DEPLOYMENT_TARGET` and the
+  checkout's actual candidates. V1 executes exactly one service per run.
 
 ---
 

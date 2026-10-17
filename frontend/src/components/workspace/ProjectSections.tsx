@@ -1030,8 +1030,15 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
       setActionError(null);
       try {
         const { updateProject } = await import("@/lib/api/client");
-        await updateProject(project.project_id, { deploy_target: raw || "." });
-        setFeedback("Deployment target updated. The next analysis uses it; prior plans are unchanged.");
+        // Empty clears the stored target (back to auto-resolution); "."
+        // names the repository root when it is a detected application.
+        await updateProject(project.project_id, { deploy_target: raw });
+        setDeployTarget(raw || null);
+        setFeedback(
+          raw
+            ? "Deployment target updated. The next analysis uses it; prior plans are unchanged."
+            : "Deployment target cleared. The next analysis auto-resolves a single application or asks for a target.",
+        );
         await refresh();
       } catch (err) {
         setActionError(err instanceof Error ? err.message : "Could not save settings.");
@@ -1158,6 +1165,29 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
                           ? `Detected: ${targets.map((t) => t.path).join(", ")}. V1 runs exactly one target.`
                           : (targetsNote ?? "Single-application repos need no target; multi-app repos must set one.")}
                       </p>
+                      {targets && targets.length > 1 ? (
+                        <div className="mt-1.5 flex flex-wrap gap-1.5" aria-label="Detected applications">
+                          {targets.map((t) => (
+                            <button
+                              key={t.path}
+                              type="button"
+                              onClick={() => setDeployTarget(t.path)}
+                              title={(t.technologies ?? []).join(", ") || t.path}
+                              className="rounded-md border border-medha-border bg-white px-2 py-1 font-mono text-[11.5px] text-medha-text hover:bg-medha-muted/60"
+                            >
+                              {t.path}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => setDeployTarget("")}
+                            title="Clear the stored target (back to auto-resolution)"
+                            className="rounded-md border border-medha-border bg-white px-2 py-1 text-[11.5px] text-medha-secondary hover:bg-medha-muted/60"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                     <Button variant="secondary" loading={saving === "target"} onClick={() => void save("target")}>
                       Save target

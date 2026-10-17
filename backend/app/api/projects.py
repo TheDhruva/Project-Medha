@@ -216,11 +216,17 @@ async def update_project(project_id: str, body: ProjectPatchBody, subject: str =
         return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
     try:
         branch = validate_branch_name(body.branch) if body.branch is not None else None
-        deploy_target = (
-            validate_deploy_target(body.deploy_target)
-            if body.deploy_target is not None
-            else None
-        )
+        # Empty string clears the stored target (back to auto-resolution);
+        # None leaves it unchanged; any other value is validated + stored.
+        if body.deploy_target is None:
+            deploy_target = None
+            clear_target = False
+        elif not body.deploy_target.strip():
+            deploy_target = None
+            clear_target = True
+        else:
+            deploy_target = validate_deploy_target(body.deploy_target)
+            clear_target = False
     except ProjectRefError as exc:
         return _error(400, exc.code, exc.message)
     except RepoIdentityError as exc:
@@ -230,6 +236,7 @@ async def update_project(project_id: str, body: ProjectPatchBody, subject: str =
         name=body.name.strip() if body.name is not None else None,
         branch=branch,
         deploy_target=deploy_target,
+        clear_deploy_target=clear_target,
         updated_at=utc_now_iso(),
     )
     if updated is None:
@@ -380,9 +387,12 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
     if body.target_host.strip().lower() not in {"localhost", "127.0.0.1", "::1"}:
         return _error(400, "INVALID_TARGET", "V1 target host must be localhost / 127.0.0.1")
     try:
+        raw_target = body.deployment_target
+        # Blank/whitespace means "no explicit target for this run": fall
+        # back to the saved project target instead of persisting ".".
         deployment_target = (
-            validate_deploy_target(body.deployment_target)
-            if body.deployment_target is not None
+            validate_deploy_target(raw_target)
+            if raw_target is not None and raw_target.strip()
             else None
         )
     except RepoIdentityError as exc:
@@ -464,6 +474,7 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
         raise
     return JSONResponse(
         {"deployment_id": deployment_id, "status": DeploymentStatus.STARTED.value,
-         "project_id": project_id, "mode": DeployMode.REAL.value, "is_demo": False},
+         "project_id": project_id, "mode": DeployMode.REAL.value, "is_demo": False,
+         "deploy_target": project.deploy_target},
         status_code=202,
     )

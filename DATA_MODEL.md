@@ -363,5 +363,6 @@ The unit of multi-user isolation; webhook routing key.
 | `branch` | string | R | Watched branch (default `main`) |
 | `visibility` | enum | R | `unverified` / `public` / `private_unsupported` |
 | `connection_status` | enum | R | `pending` / `connected` / `failed` / `disconnected` |
+| `deploy_target` | string? | R | Saved single-service target (repo-relative path, `"."` = detected root app; NULL = auto-resolve) |
 
 UNIQUE(`owner_sub`, `repository`). No credentials stored — ever.
