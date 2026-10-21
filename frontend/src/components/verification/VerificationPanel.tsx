@@ -62,14 +62,14 @@ export function VerificationPanel() {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {criticReady ? (
-            <span className="rounded-medha-sm border border-medha-border bg-white px-2 py-1 text-[11px] text-medha-secondary" title="Independent critic review — not a deployment health claim">
+            <span className="rounded-medha-sm border border-medha-border bg-white px-2 py-1 text-[12px] text-medha-secondary" title="Independent critic review — not a deployment health claim">
               Critic <span className="font-bold text-medha-text">{critic.score}</span>/100 · {critic.recommendation}
             </span>
           ) : null}
           {overall ? (
             <span
               className={cn(
-                "rounded-medha-sm px-2 py-1 text-[11px] font-semibold uppercase tracking-wide",
+                "rounded-medha-sm px-2 py-1 text-[12px] font-semibold uppercase tracking-wide",
                 overall === "PASS"
                   ? "bg-medha-success-soft text-medha-success"
                   : "bg-medha-danger-soft text-medha-danger",
@@ -100,7 +100,7 @@ export function VerificationPanel() {
             {checks.map((check) => (
               <li key={check.id} className="rounded-medha-sm border border-medha-border bg-white px-2.5 py-1.5">
                 <p className="flex flex-wrap items-center gap-x-2 text-[12.5px]">
-                  <span className={cn("text-[11px] font-semibold uppercase", checkTone(check.status))}>
+                  <span className={cn("text-[12px] font-semibold uppercase", checkTone(check.status))}>
                     <span aria-hidden>{statusGlyph(check.status)} </span>
                     {labelStatus(check.status)}
                   </span>
@@ -108,7 +108,7 @@ export function VerificationPanel() {
                 </p>
                 {check.message ? <p className="mt-0.5 text-[12px] text-medha-secondary">{check.message}</p> : null}
                 {technical ? (
-                  <p className="medha-mono mt-0.5 text-[10.5px] text-medha-tertiary">
+                  <p className="medha-mono mt-0.5 text-[12px] text-medha-tertiary">
                     check_id={check.id}{check.rule ? ` · rule=${check.rule}` : ""}{check.category ? ` · ${check.category}` : ""}
                   </p>
                 ) : null}

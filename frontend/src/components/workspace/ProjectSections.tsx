@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowLeft, CheckCircle2, XCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
@@ -22,7 +22,7 @@ import {
   derivePipeline, resolveAgents, summarizeVerification,
   useProjectData,
 } from "@/lib/projects/useProjectData";
-import { formatActivity, isRunningStatus } from "@/lib/projects/projects";
+import { formatActivity, isRunningStatus, summarizeRunFailure } from "@/lib/projects/projects";
 import { cn } from "@/lib/ui/cn";
 
 /* ================= shared ================= */
@@ -241,7 +241,7 @@ export function ChangeReview({ projectId, proposalId }: { projectId: string; pro
                 {proposal.plan ? (
                   <details className="mt-3">
                     <summary className="cursor-pointer text-[13px] font-semibold text-medha-accent">Inspect plan JSON</summary>
-                    <pre className="medha-mono mt-2 max-h-64 overflow-auto rounded-lg border border-medha-border bg-medha-muted p-3 text-[11px] text-medha-text">{JSON.stringify(proposal.plan, null, 2)}</pre>
+                    <pre className="medha-mono mt-2 max-h-64 overflow-auto rounded-lg border border-medha-border bg-medha-muted p-3 text-[12px] text-medha-text">{JSON.stringify(proposal.plan, null, 2)}</pre>
                   </details>
                 ) : null}
               </Panel>
@@ -440,7 +440,7 @@ export function ConstraintsView({ projectId }: { projectId: string }) {
                           {c.technical ? (
                             <details className="mt-1.5">
                               <summary className="cursor-pointer text-[12px] font-semibold text-medha-accent">Technical payload</summary>
-                              <pre className="medha-mono mt-1 overflow-auto rounded-lg bg-medha-muted p-2 text-[11px] text-medha-text">{JSON.stringify(c.technical, null, 2)}</pre>
+                              <pre className="medha-mono mt-1 overflow-auto rounded-lg bg-medha-muted p-2 text-[12px] text-medha-text">{JSON.stringify(c.technical, null, 2)}</pre>
                             </details>
                           ) : null}
                         </li>
@@ -462,6 +462,11 @@ export function ConstraintsView({ projectId }: { projectId: string }) {
 export function VerificationView({ projectId }: { projectId: string }) {
   const { repo, name, runs, loading, error, backendReachable, selectedId, selectRun, hydration, hydrating, refresh } =
     useProjectData(projectId);
+  const searchParams = useSearchParams();
+  const runParam = searchParams.get("run");
+  useEffect(() => {
+    if (runParam && runs.some((r) => r.deployment_id === runParam)) selectRun(runParam);
+  }, [runParam, runs, selectRun]);
   if (!repo) return <NotFound what="This project link does not decode to a known repository." />;
   const selected = runs.find((r) => r.deployment_id === selectedId) ?? runs[0] ?? null;
   const summary = summarizeVerification(hydration?.verification ?? null);
@@ -563,7 +568,7 @@ export function VerificationView({ projectId }: { projectId: string }) {
                 <Panel
                   title="Evidence-backed scores"
                   eyebrow="Versioned · reproducible from stored evidence"
-                  description="Deployment readiness, performance, optimization, and security. Missing evidence shows as unmeasured — never as success."
+                  description="Code quality, security, verification confidence and deployment readiness, scored independently from stored checks. Missing evidence shows as unassessed — never as success."
                 >
                   <ScoresPanel runId={selected.deployment_id} />
                 </Panel>
@@ -629,7 +634,7 @@ export function GraphsView({ projectId }: { projectId: string }) {
                     <div className="overflow-x-auto">
                       <table className="w-full min-w-[560px] text-left text-[13px]">
                         <thead>
-                          <tr className="text-[11px] uppercase tracking-wide text-medha-tertiary">
+                          <tr className="text-[12px] font-semibold text-medha-secondary">
                             <th className="py-1.5 pr-3">Node</th>
                             <th className="py-1.5 pr-3">Service</th>
                             <th className="py-1.5 pr-3">Action</th>
@@ -713,7 +718,7 @@ export function GraphsView({ projectId }: { projectId: string }) {
                         {(impact.unresolved ?? []).length > 0 ? (
                           <details className="mt-2">
                             <summary className="cursor-pointer text-[13px] font-semibold text-medha-accent">Show unresolved items</summary>
-                            <pre className="medha-mono mt-1 max-h-48 overflow-auto rounded-lg bg-medha-muted p-2 text-[11px] text-medha-text">{JSON.stringify(impact.unresolved, null, 2)}</pre>
+                            <pre className="medha-mono mt-1 max-h-48 overflow-auto rounded-lg bg-medha-muted p-2 text-[12px] text-medha-text">{JSON.stringify(impact.unresolved, null, 2)}</pre>
                           </details>
                         ) : null}
                       </>
@@ -843,12 +848,17 @@ export function ProjectRuns({ projectId }: { projectId: string }) {
                     {r.status.replace(/_/g, " ")}
                   </Badge>
                   <span className="min-w-0 flex-1">
-                    <span className="medha-mono block truncate text-sm font-medium text-medha-text">{r.deployment_id}</span>
-                    <span className="mt-0.5 block truncate text-xs text-medha-secondary">
+                    <span className="medha-mono block truncate text-[14px] font-semibold text-medha-text">{r.deployment_id}</span>
+                    <span className="mt-0.5 block text-[12.5px] leading-4 text-medha-secondary">
                       {r.is_demo ? "DEMO" : "LIVE"} · {r.scenario ?? "real pipeline"} · {formatActivity(r.updated_at)}
                       {r.duration_seconds != null ? ` · ${r.duration_seconds}s` : ""}
-                      {r.error_summary ? ` · ${r.error_summary}` : ""}
                     </span>
+                    {r.status === "failed" ? (
+                      <span className="mt-1 block break-words text-[12.5px] leading-4 text-medha-text">
+                        <span className="font-semibold text-medha-danger">Failure: </span>
+                        {summarizeRunFailure(r)}
+                      </span>
+                    ) : null}
                   </span>
                 </Link>
               </li>
@@ -965,11 +975,11 @@ export function ProjectEvaluations({ projectId }: { projectId: string }) {
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <div className="rounded-lg border border-medha-border bg-white p-3 text-[13px]">
                     <p className="font-semibold text-medha-text">CNP</p>
-                    <pre className="medha-mono mt-1 max-h-40 overflow-auto text-[11px] text-medha-secondary">{JSON.stringify(evalData.cnp ?? null, null, 2)}</pre>
+                    <pre className="medha-mono mt-1 max-h-40 overflow-auto text-[12px] text-medha-secondary">{JSON.stringify(evalData.cnp ?? null, null, 2)}</pre>
                   </div>
                   <div className="rounded-lg border border-medha-border bg-white p-3 text-[13px]">
                     <p className="font-semibold text-medha-text">CEG</p>
-                    <pre className="medha-mono mt-1 max-h-40 overflow-auto text-[11px] text-medha-secondary">{JSON.stringify(evalData.ceg ?? null, null, 2)}</pre>
+                    <pre className="medha-mono mt-1 max-h-40 overflow-auto text-[12px] text-medha-secondary">{JSON.stringify(evalData.ceg ?? null, null, 2)}</pre>
                   </div>
                 </div>
               )}
@@ -1173,7 +1183,7 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
                               type="button"
                               onClick={() => setDeployTarget(t.path)}
                               title={(t.technologies ?? []).join(", ") || t.path}
-                              className="rounded-md border border-medha-border bg-white px-2 py-1 font-mono text-[11.5px] text-medha-text hover:bg-medha-muted/60"
+                              className="rounded-md border border-medha-border bg-white px-2 py-1 font-mono text-[12.5px] text-medha-text hover:bg-medha-muted/60"
                             >
                               {t.path}
                             </button>
@@ -1182,7 +1192,7 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
                             type="button"
                             onClick={() => setDeployTarget("")}
                             title="Clear the stored target (back to auto-resolution)"
-                            className="rounded-md border border-medha-border bg-white px-2 py-1 text-[11.5px] text-medha-secondary hover:bg-medha-muted/60"
+                            className="rounded-md border border-medha-border bg-white px-2 py-1 text-[12.5px] text-medha-secondary hover:bg-medha-muted/60"
                           >
                             Clear
                           </button>

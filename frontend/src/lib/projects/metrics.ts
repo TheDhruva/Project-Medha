@@ -12,8 +12,12 @@ import type {
 } from "@/lib/api/client";
 import type { VerificationSummary } from "./useProjectData";
 import { CONFIG_BLOCK_CODES } from "./useProjectData";
+import { isRunningStatus } from "./projects";
+
 
 /* ------------------------------- scorecards -------------------------------- */
+
+export type ScorecardStatus = "healthy" | "warning" | "critical" | "not_assessed" | "stale";
 
 export interface ScorecardMetric {
   id: "code-quality" | "security" | "verification" | "readiness";
@@ -22,9 +26,18 @@ export interface ScorecardMetric {
   value: number | null;
   /** Short evidence line; also the "why" when value is null. */
   evidence: string;
+  /** Backend assessment state, rendered as text (never colour alone). */
+  status: ScorecardStatus;
+  statusLabel: string;
+  /** Assessed / applicable check counts for this category. */
+  coverage: { assessed: number; applicable: number } | null;
   assessedAt: string | null;
   /** Short source revision the score was computed against, when known. */
   revision: string | null;
+  /** True when the score revision no longer matches the selected run. */
+  stale: boolean;
+  /** True while a newer analysis is running for this project. */
+  refreshing: boolean;
   isDemo: boolean;
   /** Link to the artifact detail page backing this metric. */
   href: string;
@@ -36,6 +49,86 @@ export function scoreTone(value: number | null): "success" | "warning" | "danger
   if (value >= 85) return "success";
   if (value >= 60) return "warning";
   return "danger";
+}
+
+const STATUS_LABELS: Record<ScorecardStatus, string> = {
+  healthy: "Assessed",
+  warning: "Needs attention",
+  critical: "Critical findings",
+  not_assessed: "Not assessed",
+  stale: "Stale assessment",
+};
+
+function checkStatus(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+function severityRank(value: unknown): number {
+  return { critical: 5, high: 4, medium: 3, low: 2, info: 1 }[
+    typeof value === "string" ? value.toLowerCase() : ""
+  ] ?? 0;
+}
+
+function assessedChecks(evidence: Record<string, unknown> | null) {
+  const raw = evidence?.checks;
+  return Array.isArray(raw)
+    ? raw
+        .map(asRecord)
+        .filter((c): c is Record<string, unknown> => c !== null)
+        .filter((c) => ["passed", "failed", "warning"].includes(checkStatus(c.status)))
+    : [];
+}
+
+function coverageOf(evidence: Record<string, unknown> | null): { assessed: number; applicable: number } | null {
+  const cov = asRecord(evidence?.coverage);
+  const assessed = asNumber(cov?.assessed);
+  const applicable = asNumber(cov?.applicable);
+  return assessed != null && applicable != null ? { assessed, applicable } : null;
+}
+
+function evidenceLine(score: ProductScore | undefined): string {
+  if (!score) return "No score snapshot recorded for this run.";
+  const ev = asRecord(score.evidence) ?? {};
+  if (score.value == null) {
+    const reason = typeof ev.reason === "string" ? ev.reason : "no assessment evidence";
+    return `Not assessed: ${reason}.`;
+  }
+  if (typeof ev.top_finding === "string" && ev.top_finding.trim()) return ev.top_finding;
+  const checks = assessedChecks(ev);
+  const failed = checks.filter((c) => checkStatus(c.status) === "failed");
+  if (failed.length > 0) {
+    return `${failed.length} failed check${failed.length === 1 ? "" : "s"} reduced this score`;
+  }
+  const warned = checks.filter((c) => checkStatus(c.status) === "warning").length;
+  if (warned > 0) return `${warned} warning${warned === 1 ? "" : "s"} reduced this score`;
+  if (checks.length > 0) {
+    return `All ${checks.length} assessed check${checks.length === 1 ? "" : "s"} passed`;
+  }
+  return "Evidence-backed score.";
+}
+
+function statusOf(
+  value: number | null,
+  evidence: Record<string, unknown> | null,
+  stale: boolean,
+): ScorecardStatus {
+  if (stale) return "stale";
+  if (value == null) return "not_assessed";
+  const checks = assessedChecks(evidence);
+  const highFailure = checks.some(
+    (c) => checkStatus(c.status) === "failed" && severityRank(c.severity) >= 4,
+  );
+  if (highFailure || value < 60) return "critical";
+  if (value < 85 || checks.some((c) => checkStatus(c.status) !== "passed")) return "warning";
+  return "healthy";
+}
+
+function revisionsMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return true;
+  const normalize = (v: string) => v.replace(/[^0-9a-z]/gi, "").toLowerCase();
+  const left = normalize(a);
+  const right = normalize(b);
+  return left.startsWith(right) || right.startsWith(left);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -53,113 +146,64 @@ function shortSha(value: string | null | undefined): string | null {
   return value.length > 12 ? value.slice(0, 8) : value;
 }
 
-function scoreEvidence(score: ProductScore | undefined): string {
-  if (!score) return "Score not computed for this run.";
-  if (score.value == null) {
-    const reason = score.evidence?.reason;
-    return typeof reason === "string" ? `Not assessed: ${reason}.` : "Not assessed for this run.";
-  }
-  const ev = score.evidence ?? {};
-  const parts: string[] = [];
-  if (typeof ev.security_failures === "number") parts.push(`${ev.security_failures} security failures`);
-  if (typeof ev.critic_security === "number") parts.push(`critic security ${ev.critic_security}`);
-  if (typeof ev.blocking_failures === "number") parts.push(`${ev.blocking_failures} blocking failures`);
-  if (ev.no_health_check) parts.push("no health check recorded");
-  return parts.length > 0 ? parts.join(" · ") : "Evidence-backed score.";
-}
-
 export function deriveScorecards(input: {
   run: RunSummary;
-  verification: Record<string, unknown> | null;
-  critic: Record<string, unknown> | null;
+  /** Kept for API compatibility; scores are backend-owned and authoritative. */
+  verification?: Record<string, unknown> | null;
+  /** Kept for API compatibility; critic output never supplies numeric scores. */
+  critic?: Record<string, unknown> | null;
   scores: ScoresResponse | null;
   projectId: string;
 }): ScorecardMetric[] {
-  const { run, verification, critic, scores, projectId } = input;
+  const { run, scores, projectId } = input;
   const isDemo = run.is_demo;
-  const assessmentTime = scores?.scores?.deployment_readiness?.computed_at ?? run.updated_at;
-  const revision =
-    shortSha(scores?.scores?.deployment_readiness?.target_sha) ?? shortSha(run.target_revision);
+  const runRevision = shortSha(run.target_revision);
+  const verificationHref = `/projects/${projectId}/verification?run=${encodeURIComponent(run.deployment_id)}`;
 
-  // Code quality — critic completeness (structure/config/compose checks).
-  const criticBreakdown = asRecord(critic?.breakdown);
-  const codeValue = asNumber(criticBreakdown?.completeness);
-  const criticFindings = Array.isArray(critic?.findings) ? critic.findings.length : 0;
-  const criticRec = typeof critic?.recommendation === "string" ? critic.recommendation : null;
-
-  // Verification confidence — verifier score + observed check counts.
-  const checks = Array.isArray(verification?.checks) ? verification.checks : [];
-  const verificationSummary: VerificationSummary | null = verification
-    ? {
-        passed: typeof verification.passed === "boolean" ? verification.passed : null,
-        score: asNumber(verification.score),
-        total: checks.length,
-        failed: checks.filter(
-          (c) => asRecord(c)?.status === "fail",
-        ).length,
-        summary: typeof verification.summary === "string" ? verification.summary : null,
-        blocking: [],
-      }
-    : null;
-  const verificationValue =
-    verificationSummary && verificationSummary.total > 0 ? verificationSummary.score : null;
-  const passedCount = checks.filter((c) => asRecord(c)?.status === "pass").length;
-  const warningCount = checks.filter((c) => asRecord(c)?.status === "warning").length;
-
-  const securityScore = scores?.scores?.security;
-  const readinessScore = scores?.scores?.deployment_readiness;
+  const make = (
+    id: ScorecardMetric["id"],
+    title: string,
+    score: ProductScore | undefined,
+    href: string,
+  ): ScorecardMetric => {
+    const evidence = asRecord(score?.evidence);
+    const stale =
+      (scores != null && scores.deployment_id !== run.deployment_id) ||
+      !revisionsMatch(score?.target_sha, run.target_revision);
+    const value = score?.value ?? null;
+    const status = statusOf(value, evidence, stale);
+    return {
+      id,
+      title,
+      value,
+      evidence: evidenceLine(score),
+      status,
+      statusLabel: STATUS_LABELS[status],
+      coverage: coverageOf(evidence),
+      assessedAt: score?.computed_at ?? null,
+      revision: shortSha(score?.target_sha) ?? runRevision,
+      stale,
+      refreshing: isRunningStatus(run.status),
+      isDemo,
+      href,
+    };
+  };
 
   return [
-    {
-      id: "code-quality",
-      title: "Code Quality",
-      value: codeValue,
-      evidence:
-        codeValue != null
-          ? `${criticRec ?? "Critic"} · ${criticFindings} finding${criticFindings === 1 ? "" : "s"}`
-          : "Critic has not assessed this run.",
-      assessedAt: critic ? assessmentTime : null,
-      revision,
-      isDemo,
-      href: `/projects/${projectId}/verification`,
-    },
-    {
-      id: "security",
-      title: "Security Posture",
-      value: securityScore?.value ?? null,
-      evidence: scoreEvidence(securityScore),
-      assessedAt: securityScore?.computed_at ?? null,
-      revision: shortSha(securityScore?.target_sha) ?? revision,
-      isDemo,
-      href: `/projects/${projectId}/verification`,
-    },
-    {
-      id: "verification",
-      title: "Verification Confidence",
-      value: verificationValue,
-      evidence:
-        verificationSummary && verificationSummary.total > 0
-          ? `${passedCount}/${verificationSummary.total} checks passed` +
-            (verificationSummary.failed > 0
-              ? ` · ${verificationSummary.failed} failed`
-              : "") +
-            (warningCount > 0 ? ` · ${warningCount} warning${warningCount === 1 ? "" : "s"}` : "")
-          : "No verification artifact for this run.",
-      assessedAt: verification ? assessmentTime : null,
-      revision,
-      isDemo,
-      href: `/projects/${projectId}/verification`,
-    },
-    {
-      id: "readiness",
-      title: "Deployment Readiness",
-      value: readinessScore?.value ?? null,
-      evidence: scoreEvidence(readinessScore),
-      assessedAt: readinessScore?.computed_at ?? null,
-      revision: shortSha(readinessScore?.target_sha) ?? revision,
-      isDemo,
-      href: `/projects/${projectId}/graphs`,
-    },
+    make("code-quality", "Code Quality", scores?.scores?.code_quality, verificationHref),
+    make("security", "Security Posture", scores?.scores?.security, verificationHref),
+    make(
+      "verification",
+      "Verification Confidence",
+      scores?.scores?.verification_confidence,
+      verificationHref,
+    ),
+    make(
+      "readiness",
+      "Deployment Readiness",
+      scores?.scores?.deployment_readiness,
+      `/projects/${projectId}/runs/${run.deployment_id}`,
+    ),
   ];
 }
 

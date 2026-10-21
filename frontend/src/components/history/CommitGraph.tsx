@@ -32,12 +32,12 @@ function CommitNode({ data }: NodeProps) {
       <Handle type="target" position={Position.Top} />
       <p className="medha-mono font-semibold text-medha-text">
         {short}
-        {multi ? <span className="ml-1 rounded bg-medha-warning-soft px-1 text-[10px] text-medha-warning">merge</span> : null}
+        {multi ? <span className="ml-1 rounded bg-medha-warning-soft px-1 text-[12.5px] text-medha-warning">merge</span> : null}
       </p>
       <p className="max-w-[220px] truncate text-medha-secondary" title={commit.message ?? ""}>
         {commit.message ?? "No message"}
       </p>
-      <p className="text-[11px] text-medha-tertiary">
+      <p className="text-[12px] text-medha-tertiary">
         {commit.author ?? "Unknown"} · {(commit.committed_at ?? "").slice(0, 10)}
       </p>
       <Handle type="source" position={Position.Bottom} />
@@ -234,7 +234,7 @@ export function CommitGraph({ projectId }: { projectId: string }) {
                 </p>
                 <ul className="mt-1 max-h-48 space-y-0.5 overflow-y-auto">
                   {detail.files.slice(0, 50).map((f) => (
-                    <li key={f.path} className="medha-mono flex justify-between gap-2 text-[11px] text-medha-secondary">
+                    <li key={f.path} className="medha-mono flex justify-between gap-2 text-[12px] text-medha-secondary">
                       <span className="truncate">{f.path}</span>
                       <span className="shrink-0">+{f.added} −{f.deleted}</span>
                     </li>

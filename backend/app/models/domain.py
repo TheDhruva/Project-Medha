@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.events import utc_now_iso
 
@@ -99,6 +99,34 @@ class ApplicationProfile(BaseModel):
 
     def to_public(self) -> dict[str, Any]:
         return self.model_dump()
+
+
+class RepositorySummary(BaseModel):
+    """Revision-scoped, evidence-backed repository summary (advisory)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    schema_name: Literal["repository-summary/v1"] = Field(
+        default="repository-summary/v1", alias="schema"
+    )
+    text: str = Field(..., min_length=1, max_length=400)
+    source: Literal["ai", "deterministic"]
+    commit_sha: str | None = Field(default=None, max_length=64)
+    generated_at: str
+    technologies: list[str] = Field(default_factory=list, max_length=8)
+    ai: dict[str, Any] | None = None
+
+
+class RepositorySummaryView(BaseModel):
+    """API-facing summary with an explicit availability status."""
+
+    status: Literal["available", "stale", "unavailable"] = "unavailable"
+    text: str | None = None
+    source: Literal["ai", "deterministic"] | None = None
+    commit_sha: str | None = None
+    generated_at: str | None = None
+    technologies: list[str] = Field(default_factory=list)
+    ai: dict[str, Any] | None = None
 
 
 class Constraint(BaseModel):

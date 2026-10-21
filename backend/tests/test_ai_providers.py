@@ -335,6 +335,7 @@ def test_real_run_with_stubbed_provider_records_ai_assisted(client, monkeypatch)
                 "risk_level": "low", "notable_risks": [],
             },
             "repo_interpretation": {
+                "summary": "A small Node service that appears to expose an HTTP API.",
                 "runtime": "node", "deploy_shape": "compose",
                 "implications": [], "missing_evidence": [],
             },
@@ -389,5 +390,9 @@ def test_real_run_with_stubbed_provider_records_ai_assisted(client, monkeypatch)
         assert set(ai.get("notes", {}).keys()) >= {"change_summary", "repo_interpretation", "review_brief"}
         for note in ai["notes"].values():
             assert note["meta"]["schema_valid"] is True
+        summary = body["result"]["repository_analysis"]["summary"]
+        assert summary["source"] == "ai"
+        assert "Node service" in summary["text"]
+        assert summary["ai"]["provider"] == "groq"
     finally:
         _gs.cache_clear()

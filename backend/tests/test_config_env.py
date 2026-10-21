@@ -82,6 +82,8 @@ def test_local_optin_selects_postgres_without_connecting(monkeypatch) -> None:
 
 
 def test_production_valid_url_selects_postgres() -> None:
+    # Pin the full intended config: Settings(...) still reads the operator's
+    # dotenv, so a local .env with MEDHA_DOCKER_EXECUTE=true must not leak in.
     settings = Settings(
         MEDHA_ENV="production",
         MEDHA_AUTH_MODE="clerk",
@@ -89,6 +91,7 @@ def test_production_valid_url_selects_postgres() -> None:
         MEDHA_API_TOKEN="test-token",
         MEDHA_DATABASE_URL=FAKE_PG_URL,
         MEDHA_EXECUTOR_MODE="disabled",
+        MEDHA_DOCKER_EXECUTE="false",
     )
     assert settings.use_postgres
     assert settings.hosted_security_error() is None

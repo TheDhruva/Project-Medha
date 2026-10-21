@@ -77,12 +77,12 @@ function CigNode({ data, selected }: NodeProps<CigFlowNode>) {
       style={{ borderColor: style.border, background: style.bg, color: style.text }}
     >
       <Handle type="target" position={Position.Top} className="!h-2 !w-2 !border-0 !bg-medha-strong" />
-      <p className="medha-mono text-[10px] font-semibold uppercase tracking-wide opacity-80">
+      <p className="medha-mono text-[12.5px] font-semibold uppercase tracking-wide opacity-80">
         {style.badge} · {node.language}
       </p>
       <p className="mt-0.5 medha-mono truncate text-xs font-medium">{node.path}</p>
       {node.symbol ? (
-        <p className="medha-mono truncate text-[10px] opacity-75">{node.symbol}</p>
+        <p className="medha-mono truncate text-[12.5px] opacity-75">{node.symbol}</p>
       ) : null}
       <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !border-0 !bg-medha-strong" />
     </div>
@@ -210,18 +210,18 @@ export function ChangeImpactPanel({
             </p>
           </div>
           {view.label ? (
-            <span className="rounded-full border border-medha-warning/40 bg-medha-warning-soft px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-medha-warning">
+            <span className="rounded-full border border-medha-warning/40 bg-medha-warning-soft px-2 py-0.5 text-[12.5px] font-semibold uppercase tracking-wide text-medha-warning">
               {view.label}
             </span>
           ) : null}
         </div>
         <div className="flex items-center gap-2">
           <span
-            className={`rounded-medha-sm border px-2 py-1 text-[11px] font-semibold uppercase tracking-wide ${riskTone(view.risk.level)}`}
+            className={`rounded-medha-sm border px-2 py-1 text-[12px] font-semibold uppercase tracking-wide ${riskTone(view.risk.level)}`}
           >
             Risk: {view.risk.level}
           </span>
-          <span className="medha-mono rounded-medha-sm border border-medha-border bg-medha-muted px-2 py-1 text-[10px] text-medha-tertiary">
+          <span className="medha-mono rounded-medha-sm border border-medha-border bg-medha-muted px-2 py-1 text-[12.5px] text-medha-tertiary">
             {String(counts.modified)}M · {counts.added}A · {counts.deleted}D ·{" "}
             {counts.renamed}R
           </span>
@@ -260,7 +260,7 @@ export function ChangeImpactPanel({
                 {edgeLabels.map((lbl) => (
                   <div
                     key={lbl.id}
-                    className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-medha-border bg-medha-surface px-1.5 py-0.5 text-[9px] font-semibold text-medha-secondary shadow-sm"
+                    className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-medha-border bg-medha-surface px-1.5 py-0.5 text-[12px] font-semibold text-medha-secondary shadow-sm"
                     style={{ left: lbl.x, top: lbl.y }}
                   >
                     {lbl.relationship}
@@ -309,7 +309,7 @@ function RiskSummary({ analysis }: { analysis: ChangeIntelAnalysis }) {
           >
             <span className="text-medha-text">{f.reason}</span>
             <span
-              className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${riskTone(f.level)}`}
+              className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[12px] font-semibold uppercase ${riskTone(f.level)}`}
             >
               {f.level}
             </span>
@@ -340,7 +340,7 @@ function ChangedFiles({ analysis }: { analysis: ChangeIntelAnalysis }) {
               {f.change_type === "renamed" && f.old_path ? `${f.old_path} → ` : ""}
               {f.path}
             </span>
-            <span className="shrink-0 text-[10px] text-medha-tertiary">
+            <span className="shrink-0 text-[12.5px] text-medha-tertiary">
               +{f.added_lines}/−{f.deleted_lines}
             </span>
           </li>
@@ -355,7 +355,7 @@ function ImpactSummary({ analysis }: { analysis: ChangeIntelAnalysis }) {
   return (
     <div className="grid grid-cols-3 gap-2">
       <div className="rounded-medha-sm border border-medha-border bg-white p-2">
-        <p className="text-[9px] font-semibold uppercase tracking-wide text-medha-tertiary">
+        <p className="text-[12px] font-semibold uppercase tracking-wide text-medha-tertiary">
           Direct
         </p>
         <p className="medha-mono mt-0.5 text-sm font-semibold text-medha-text">
@@ -363,7 +363,7 @@ function ImpactSummary({ analysis }: { analysis: ChangeIntelAnalysis }) {
         </p>
       </div>
       <div className="rounded-medha-sm border border-medha-border bg-white p-2">
-        <p className="text-[9px] font-semibold uppercase tracking-wide text-medha-tertiary">
+        <p className="text-[12px] font-semibold uppercase tracking-wide text-medha-tertiary">
           Transitive
         </p>
         <p className="medha-mono mt-0.5 text-sm font-semibold text-medha-text">
@@ -371,7 +371,7 @@ function ImpactSummary({ analysis }: { analysis: ChangeIntelAnalysis }) {
         </p>
       </div>
       <div className="rounded-medha-sm border border-medha-border bg-white p-2">
-        <p className="text-[9px] font-semibold uppercase tracking-wide text-medha-tertiary">
+        <p className="text-[12px] font-semibold uppercase tracking-wide text-medha-tertiary">
           Cycles
         </p>
         <p className="medha-mono mt-0.5 text-sm font-semibold text-medha-text">
@@ -379,9 +379,9 @@ function ImpactSummary({ analysis }: { analysis: ChangeIntelAnalysis }) {
         </p>
       </div>
       {analysis.traversal.direct_targets.length > 0 ? (
-        <p className="col-span-3 text-[11px] leading-relaxed text-medha-secondary">
+        <p className="col-span-3 text-[12px] leading-relaxed text-medha-secondary">
           Directly affected:{" "}
-          <span className="medha-mono text-[10px]">
+          <span className="medha-mono text-[12.5px]">
             {[...analysis.traversal.direct_targets].sort().join(", ")}
           </span>
         </p>
@@ -391,11 +391,11 @@ function ImpactSummary({ analysis }: { analysis: ChangeIntelAnalysis }) {
           <p className="medha-label">Unresolved dependencies ({analysis.unresolved.length})</p>
           <ul className="mt-1 space-y-1">
             {analysis.unresolved.map((u, i) => (
-              <li key={`${u.path}:${u.line}:${i}`} className="text-[11px] leading-relaxed text-medha-secondary">
-                <span className="medha-mono text-[10px] text-medha-text">
+              <li key={`${u.path}:${u.line}:${i}`} className="text-[12px] leading-relaxed text-medha-secondary">
+                <span className="medha-mono text-[12.5px] text-medha-text">
                   {u.path}:{u.line} → {u.target}
                 </span>{" "}
-                <span className="rounded-full bg-medha-muted px-1.5 py-0.5 text-[9px] uppercase text-medha-tertiary">
+                <span className="rounded-full bg-medha-muted px-1.5 py-0.5 text-[12px] uppercase text-medha-tertiary">
                   {u.kind}
                 </span>
                 <span className="block opacity-80">{u.reason}</span>
@@ -419,10 +419,10 @@ function EvidenceList({ analysis }: { analysis: ChangeIntelAnalysis }) {
             key={e.id}
             className="rounded-medha-sm border border-medha-border bg-white px-2.5 py-2"
           >
-            <p className="medha-mono text-[10px] text-medha-text">
+            <p className="medha-mono text-[12.5px] text-medha-text">
               {e.source} → {e.target}
             </p>
-            <p className="mt-0.5 flex items-center gap-2 text-[10px] uppercase text-medha-secondary">
+            <p className="mt-0.5 flex items-center gap-2 text-[12.5px] uppercase text-medha-secondary">
               <span>{e.relationship}</span>
               <span
                 className={`opacity-70 ${e.confidence === "heuristic" ? "italic" : ""}`}
@@ -430,7 +430,7 @@ function EvidenceList({ analysis }: { analysis: ChangeIntelAnalysis }) {
                 {e.confidence}
               </span>
             </p>
-            <p className="medha-mono mt-1 text-[10px] text-medha-tertiary">{e.evidence}</p>
+            <p className="medha-mono mt-1 text-[12.5px] text-medha-tertiary">{e.evidence}</p>
           </li>
         ))}
       </ul>
@@ -460,7 +460,7 @@ function RequirementsList({ analysis }: { analysis: ChangeIntelAnalysis }) {
                 {r.requirement}
               </span>
               <span
-                className={`text-[9px] font-semibold uppercase ${
+                className={`text-[12px] font-semibold uppercase ${
                   r.executable
                     ? "text-medha-success"
                     : "text-medha-warning"
@@ -469,10 +469,10 @@ function RequirementsList({ analysis }: { analysis: ChangeIntelAnalysis }) {
                 {r.status}
               </span>
             </div>
-            <p className="mt-1 text-[11px] leading-relaxed text-medha-secondary">
+            <p className="mt-1 text-[12px] leading-relaxed text-medha-secondary">
               {r.reason}
             </p>
-            <p className="medha-mono mt-1 text-[10px] text-medha-tertiary">
+            <p className="medha-mono mt-1 text-[12.5px] text-medha-tertiary">
               {r.target_path} · category={r.check_category}
               {r.executable ? " · verifier can run this" : " · source-level check (not faked)"}
             </p>
@@ -492,7 +492,7 @@ function SelectedNodeDetail({
 }) {
   return (
     <div className="rounded-medha-sm border border-medha-border bg-medha-accent-soft/40 p-3">
-      <p className="text-[9px] font-semibold uppercase tracking-wide text-medha-accent">
+      <p className="text-[12px] font-semibold uppercase tracking-wide text-medha-accent">
         Selected CIG node
       </p>
       <p className="medha-mono mt-1 break-all text-xs font-medium text-medha-text">
@@ -501,12 +501,12 @@ function SelectedNodeDetail({
       </p>
       <ul className="mt-2 space-y-1.5">
         {incident.map((e) => (
-          <li key={e.id} className="text-[11px] leading-relaxed text-medha-secondary">
-            <span className="medha-mono text-[10px] text-medha-text">
+          <li key={e.id} className="text-[12px] leading-relaxed text-medha-secondary">
+            <span className="medha-mono text-[12.5px] text-medha-text">
               {e.source === node.id ? e.source : e.target}
             </span>{" "}
             {e.source === node.id ? "→" : "←"}{" "}
-            <span className="medha-mono text-[10px] text-medha-text">
+            <span className="medha-mono text-[12.5px] text-medha-text">
               {e.source === node.id ? e.target : e.source}
             </span>
             <span className="ml-1 uppercase opacity-70">{e.relationship}</span>
@@ -514,7 +514,7 @@ function SelectedNodeDetail({
           </li>
         ))}
         {incident.length === 0 ? (
-          <li className="text-[11px] text-medha-tertiary">No incident graph edges.</li>
+          <li className="text-[12px] text-medha-tertiary">No incident graph edges.</li>
         ) : null}
       </ul>
     </div>

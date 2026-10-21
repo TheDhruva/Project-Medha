@@ -374,6 +374,41 @@ export interface DeploymentResultView {
   code?: string | null;
   /** Target-selection detail for target-related blocks; absent otherwise. */
   target_selection?: TargetSelectionView | null;
+  /** Analysis outcome, distinct from the (possibly blocked) deployment. */
+  analysis_status?: string | null;
+  deployment_status?: string | null;
+  /** Comprehensive repository inventory; present whenever analysis ran. */
+  repository_analysis?: RepositoryAnalysisView | null;
+  /** Structured build-stage diagnostics; present only when a build failed. */
+  build?: BuildDiagnosticsView | null;
+}
+
+export interface BuildDiagnosticsView {
+  stage?: string;
+  profile?: string | null;
+  app_root?: string | null;
+  package_manager?: string | null;
+  command?: string | null;
+  exit_code?: number | null;
+  error_code?: string | null;
+  log?: string | null;
+  log_truncated?: boolean;
+}
+
+export interface RepositoryAnalysisView {
+  schema?: string;
+  analysis_status?: string;
+  commit_sha?: string | null;
+  applications?: { path: string; technologies?: string[] }[];
+  languages?: { language: string }[];
+  finding_count?: number;
+  coverage?: { gaps?: string[] };
+  tasks?: { task: string; status: string }[];
+  revision?: {
+    sha?: string | null;
+    available?: boolean;
+    reason?: string | null;
+  } | null;
 }
 
 export interface TargetCandidateView {

@@ -202,12 +202,13 @@ class DeploymentRepository:
     ) -> DeploymentRecord | None:
         from app.core.enums import DeploymentStatus as _DS
 
+        # AWAITING_APPROVAL is a resumable pause (approve/cancel move out of
+        # it), so it is deliberately NOT terminal here.
         terminal = {
             _DS.COMPLETED.value,
             _DS.FAILED.value,
             _DS.CANCELLED.value,
             _DS.PARTIAL_RECOVERY.value,
-            _DS.AWAITING_APPROVAL.value,
         }
         new_status = status or None  # resolved after guard read below
 
@@ -220,7 +221,7 @@ class DeploymentRepository:
             if new_status is not None:
                 where.append(
                     "(status NOT IN ('completed', 'failed', 'cancelled',"
-                    " 'partial_recovery', 'awaiting_approval') OR status = ?)"
+                    " 'partial_recovery') OR status = ?)"
                 )
                 params.append(new_status.value)
             if allowed_from is not None:
@@ -340,7 +341,6 @@ class DeploymentRepository:
                         "failed",
                         "cancelled",
                         "partial_recovery",
-                        "awaiting_approval",
                     ):
                         if _row["result_json"]:
                             updates.pop("result_json", None)

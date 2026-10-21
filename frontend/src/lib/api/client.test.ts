@@ -2,12 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   analyzeChangeImpact,
+  apiFetch,
+  authReady,
+  clearApiCache,
   eventsUrl,
   fetchChangeImpact,
   fetchConfigStatus,
   fetchRunHealth,
   fetchRunHydration,
   fetchRunLogs,
+  registerAuthTokenGetter,
 } from "@/lib/api/client";
 import type { ChangeImpactResponse } from "@/lib/api/client";
 
@@ -213,5 +217,46 @@ describe("run logs and hydration client", () => {
     expect(h.runtimeLogs?.code).toBe("LOGS_UNAVAILABLE");
     expect(h.logs).toEqual([]);
     expect(h.agents).toBeNull();
+  });
+});
+
+describe("auth token forwarding", () => {
+  let capturedInit: RequestInit | undefined;
+
+  function stubFetchWithCapture(response: Response): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedInit = init;
+        return response;
+      }),
+    );
+  }
+
+  afterEach(() => {
+    capturedInit = undefined;
+    registerAuthTokenGetter(null);
+    clearApiCache();
+  });
+
+  it("apiFetch sends Authorization header when token getter returns a token", async () => {
+    stubFetchWithCapture(jsonResponse({ ok: true }));
+    registerAuthTokenGetter(async () => "clerk-session-token");
+    await apiFetch("/api/test");
+    const headers = capturedInit?.headers as Headers | undefined;
+    expect(headers?.get("Authorization")).toBe("Bearer clerk-session-token");
+  });
+
+  it("apiFetch omits Authorization header when token getter returns null", async () => {
+    stubFetchWithCapture(jsonResponse({ ok: true }));
+    registerAuthTokenGetter(async () => null);
+    await apiFetch("/api/test");
+    const headers = capturedInit?.headers as Headers | undefined;
+    expect(headers?.get("Authorization")).toBeNull();
+  });
+
+  it("authReady resolves after registerAuthTokenGetter is called", async () => {
+    registerAuthTokenGetter(async () => "token");
+    await expect(authReady).resolves.toBeUndefined();
   });
 });

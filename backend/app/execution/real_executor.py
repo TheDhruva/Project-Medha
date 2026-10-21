@@ -27,6 +27,7 @@ from app.execution.policy import PolicyViolation, check_real_execution_policy
 from app.execution.profiles import (
     BuildProfile,
     UnsupportedStack,
+    node_install_fragment,
     render_dockerfile,
 )
 
@@ -48,6 +49,9 @@ class RealDeployResult:
     port: int | None = None
     readiness: dict = field(default_factory=dict)
     runtime_spec: dict = field(default_factory=dict)
+    # Structured build diagnostics (stage/command/exit_code/error_code/log);
+    # empty unless the build stage failed. Never carries secrets.
+    build: dict = field(default_factory=dict)
     started_at: str | None = None
     finished_at: str | None = None
 
@@ -115,6 +119,33 @@ def _log_tail(container: str, *, limit: int = 2000) -> str:
     except Exception:  # noqa: BLE001 - diagnostics best effort
         return ""
     return ((logs.get("stderr") or "") + (logs.get("stdout") or ""))[-limit:]
+
+
+def _build_diagnostics(
+    exc: docker_ops.DockerOpsError, resolved: BuildProfile, checkout: Path,
+) -> dict:
+    """Structured, redacted build-failure evidence (empty for non-build errors)."""
+    if exc.code != "BUILD_FAILED" and not exc.log:
+        return {}
+    from app.ai.redact import redact_text
+
+    command: str | None = None
+    if resolved.name in ("node", "nextjs"):
+        try:
+            command = node_install_fragment(resolved, checkout=checkout).strip()
+        except UnsupportedStack:
+            command = None
+    return {
+        "stage": "build",
+        "profile": resolved.name,
+        "app_root": resolved.app_root,
+        "package_manager": resolved.package_manager,
+        "command": command,
+        "exit_code": exc.exit_code,
+        "error_code": exc.error_code,
+        "log": redact_text(exc.log or ""),
+        "log_truncated": bool(exc.log_truncated),
+    }
 
 
 def runtime_available() -> tuple[bool, str]:
@@ -366,10 +397,11 @@ class RealExecutor:
             return _fail(exc.code, exc.message)
         except docker_ops.DockerOpsError as exc:
             return RealDeployResult(
-                ok=False, code=exc.code, message=str(exc)[:1000],
+                ok=False, code=exc.code, message=str(exc)[:1500],
                 profile=resolved.name, image=tag,
                 container=container or None, port=host,
                 runtime_spec=spec_evidence,
+                build=_build_diagnostics(exc, resolved, checkout),
                 started_at=started, finished_at=_now_iso(),
             )
         except PolicyViolation:

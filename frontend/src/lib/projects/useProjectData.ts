@@ -8,6 +8,7 @@ import {
   fetchRunHydration,
   fetchRunsList,
   subscribeDeploymentEventsShared,
+  authReady,
   type AgentSnapshotRow,
   type Project,
   type Proposal,
@@ -111,6 +112,9 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
 
   const load = useCallback(async () => {
     const gen = ++loadGen.current;
+    // Wait for the Clerk token getter to be registered so the first API
+    // request carries the Authorization header (prevents a 401 on cold start).
+    await authReady;
     if (canonicalId) {
       // Canonical identity: one DB-backed project, runs joined by project_id.
       setLoading(true);
@@ -199,6 +203,8 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
       return;
     }
     let cancelled = false;
+    // Never carry one run's health/artifacts into another run's display.
+    setHydration(null);
     setHydrating(true);
     void Promise.all([fetchRunHydration(selectedId), fetchRunHealth(selectedId)])
       .then(([h, health]) => {
@@ -296,6 +302,11 @@ export interface VerificationSummary {
   score: number | null;
   total: number;
   failed: number;
+  /** Checks that actually passed, plus assessed/warning/pending counts. */
+  passedCount: number;
+  assessed: number;
+  warnings: number;
+  pending: number;
   summary: string | null;
   blocking: string[];
 }
@@ -303,9 +314,15 @@ export interface VerificationSummary {
 export function summarizeVerification(raw: Record<string, unknown> | null): VerificationSummary | null {
   if (!raw) return null;
   const checks = Array.isArray(raw.checks) ? raw.checks : [];
-  const failed = checks.filter(
-    (c) => typeof c === "object" && c !== null && (c as { status?: unknown }).status === "fail",
-  ).length;
+  const count = (status: string) =>
+    checks.filter(
+      (c) => typeof c === "object" && c !== null && (c as { status?: unknown }).status === status,
+    ).length;
+  const failed = count("fail");
+  const passedCount = count("pass");
+  const warnings = count("warning");
+  const pending = count("pending");
+  const assessed = passedCount + failed + warnings;
   const passed =
     typeof raw.passed === "boolean"
       ? raw.passed
@@ -317,6 +334,10 @@ export function summarizeVerification(raw: Record<string, unknown> | null): Veri
     score: typeof raw.score === "number" ? raw.score : null,
     total: checks.length,
     failed,
+    passedCount,
+    assessed,
+    warnings,
+    pending,
     summary: typeof raw.summary === "string" ? raw.summary : null,
     blocking: Array.isArray(raw.blocking_failures)
       ? raw.blocking_failures.filter((x): x is string => typeof x === "string")

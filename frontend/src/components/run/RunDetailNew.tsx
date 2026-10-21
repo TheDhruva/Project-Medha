@@ -32,7 +32,9 @@ import {
   DecisionCard,
   SummaryRow,
   SectionShell,
+  buildRemediation,
   formatDuration,
+  modeLabel,
 } from "@/components/run-detail/Cards";
 import { EnvBadge, ExecutionModeBadge } from "@/components/ui/Section";
 import { RuntimeLogsPanel } from "@/components/run-detail/RuntimeLogs";
@@ -141,6 +143,8 @@ function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
   const revision =
     shortSha(snapshot.changeIntel?.changeset.target_sha) ??
     shortSha(snapshot.changeIntel?.changeset.target_revision);
+  const build = snapshot.result?.build ?? null;
+  const remediation = buildRemediation(build?.error_code);
 
   const copyLogs = async () => {
     if (!appLog) return;
@@ -154,33 +158,75 @@ function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
   };
 
   return (
-    <section aria-label={failed ? "Failure diagnosis" : "Run outcome"} className="rounded-xl border border-medha-border bg-white p-4 sm:p-5">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+    <section id="diagnosis" aria-label={failed ? "Failure diagnosis" : "Run outcome"} className="scroll-mt-20 rounded-xl border border-medha-border bg-white p-4 sm:p-5">
+      <p className="medha-label">
         {failed ? "Diagnosis" : running ? "Current state" : "Outcome"}
       </p>
       {failed ? (
         <div className="mt-2 space-y-2.5">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-danger">Failure</p>
+            <p className="text-[12px] font-semibold uppercase tracking-wide text-medha-danger">Failure</p>
             <p className="mt-0.5 text-[13.5px] leading-relaxed text-medha-text">{concise(fact, 320)}</p>
             {hypothesis ? (
-              <p className="mt-1 text-[12.5px] italic leading-relaxed text-medha-secondary">
+              <p className="mt-1 text-[13.5px] italic leading-relaxed text-medha-secondary">
                 Hypothesis (unverified): {hypothesis}
               </p>
             ) : null}
           </div>
+          {build ? (
+            <div>
+              <p className="medha-label">
+                Build failure{build.stage ? ` (${build.stage})` : ""}
+              </p>
+              <dl className="mt-1 grid gap-x-4 gap-y-1 text-[13px] text-medha-secondary sm:grid-cols-2">
+                {build.command ? (
+                  <div className="sm:col-span-2">
+                    <dt className="inline font-semibold text-medha-text">Command: </dt>
+                    <dd className="medha-mono inline break-all">{build.command}</dd>
+                  </div>
+                ) : null}
+                {build.package_manager ? (
+                  <div><dt className="inline font-semibold text-medha-text">Package manager: </dt><dd className="inline">{build.package_manager}</dd></div>
+                ) : null}
+                {build.exit_code != null ? (
+                  <div><dt className="inline font-semibold text-medha-text">Exit code: </dt><dd className="medha-mono inline">{build.exit_code}</dd></div>
+                ) : null}
+                {build.error_code ? (
+                  <div><dt className="inline font-semibold text-medha-text">Error code: </dt><dd className="medha-mono inline">{build.error_code}</dd></div>
+                ) : null}
+                {build.app_root ? (
+                  <div><dt className="inline font-semibold text-medha-text">Application root: </dt><dd className="medha-mono inline">{build.app_root}</dd></div>
+                ) : null}
+              </dl>
+              {remediation ? (
+                <p className="mt-1.5 text-[13.5px] leading-relaxed text-medha-text">
+                  <span className="font-semibold">Suggested fix: </span>{remediation}
+                </p>
+              ) : null}
+              {build.log ? (
+                <details className="mt-1.5">
+                  <summary className="cursor-pointer text-[13.5px] font-semibold text-medha-accent">
+                    Build output {build.log_truncated ? "(truncated to the last 8000 characters)" : "(complete, bounded)"}
+                  </summary>
+                  <pre className="medha-mono mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-medha-border bg-medha-muted p-2.5 text-[12px] leading-relaxed text-medha-text">
+                    {build.log}
+                  </pre>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
           <div className="grid gap-2.5 sm:grid-cols-2">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">Readiness probe</p>
-              <p className="medha-mono mt-0.5 break-all text-[12px] text-medha-text">{probe.url ?? "Probe target not recorded for this run."}</p>
-              {probe.mapping ? <p className="mt-0.5 text-[12px] text-medha-secondary">Published {probe.mapping}</p> : null}
+              <p className="medha-label">Readiness probe</p>
+              <p className="medha-mono mt-0.5 break-all text-[13px] text-medha-text">{probe.url ?? "No readiness probe was attempted (execution did not reach it)."}</p>
+              {probe.mapping ? <p className="mt-0.5 text-[13px] text-medha-secondary">Published {probe.mapping}</p> : null}
             </div>
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">Execution</p>
-              <p className="mt-0.5 text-[12px] text-medha-secondary">
+              <p className="medha-label">Execution</p>
+              <p className="mt-0.5 text-[13px] text-medha-secondary">
                 Stage {snapshot.explain.currentStage ?? snapshot.runStatus}
-                {snapshot.result?.durationLabel ? ` · ${snapshot.result.durationLabel}` : ""}
-                {snapshot.executionMode ? ` · ${snapshot.executionMode}` : ""}
+                {snapshot.durationSeconds != null ? ` · ${formatDuration(snapshot.durationSeconds)}` : ""}
+                {modeLabel(snapshot.executionMode) ? ` · ${modeLabel(snapshot.executionMode)}` : ""}
                 {revision ? ` · rev ${revision}` : ""}
               </p>
             </div>
@@ -188,29 +234,29 @@ function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
           {appLog ? (
             <div>
               <div className="flex items-center justify-between gap-2">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
+                <p className="medha-label">
                   Application logs {stderrTail ? "(stderr)" : "(stdout)"} — tail
                 </p>
                 <button
                   type="button"
                   onClick={() => void copyLogs()}
-                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-medha-secondary hover:bg-medha-muted hover:text-medha-text"
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[12px] font-medium text-medha-secondary hover:bg-medha-muted hover:text-medha-text"
                 >
                   {copied ? <Check className="h-3 w-3" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
                   {copied ? "Copied" : "Copy"}
                 </button>
               </div>
-              <pre className="medha-mono mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-medha-border bg-medha-muted p-2.5 text-[11px] leading-relaxed text-medha-text">
+              <pre className="medha-mono mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-medha-border bg-medha-muted p-2.5 text-[12px] leading-relaxed text-medha-text">
                 {appLog}
               </pre>
             </div>
           ) : null}
           {message.length > 340 ? (
             <details>
-              <summary className="cursor-pointer text-[12.5px] font-semibold text-medha-accent">
+              <summary className="cursor-pointer text-[13.5px] font-semibold text-medha-accent">
                 Full diagnostic evidence
               </summary>
-              <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-medha-secondary">
+              <p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-medha-secondary">
                 {message}
               </p>
             </details>
@@ -222,14 +268,14 @@ function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
             {running ? snapshot.explain.simpleText : message || snapshot.explain.simpleText}
           </p>
           {!running && snapshot.runStatus === "succeeded" ? (
-            <p className="text-[12px] text-medha-tertiary">
+            <p className="text-[13px] text-medha-tertiary">
               Completed execution is not a health claim — application health is reported separately on the project overview.
             </p>
           ) : null}
-          <p className="text-[12px] text-medha-secondary">
+          <p className="text-[13px] text-medha-secondary">
             Stage {snapshot.explain.currentStage ?? snapshot.runStatus}
-            {snapshot.result?.durationLabel ? ` · ${snapshot.result.durationLabel}` : ""}
-            {snapshot.executionMode ? ` · ${snapshot.executionMode}` : ""}
+            {snapshot.durationSeconds != null ? ` · ${formatDuration(snapshot.durationSeconds)}` : ""}
+            {modeLabel(snapshot.executionMode) ? ` · ${modeLabel(snapshot.executionMode)}` : ""}
             {revision ? ` · rev ${revision}` : ""}
           </p>
         </div>
@@ -277,7 +323,7 @@ function CegPreview({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; gr
     <section aria-label="Execution graph summary" className="rounded-xl border border-medha-border bg-white p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+          <p className="medha-label">
             Execution graph · CEG
           </p>
           <p className="mt-1 text-[13px] text-medha-secondary">
@@ -287,7 +333,7 @@ function CegPreview({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; gr
           </p>
         </div>
         {graphsHref ? (
-          <Link href={graphsHref} className="shrink-0 rounded text-[12px] font-semibold text-medha-accent hover:underline">
+          <Link href={graphsHref} className="shrink-0 rounded text-[13px] font-semibold text-medha-accent hover:underline">
             Architecture →
           </Link>
         ) : null}
@@ -297,10 +343,10 @@ function CegPreview({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; gr
           {services.slice(0, 8).map(([service, info]) => (
             <li
               key={service}
-              className="inline-flex items-center gap-1.5 rounded-full border border-medha-border bg-medha-muted/50 px-2.5 py-1 text-[12px]"
+              className="inline-flex items-center gap-1.5 rounded-full border border-medha-border bg-medha-muted/50 px-2.5 py-1 text-[13px]"
               title={`${info.count} node${info.count === 1 ? "" : "s"}${rollbackMembers > 0 ? " · rollback membership recorded" : ""}`}
             >
-              <span aria-hidden className="text-[11px]">{statusGlyph(info.status as never)}</span>
+              <span aria-hidden className="text-[12px]">{statusGlyph(info.status as never)}</span>
               <span className="font-medium text-medha-text">{service}</span>
               <span className="text-medha-tertiary">{labelStatus(info.status as never).toLowerCase()}</span>
             </li>
@@ -308,13 +354,13 @@ function CegPreview({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; gr
         </ul>
       ) : null}
       {rollback?.simpleExplanation ? (
-        <p className="mt-2 text-[12.5px] leading-relaxed text-medha-secondary">{rollback.simpleExplanation}</p>
+        <p className="mt-2 text-[13.5px] leading-relaxed text-medha-secondary">{rollback.simpleExplanation}</p>
       ) : null}
       <details
         className="mt-2"
         onToggle={(e) => setExpanded((e.target as HTMLDetailsElement).open)}
       >
-        <summary className="cursor-pointer text-[12.5px] font-semibold text-medha-accent">
+        <summary className="cursor-pointer text-[13.5px] font-semibold text-medha-accent">
           Expand graph canvas
         </summary>
         {expanded ? (
@@ -560,11 +606,11 @@ function RunContextBar({ deploymentId, projectId }: { deploymentId: string; proj
     <section aria-label="Run context" className="rounded-xl border border-medha-border bg-white px-4 py-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p title={repo ?? undefined} className="medha-mono truncate text-[12px] text-medha-secondary">
+          <p title={repo ?? undefined} className="medha-mono truncate text-[13px] text-medha-secondary">
             {repo ?? "Repository unknown"}
             {project?.branch ? ` · ${project.branch}` : ""}
           </p>
-          <dl className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-medha-secondary">
+          <dl className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-medha-secondary">
             <div className="flex gap-1.5">
               <dt className="text-medha-tertiary">Revision</dt>
               <dd className="medha-mono font-medium text-medha-text" title={sha ?? undefined}>
@@ -583,7 +629,7 @@ function RunContextBar({ deploymentId, projectId }: { deploymentId: string; proj
             </div>
           </dl>
           {headline ? (
-            <p className="mt-1.5 flex items-start gap-1.5 text-[12.5px] text-medha-text">
+            <p className="mt-1.5 flex items-start gap-1.5 text-[13.5px] text-medha-text">
               <GitCommitHorizontal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-medha-secondary" aria-hidden />
               <span className="min-w-0">
                 <span className="font-medium">{headline}</span>
@@ -596,16 +642,16 @@ function RunContextBar({ deploymentId, projectId }: { deploymentId: string; proj
               </span>
             </p>
           ) : (
-            <p className="mt-1.5 text-[12px] text-medha-tertiary">
+            <p className="mt-1.5 text-[13px] text-medha-tertiary">
               {isCanonical ? "Commit summary unavailable for this revision." : "Commit metadata unavailable on this route."}
             </p>
           )}
           {detail && detail.files.length > 0 ? (
             <details>
-              <summary className="cursor-pointer text-[12px] font-semibold text-medha-accent">
+              <summary className="cursor-pointer text-[13px] font-semibold text-medha-accent">
                 Changed files ({detail.files.length})
               </summary>
-              <ul className="medha-mono mt-1 max-h-32 space-y-0.5 overflow-y-auto text-[11px] text-medha-secondary">
+              <ul className="medha-mono mt-1 max-h-32 space-y-0.5 overflow-y-auto text-[12px] text-medha-secondary">
                 {detail.files.slice(0, 20).map((f) => (
                   <li key={f.path} className="flex justify-between gap-2">
                     <span className="truncate">{f.path}</span>
@@ -643,10 +689,10 @@ function RunContextBar({ deploymentId, projectId }: { deploymentId: string; proj
             </Link>
           )}
           {running ? (
-            <p className="text-[11px] text-medha-tertiary">Live run in progress — status updates via SSE.</p>
+            <p className="text-[12px] text-medha-tertiary">Live run in progress — status updates via SSE.</p>
           ) : null}
           {startError ? (
-            <p role="alert" className="max-w-[220px] text-right text-[11.5px] text-medha-danger">{startError}</p>
+            <p role="alert" className="max-w-[240px] text-right text-[12.5px] leading-5 text-medha-text">{startError}</p>
           ) : null}
         </div>
       </div>
@@ -755,12 +801,12 @@ function RunBody({ deploymentId, projectId }: { deploymentId: string; projectId?
           size={40}
         />
         <div className="min-w-0">
-          <h1 className="text-xl font-bold tracking-tight text-medha-text sm:text-2xl">
+          <h1 className="text-[28px] font-semibold tracking-tight text-medha-text">
             {runTitle(snapshot, deploymentId)}
           </h1>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             <StatusLine snapshot={snapshot} />
-            <span className="medha-mono truncate text-[11px] text-medha-tertiary">
+            <span className="medha-mono truncate text-[12px] text-medha-tertiary">
               {deploymentId}
             </span>
           </div>

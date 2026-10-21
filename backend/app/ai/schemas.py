@@ -26,6 +26,7 @@ class ChangeSummary(_Strict):
 
 
 class RepoInterpretation(_Strict):
+    summary: str = Field(default="", max_length=400)
     runtime: str = Field(default="", max_length=80)
     deploy_shape: str = Field(default="", max_length=200)
     implications: list[str] = Field(default_factory=list, max_length=6)

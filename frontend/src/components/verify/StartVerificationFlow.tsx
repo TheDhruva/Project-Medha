@@ -210,7 +210,7 @@ function Flow() {
             disabled={busy}
           />
           {projectId ? (
-            <p className="mt-1 text-[10.5px] text-medha-tertiary">
+            <p className="mt-1 text-[12px] text-medha-tertiary">
               Locked to this project&apos;s configured repository.
               {projectError ? ` ${projectError}` : ""}
             </p>
@@ -244,7 +244,7 @@ function Flow() {
             />
           </div>
         </div>
-        <p className="mt-2 text-[10px] text-medha-tertiary">
+        <p className="mt-2 text-[12.5px] text-medha-tertiary">
           {projectId
             ? "Revisions are optional full commit SHAs. Omit both to run a full analysis of the project's current HEAD."
             : "Change analysis runs against the repository you provide. For local git repositories, revisions scope the change-impact diff; otherwise the deployment proceeds without change-intel."}
@@ -269,7 +269,7 @@ function Flow() {
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-[10.5px] text-medha-tertiary">
+            <p className="mt-1 text-[12px] text-medha-tertiary">
               Multiple applications detected. The selection is saved to project
               settings and used for this run; V1 executes exactly one service.
             </p>

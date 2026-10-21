@@ -19,6 +19,7 @@ from app.core.enums import (
 from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
 from app.ai.redact import redact_text
+from app.analysis.summary import present_repository_summary
 from app.database.repositories import DeploymentRepository, ProjectRepository
 from app.models.deployment import DeploymentRecord, DeploymentRequest, DeploymentResponse
 from app.workflow.planning import schedule_planning_pipeline
@@ -124,6 +125,9 @@ def _run_summary(record: DeploymentRecord) -> dict:
         "error_summary": record.error_summary,
         "ai_outcome": ai.get("outcome") if ai else None,
         "ai_provider": ai.get("provider") if ai else None,
+        "repository_summary": present_repository_summary(
+            result if isinstance(result, dict) else None, record.target_revision
+        ),
     }
 
 
@@ -465,12 +469,14 @@ async def get_repository_intelligence(deployment_id: str, subject: str = Require
             "REPOSITORY_INTEL_NOT_FOUND",
             "No Repository Intelligence has been recorded for this run yet.",
         )
+    analysis = result.get("repository_analysis")
     return JSONResponse(
         {
             "deployment_id": deployment_id,
             "is_demo": record.is_demo,
             "label": "DEMO/MOCK" if record.is_demo else None,
             "repository_intelligence": intel,
+            "repository_analysis": analysis if isinstance(analysis, dict) else None,
         }
     )
 

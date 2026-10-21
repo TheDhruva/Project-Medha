@@ -33,6 +33,7 @@ export function TargetSelectionCard({
   const router = useRouter();
   const code =
     typeof snapshot.result?.code === "string" ? snapshot.result.code : null;
+  const analysis = snapshot.result?.repository_analysis ?? null;
   const isCanonical = (projectId ?? "").startsWith("prj_");
   const [fallback, setFallback] = useState<{
     candidates: TargetCandidateView[];
@@ -107,7 +108,7 @@ export function TargetSelectionCard({
       aria-label="Deployment target required"
       className="rounded-xl border border-medha-danger/25 bg-white p-5 sm:p-6"
     >
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+      <p className="medha-label">
         Action needed
       </p>
       <h2 className="mt-1 text-lg font-semibold tracking-tight text-medha-text">
@@ -117,6 +118,31 @@ export function TargetSelectionCard({
         {snapshot.result?.message ??
           "This repository contains multiple applications. V1 deploys exactly one service per run."}
       </p>
+      {analysis ? (
+        <div className="mt-3 rounded-lg border border-medha-border bg-medha-muted/40 p-3">
+          <p className="medha-label">
+            Repository analysis
+          </p>
+          <p className="mt-1 text-[13px] text-medha-secondary">
+            Analysis {analysis.analysis_status ?? "completed"} across{" "}
+            {analysis.applications?.length ?? 0} application
+            {(analysis.applications?.length ?? 0) === 1 ? "" : "s"}. Only the
+            deployment is blocked, on the target choice above.
+          </p>
+          {analysis.languages?.length ? (
+            <p className="medha-mono mt-1 break-all text-[12.5px] leading-5 text-medha-secondary">
+              Languages: {analysis.languages.map((l) => l.language).join(", ")}
+            </p>
+          ) : null}
+          {analysis.coverage?.gaps?.length ? (
+            <ul className="mt-1 list-disc pl-4 text-[12.5px] leading-5 text-medha-secondary">
+              {analysis.coverage.gaps.slice(0, 4).map((g) => (
+                <li key={g}>{g}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
       {candidates.length > 0 ? (
         <ul className="mt-3 space-y-2">
           {candidates.map((c) => {
@@ -142,7 +168,7 @@ export function TargetSelectionCard({
                     <span className="medha-mono block truncate text-[13px] font-semibold text-medha-text">
                       {c.path}
                       {activeTarget === c.path && !selected ? (
-                        <span className="ml-2 rounded bg-medha-muted px-1.5 py-0.5 text-[10.5px] font-medium text-medha-secondary">
+                        <span className="ml-2 rounded bg-medha-muted px-1.5 py-0.5 text-[12.5px] font-medium text-medha-secondary">
                           saved target
                         </span>
                       ) : null}
@@ -153,7 +179,7 @@ export function TargetSelectionCard({
                       </span>
                     ) : null}
                     {c.evidence.length > 0 ? (
-                      <span className="medha-mono mt-0.5 block truncate text-[11px] text-medha-tertiary">
+                      <span className="medha-mono mt-0.5 block break-all text-[12px] leading-4 text-medha-secondary">
                         {c.evidence.slice(0, 3).join(", ")}
                       </span>
                     ) : null}
@@ -208,7 +234,7 @@ export function TargetSelectionCard({
           {error}
         </p>
       ) : null}
-      <p className="mt-2 text-[11.5px] text-medha-tertiary">
+      <p className="mt-2 text-[12.5px] leading-5 text-medha-tertiary">
         Run {deploymentId.slice(0, 12)}… stays unchanged; the retry is a new
         run with this target.
         {!isCanonical ? (

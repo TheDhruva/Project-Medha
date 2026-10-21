@@ -131,6 +131,37 @@ describe("TargetSelectionCard", () => {
     );
   });
 
+  it("shows the repository-analysis report when deployment is blocked", () => {
+    const base = blockedSnap();
+    render(
+      <TargetSelectionCard
+        snapshot={{
+          ...base,
+          result: base.result
+            ? {
+                ...base.result,
+                analysis_status: "completed",
+                deployment_status: "blocked",
+                repository_analysis: {
+                  analysis_status: "completed",
+                  applications: [{ path: "backend" }, { path: "frontend" }],
+                  languages: [{ language: "python" }, { language: "javascript" }],
+                  coverage: { gaps: ["security:gitleaks: unavailable"] },
+                },
+              }
+            : base.result,
+        }}
+        deploymentId="dep_old"
+        projectId="prj_1"
+      />,
+    );
+    expect(screen.getByText("Repository analysis")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Analysis completed across 2 applications/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/python, javascript/)).toBeInTheDocument();
+  });
+
   it("falls back to project targets when the run has no candidates", async () => {
     fetchProjectTargetsMock.mockResolvedValue({
       project_id: "prj_1",

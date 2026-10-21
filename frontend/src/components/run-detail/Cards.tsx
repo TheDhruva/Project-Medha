@@ -58,7 +58,7 @@ export function DecisionCard({
         <div className="flex min-w-0 items-start gap-3">
           <Icon className={cn("mt-0.5 h-6 w-6 shrink-0", iconClass)} aria-hidden />
           <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+            <p className="medha-label">
               Decision
             </p>
             <h2 className="mt-0.5 text-xl font-bold tracking-tight text-medha-text sm:text-2xl">
@@ -82,7 +82,7 @@ export function DecisionCard({
         {decision.body}
       </p>
       {decision.risk ? (
-        <p className="mt-2 text-xs text-medha-secondary">
+        <p className="mt-2 text-[13px] leading-5 text-medha-secondary">
           Risk: <span className="font-semibold capitalize text-medha-text">{decision.risk}</span>
         </p>
       ) : null}
@@ -103,7 +103,7 @@ export function JourneyCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
   const steps = getJourney(snapshot);
   return (
     <section aria-label="Verification journey" className="rounded-xl border border-medha-border bg-white p-5 sm:p-6">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+      <p className="medha-label">
         Verification journey
       </p>
       <ol className="mt-3">
@@ -152,10 +152,10 @@ export function formatDuration(seconds: number | null): string {
   return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
 }
 
-function modeLabel(mode: DeploymentSnapshot["executionMode"]): string | null {
+export function modeLabel(mode: DeploymentSnapshot["executionMode"]): string | null {
   switch (mode) {
     case "real":
-      return "Real";
+      return "Real execution";
     case "simulator":
       return "Simulated";
     case "controlled_test":
@@ -164,6 +164,28 @@ function modeLabel(mode: DeploymentSnapshot["executionMode"]): string | null {
       return "Demo";
     case "unconfigured":
       return "Not configured";
+    default:
+      return null;
+  }
+}
+
+/** Remediation grounded in the actual build error code (never credentials). */
+export function buildRemediation(code: string | null | undefined): string | null {
+  switch (code) {
+    case "ERESOLVE":
+      return "A peer-dependency conflict. The repository likely needs its .npmrc (e.g. legacy-peer-deps=true) or a compatible dependency version — not a forced install.";
+    case "EUSAGE":
+      return "package.json and the lockfile are out of sync; regenerate the lockfile in the repository.";
+    case "EBADENGINE":
+      return "The app declares a Node.js engine the build image does not satisfy.";
+    case "ETIMEDOUT":
+    case "ENOTFOUND":
+    case "EAI_AGAIN":
+      return "Registry/network access failed during install; check connectivity and any private registry config.";
+    case "ENOENT":
+      return "A required file (lockfile or workspace manifest) is missing from the build context.";
+    case "ELIFECYCLE":
+      return "A dependency lifecycle/build script failed; inspect the build output tail.";
     default:
       return null;
   }
@@ -215,13 +237,13 @@ export function SummaryRow({ snapshot }: { snapshot: DeploymentSnapshot }) {
   if (items.length === 0) return null;
   return (
     <section aria-label="Run summary" className="rounded-xl border border-medha-border bg-white px-5 py-4">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+      <p className="medha-label">
         Run summary
       </p>
       <dl className="mt-2 flex flex-wrap gap-x-8 gap-y-2">
         {items.map((item) => (
           <div key={item.label} className="min-w-[90px]">
-            <dt className="text-xs text-medha-secondary">{item.label}</dt>
+            <dt className="text-[13px] text-medha-secondary">{item.label}</dt>
             <dd className="text-[15px] font-semibold text-medha-text">{item.value}</dd>
           </div>
         ))}
@@ -241,10 +263,10 @@ export function SectionShell({
 }) {
   return (
     <section className="rounded-xl border border-medha-border bg-white p-5 sm:p-6">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+      <p className="medha-label">
         {eyebrow}
       </p>
-      <h2 className="mt-1 text-lg font-semibold tracking-tight text-medha-text">{title}</h2>
+      <h2 className="mt-1 text-[18px] font-semibold tracking-tight text-medha-text">{title}</h2>
       <div className="mt-3">{children}</div>
     </section>
   );
@@ -275,15 +297,15 @@ export function CollapsibleShell({
         className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition hover:bg-medha-muted/50"
       >
         <span className="min-w-0">
-          <span className="block text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+          <span className="block medha-label">
             {eyebrow}
           </span>
           <span className="mt-0.5 block text-[15px] font-semibold text-medha-text">{title}</span>
           {!open && preview ? (
-            <span className="mt-0.5 block truncate text-[13px] text-medha-secondary">{preview}</span>
+            <span className="mt-0.5 line-clamp-2 block text-[13.5px] leading-5 text-medha-secondary">{preview}</span>
           ) : null}
           {!open && actionLabel ? (
-            <span className="mt-1 inline-flex items-center gap-1 text-[13px] font-medium text-medha-accent">
+            <span className="mt-1 inline-flex items-center gap-1 text-[13.5px] font-medium text-medha-accent">
               {actionLabel} <ChevronDown className="h-3.5 w-3.5" aria-hidden />
             </span>
           ) : null}

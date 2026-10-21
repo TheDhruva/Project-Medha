@@ -330,18 +330,6 @@ async def _start_proposal_analysis(
         is_demo=False,
     )
     try:
-        from app.jobs.worker import enqueue_job
-
-        enqueue_job(
-            repository=repository, branch=branch, target_sha=sha,
-            base_sha=base_sha,
-            project_id=project.project_id if project is not None else None,
-            delivery_id=f"github:{delivery_id}:{proposal_id}",
-            deployment_id=deployment_id,
-        )
-    except Exception:  # noqa: BLE001 - job row is advisory; proposal is truth
-        logger.warning("Job enqueue failed for proposal=%s", proposal_id)
-    try:
         repo.create(record)
         created = make_event(
             deployment_id=deployment_id,
@@ -356,18 +344,30 @@ async def _start_proposal_analysis(
         )
         repo.add_event(created)
         await event_bus.publish(created)
-        task = schedule_planning_pipeline(
-            deployment_id, repo=repo, plan_only=True, proposal_id=proposal_id
-        )
-        try:
-            task.add_done_callback(
-                lambda t, pid=proposal_id, did=deployment_id: _settle_proposal(pid, did, t)
-            )
-        except AttributeError:
-            pass
     except Exception as exc:
-        logger.warning("Proposal analysis schedule failed: %s", type(exc).__name__)
+        logger.warning("Proposal record creation failed: %s", type(exc).__name__)
         proposals.update(proposal_id, status=ProposalStatus.FAILED.value)
+        return None
+
+    # The durable worker owns the analysis: it claims this job, runs the real
+    # plan-only pipeline, and marks the job succeeded only after persistence.
+    try:
+        from app.jobs.worker import enqueue_job
+
+        enqueue_job(
+            repository=repository, branch=branch, target_sha=sha,
+            base_sha=base_sha,
+            project_id=project.project_id if project is not None else None,
+            delivery_id=f"github:{delivery_id}:{proposal_id}",
+            deployment_id=deployment_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - no job means no analysis: fail closed
+        logger.warning("Job enqueue failed for proposal=%s", proposal_id)
+        proposals.update(proposal_id, status=ProposalStatus.FAILED.value)
+        repo.update_status(
+            deployment_id, status=DeploymentStatus.FAILED,
+            error_summary="Analysis job could not be queued.", updated_at=utc_now_iso(),
+        )
         return None
 
     logger.info(

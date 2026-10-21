@@ -23,7 +23,7 @@ export function RuntimeLogsPanel({
       aria-label="Runtime logs"
       className="rounded-xl border border-medha-border bg-white p-5 sm:p-6"
     >
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+      <p className="medha-label">
         Runtime logs
       </p>
       <h2 className="mt-1 text-lg font-semibold tracking-tight text-medha-text">
@@ -38,7 +38,7 @@ export function RuntimeLogsPanel({
               : "Container logs are unavailable."}
           </p>
           {logs?.container ? (
-            <p className="medha-mono mt-1 text-[11px] text-medha-tertiary">
+            <p className="medha-mono mt-1 break-all text-[12.5px] leading-5 text-medha-secondary">
               container: {logs.container}
               {logs.code ? ` · ${logs.code}` : ""}
             </p>
@@ -52,7 +52,7 @@ export function RuntimeLogsPanel({
         <p className="mt-3 text-sm text-medha-secondary">
           The container is running but produced no output yet.
           {logs.container ? (
-            <span className="medha-mono mt-1 block text-[11px] text-medha-tertiary">
+            <span className="medha-mono mt-1 block break-all text-[12.5px] leading-5 text-medha-secondary">
               container: {logs.container}
             </span>
           ) : null}
@@ -60,26 +60,26 @@ export function RuntimeLogsPanel({
       ) : (
         <div className="mt-3 space-y-3">
           {logs.container ? (
-            <p className="medha-mono text-[11px] text-medha-tertiary">
+            <p className="medha-mono text-[12.5px] leading-5 text-medha-secondary">
               container: {logs.container}
             </p>
           ) : null}
           {(logs.stdout ?? "") !== "" ? (
             <div>
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
+              <p className="mb-1 medha-label">
                 stdout
               </p>
-              <pre className="medha-mono max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-medha-border bg-medha-muted p-3 text-[11px] leading-relaxed text-medha-text">
+              <pre className="medha-mono max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-medha-border bg-medha-muted p-3 text-[12.5px] leading-relaxed text-medha-text">
                 {logs.stdout}
               </pre>
             </div>
           ) : null}
           {(logs.stderr ?? "") !== "" ? (
             <div>
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
+              <p className="mb-1 medha-label">
                 stderr
               </p>
-              <pre className="medha-mono max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-medha-border bg-medha-muted p-3 text-[11px] leading-relaxed text-medha-text">
+              <pre className="medha-mono max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-medha-border bg-medha-muted p-3 text-[12.5px] leading-relaxed text-medha-text">
                 {logs.stderr}
               </pre>
             </div>

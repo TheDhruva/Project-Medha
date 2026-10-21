@@ -29,6 +29,7 @@ from app.changeintel.models import (
 )
 from app.changeintel.requirements import generate_requirements
 from app.changeintel.risk import assess_risk
+from app.changeintel.symbols import extract_file_symbols
 from app.core.events import utc_now_iso
 from app.core.logging import get_logger
 
@@ -126,6 +127,75 @@ def summarize_push(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ensure_base_commit(checkout_path: Path, base_sha: str) -> bool:
+    """Make the base commit readable in the checkout, fetching it if needed."""
+    from app.changeintel.git_extract import ChangeIntelError, _run_git
+
+    try:
+        _run_git(checkout_path, "cat-file", "-e", f"{base_sha}^{{commit}}")
+        return True
+    except ChangeIntelError:
+        pass
+    try:
+        _run_git(checkout_path, "fetch", "--depth", "1", "origin", base_sha)
+        return True
+    except ChangeIntelError:
+        return False
+
+
+def _precise_file_changes(
+    checkout_path: Path, base_sha: str | None, target_sha: str
+) -> list[FileChange] | None:
+    """Authoritative base→target diff when both commits are readable locally.
+
+    Returns None when the base cannot be analyzed (initial push, shallow clone
+    without the base, missing history) so callers fall back to payload evidence
+    and record the limitation explicitly.
+    """
+    if not base_sha or not _ensure_base_commit(checkout_path, base_sha):
+        return None
+    from app.changeintel.git_extract import ChangeIntelError, extract_changeset
+
+    try:
+        return extract_changeset(checkout_path, base_sha, target_sha, "webhook_push").files
+    except ChangeIntelError:
+        return None
+
+
+def _load_base_symbols(
+    checkout_path: Path, base_sha: str | None, files: list[FileChange]
+) -> tuple[dict[str, Symbol], str | None]:
+    """Reconstruct base-revision symbols for the files the change set touches.
+
+    Returns ``(symbols, note)``. ``note`` is None when the baseline was
+    genuinely empty (initial push) or successfully analyzed; otherwise it is an
+    explicit coverage limitation so an empty baseline is never silently
+    substituted for an unreadable one.
+    """
+    needs_base = any(
+        fc.change_type in (ChangeType.MODIFIED, ChangeType.DELETED, ChangeType.RENAMED)
+        for fc in files
+    )
+    if not needs_base or not base_sha:
+        return {}, None
+    from app.changeintel.git_extract import read_blob
+
+    if not _ensure_base_commit(checkout_path, base_sha):
+        return {}, (
+            f"base-revision {base_sha[:12]} unavailable: symbol-level deletions "
+            "and renames are not detected (heuristic)"
+        )
+    base: dict[str, Symbol] = {}
+    for fc in files:
+        rel = fc.old_path if fc.change_type == ChangeType.RENAMED and fc.old_path else fc.path
+        content = read_blob(checkout_path, base_sha, rel)
+        if content is None:
+            continue  # added file, or path absent at base — expected
+        for sym in extract_file_symbols(rel, content).symbols:
+            base[sym.symbol_id] = sym
+    return base, None
+
+
 def analyze_push_checkout(
     *,
     repository_url: str,
@@ -135,33 +205,50 @@ def analyze_push_checkout(
     checkout_path: Path,
     deployment_id: str | None = None,
 ) -> ChangeImpactAnalysis:
-    """Build a ChangeImpactAnalysis from payload files + the checked-out tree.
+    """Build a ChangeImpactAnalysis from the checkout, verified against payload.
 
-    Payload-claimed files are verified against the tree: present files are
-    analyzed (symbols indexed from the checkout), missing files are listed in
-    ``unsupported`` with a ``missing-in-tree`` note instead of being trusted.
+    When the base commit is readable in the checkout the authoritative
+    ``git diff base..target`` is used (real hunks, renames, deletes). Otherwise
+    the verified push payload is used and the unreadable baseline is recorded
+    as a coverage limitation. Payload-claimed files absent from the tree are
+    listed in ``unsupported`` with a ``missing-in-tree`` note, never trusted.
     """
+    precise = _precise_file_changes(checkout_path, base_sha, target_sha)
     verified: list[FileChange] = []
     missing: list[str] = []
-    for entry in files:
-        rel = entry.get("path", "")
-        change_type = entry.get("change_type") or ChangeType.MODIFIED.value
-        try:
-            ctype = ChangeType(change_type)
-        except ValueError:
-            ctype = ChangeType.MODIFIED
-        if ctype == ChangeType.DELETED:
-            verified.append(FileChange(path=rel, change_type=ctype))
-            continue
-        candidate = (checkout_path / rel).resolve()
-        try:
-            inside = checkout_path.resolve() in candidate.parents
-        except OSError:
-            inside = False
-        if inside and candidate.is_file():
-            verified.append(FileChange(path=rel, change_type=ctype))
-        else:
-            missing.append(f"{rel} (payload-claimed, missing in checked-out tree)")
+    if precise is not None:
+        verified = precise
+        for entry in files:
+            rel = entry.get("path", "")
+            if not rel:
+                continue
+            candidate = (checkout_path / rel).resolve()
+            try:
+                inside = checkout_path.resolve() in candidate.parents
+            except OSError:
+                inside = False
+            if not inside or not candidate.is_file():
+                missing.append(f"{rel} (payload-claimed, missing in checked-out tree)")
+    else:
+        for entry in files:
+            rel = entry.get("path", "")
+            change_type = entry.get("change_type") or ChangeType.MODIFIED.value
+            try:
+                ctype = ChangeType(change_type)
+            except ValueError:
+                ctype = ChangeType.MODIFIED
+            if ctype == ChangeType.DELETED:
+                verified.append(FileChange(path=rel, change_type=ctype))
+                continue
+            candidate = (checkout_path / rel).resolve()
+            try:
+                inside = checkout_path.resolve() in candidate.parents
+            except OSError:
+                inside = False
+            if inside and candidate.is_file():
+                verified.append(FileChange(path=rel, change_type=ctype))
+            else:
+                missing.append(f"{rel} (payload-claimed, missing in checked-out tree)")
     changeset = ChangeSet(
         base_revision=(base_sha or target_sha)[:12],
         target_revision=target_sha[:12],
@@ -173,7 +260,9 @@ def analyze_push_checkout(
         unsupported_files=missing,
     )
     index = build_index(checkout_path)
-    base_side: dict[str, Symbol] = {}
+    base_side, base_note = _load_base_symbols(checkout_path, base_sha, verified)
+    if base_note:
+        changeset.unsupported_files.append(base_note)
     changed_symbols = cig_builder.detect_changed_symbols(changeset, index, base_side)
     graph, traversal, unresolved = cig_builder.build_cig(
         changeset, changed_symbols, index, base_side

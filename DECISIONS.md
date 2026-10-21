@@ -603,3 +603,30 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
   includes the contracted mapping. Successful-container lifecycle, CEG,
   rollback, and security checks are untouched.
 - **Status:** Accepted
+
+## ADR-043 - Evidence-backed project scorecards (`scores-v2`)
+
+- **Decision:** Replace the 100-minus-runtime-deductions scorecard with four
+  independently computed categories: `code_quality`, `security`,
+  `verification_confidence`, `deployment_readiness` (plus the existing
+  `performance`/`optimization`). Inputs are stored repository analysis
+  (inventory, scanner findings, change intelligence) and stored run artifacts
+  (verification, execution, health). Every check records `status`
+  (`passed`/`failed`/`warning`/`not_assessed`), severity, finding, evidence
+  source, reference, and score impact; unavailable scanners and unrun health
+  probes are `not_assessed`, never passes. Coverage caps (no static analysis
+  80, missing security scanners 60, missing health 75, unverified execution
+  60, critical blocker 25) stop unknown areas from scoring full. The frontend
+  renders backend values only (no local recomputation) and labels coverage,
+  source revision, stale snapshots, in-progress assessments, and demo data.
+- **Why:** The old cards were indistinguishable from a perfect 100 on every
+  project because they only deducted for generated-plan/runtime problems and
+  never consumed repository analysis. Security/health were reported green
+  even when no scanner or health probe ran.
+- **Consequences:** Score version bumps to `scores-v2`; snapshots remain in
+  the existing `scores` table (no migration). Repeated requests with the same
+  inputs/version reuse the stored snapshot. Simulator/demo results are capped
+  and labelled; missing evidence shows `Not assessed` instead of a perfect
+  score. Verification confidence uses the 9 required verifier checks; the
+  optional `change_impact` check does not affect it.
+- **Status:** Accepted

@@ -2,8 +2,18 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { Code2, Rocket, ShieldCheck, Verified } from "lucide-react";
-import { scoreTone, type ScorecardMetric } from "@/lib/projects/metrics";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock3,
+  Code2,
+  MinusCircle,
+  Rocket,
+  ShieldCheck,
+  Verified,
+  XCircle,
+} from "lucide-react";
+import { scoreTone, type ScorecardMetric, type ScorecardStatus } from "@/lib/projects/metrics";
 import { cn } from "@/lib/ui/cn";
 
 const TONE_CLASSES = {
@@ -19,6 +29,22 @@ const ICONS = {
   verification: Verified,
   readiness: Rocket,
 } as const;
+
+const STATUS_ICONS = {
+  healthy: CheckCircle2,
+  warning: AlertTriangle,
+  critical: XCircle,
+  not_assessed: MinusCircle,
+  stale: Clock3,
+} as const;
+
+const STATUS_CLASSES: Record<ScorecardStatus, string> = {
+  healthy: "text-medha-success-ink",
+  warning: "text-medha-warning",
+  critical: "text-medha-danger",
+  not_assessed: "text-medha-tertiary",
+  stale: "text-medha-warning",
+};
 
 function formatMs(ts: string | null): string | null {
   if (!ts) return null;
@@ -100,7 +126,7 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
         y="55"
         textAnchor="middle"
         className={cn(
-          "font-display text-[20px] font-bold",
+          "font-display text-[22px] font-semibold",
           clamped == null ? "fill-medha-tertiary" : tone.fill,
         )}
       >
@@ -113,34 +139,77 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
 export function MetricCard({ metric }: { metric: ScorecardMetric }) {
   const assessed = formatMs(metric.assessedAt);
   const Icon = ICONS[metric.id] ?? Code2;
+  const StatusIcon = STATUS_ICONS[metric.status];
   const toneText =
-    metric.value == null ? "text-medha-tertiary" : TONE_CLASSES[scoreTone(metric.value)].text;
+    metric.value == null || metric.stale
+      ? "text-medha-tertiary"
+      : TONE_CLASSES[scoreTone(metric.value)].text;
+  const coverage = metric.coverage
+    ? `Assessment coverage: ${metric.coverage.assessed}/${metric.coverage.applicable} checks`
+    : null;
+  const revisionNote = [
+    assessed ? `Assessed ${assessed}` : "No assessment recorded",
+    metric.revision ? metric.revision : null,
+    metric.stale ? "not current revision" : null,
+    metric.refreshing ? "new assessment in progress" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <Link
       href={metric.href}
-      aria-label={`${metric.title}: ${metric.value == null ? "not assessed" : `${metric.value} of 100`}. ${metric.evidence}`}
-      className="group flex flex-col rounded-lg border border-medha-border bg-medha-surface p-3 text-left transition hover:border-medha-accent/50 hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+      aria-label={`${metric.title}: ${
+        metric.value == null ? "not assessed" : `${metric.value} of 100`
+      }, ${metric.statusLabel}. ${metric.evidence}${coverage ? `. ${coverage}` : ""}`}
+      data-status={metric.status}
+      className={cn(
+        "group flex h-full flex-col rounded-lg border bg-medha-surface p-3.5 text-left transition hover:border-medha-accent/50 hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent",
+        metric.status === "not_assessed" && "border-dashed border-medha-border-strong",
+        metric.status === "stale" && "border-medha-warning/40",
+        metric.status === "critical" && "border-medha-danger/30",
+        metric.status !== "not_assessed" && metric.status !== "stale" && metric.status !== "critical" && "border-medha-border",
+      )}
     >
-      <div className="flex items-center gap-1.5">
-        <Icon className="h-3.5 w-3.5 shrink-0 text-medha-secondary" aria-hidden />
-        <p className="medha-label truncate">{metric.title}</p>
+      <div className="flex items-start gap-2">
+        <Icon className="mt-0.5 h-4 w-4 shrink-0 text-medha-secondary" aria-hidden />
+        <p className="min-w-0 flex-1 text-[14.5px] font-semibold leading-5 text-medha-text">{metric.title}</p>
         {metric.isDemo ? (
-          <span className="ml-auto shrink-0 text-[10px] font-semibold text-medha-tertiary">DEMO</span>
+          <span className="shrink-0 rounded border border-medha-border bg-medha-surface-muted px-1.5 py-0.5 text-[11.5px] font-semibold text-medha-secondary">DEMO</span>
         ) : null}
       </div>
-      <div className="mt-1 flex items-center justify-center">
+
+      <div className="mt-1.5 flex items-center justify-center">
         <Gauge value={metric.value} label={metric.title} />
       </div>
-      <p className={cn("text-center text-[12.5px] font-semibold", toneText)}>
+
+      <p className={cn("text-center text-[14px] font-semibold leading-5", toneText)}>
         {metric.value == null ? "Not assessed" : `${metric.value}/100`}
       </p>
-      <p className="mt-1 line-clamp-2 min-h-[30px] text-center text-[11.5px] leading-snug text-medha-secondary">
+
+      <p
+        className={cn(
+          "mt-0.5 flex items-center justify-center gap-1.5 text-center text-[12.5px] font-semibold leading-5",
+          STATUS_CLASSES[metric.status],
+        )}
+      >
+        <StatusIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        {metric.statusLabel}
+      </p>
+
+      <p className="mt-1 line-clamp-3 min-h-[40px] break-words text-center text-[13px] leading-5 text-medha-secondary">
         {metric.evidence}
       </p>
-      <p className="mt-1 truncate text-center text-[10.5px] text-medha-tertiary">
-        {assessed ? `Assessed ${assessed}` : "No assessment recorded"}
-        {metric.revision ? ` · ${metric.revision}` : ""}
-      </p>
+
+      <div className="mt-auto space-y-1 border-t border-medha-border pt-2">
+        {coverage ? (
+          <p className="break-words text-center text-[12px] leading-4 text-medha-secondary">{coverage}</p>
+        ) : null}
+        <p className="break-words text-center text-[12px] leading-4 text-medha-tertiary">{revisionNote}</p>
+        <p className="text-center text-[12.5px] font-semibold text-medha-accent">
+          View findings <span aria-hidden>→</span>
+        </p>
+      </div>
     </Link>
   );
 }

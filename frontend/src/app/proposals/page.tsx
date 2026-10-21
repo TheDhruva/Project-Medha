@@ -94,12 +94,12 @@ export default function ProposalsPage() {
                     <p className="truncate text-sm font-semibold text-medha-text">
                       {proposal.repository} · {proposal.branch}
                     </p>
-                    <p className="medha-mono mt-0.5 text-xs text-medha-tertiary">
+                    <p className="medha-mono mt-0.5 text-[13px] text-medha-tertiary">
                       {proposal.target_sha.slice(0, 12)} · {proposal.proposal_id}
                     </p>
                   </div>
                   <span
-                    className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${statusTone(proposal.status)}`}
+                    className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[12px] font-semibold ${statusTone(proposal.status)}`}
                   >
                     {proposal.status}
                   </span>
@@ -133,7 +133,7 @@ export default function ProposalsPage() {
                   </div>
                 ) : null}
                 {proposal.decided_by ? (
-                  <p className="mt-2 text-xs text-medha-tertiary">
+                  <p className="mt-2 text-[13px] text-medha-tertiary">
                     Decided by {proposal.decided_by}
                     {proposal.decided_at ? ` · ${proposal.decided_at}` : ""}
                   </p>

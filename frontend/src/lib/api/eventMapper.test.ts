@@ -514,17 +514,18 @@ describe("execution mode and runtime logs hydration", () => {
     expect(snap.runtimeLogs?.stdout).toBe("ok");
   });
 
-  it("falls back honestly when the backend sends no mode", () => {
+  it("reports demo for demo runs and unknown (not simulator) without evidence", () => {
     const demo = buildBackendSnapshot({ api: { ...baseApi, is_demo: true } });
     expect(demo.executionMode).toBe("demo");
     expect(demo.runtimeLogs).toBeNull();
-    const sim = buildBackendSnapshot({ api: baseApi });
-    expect(sim.executionMode).toBe("simulator");
+    // No evidence is unknown, never a fabricated "simulator".
+    const unknown = buildBackendSnapshot({ api: baseApi });
+    expect(unknown.executionMode).toBeNull();
   });
 
-  it("never upgrades an unknown mode to real", () => {
+  it("never fabricates a mode from an unrecognized value", () => {
     const snap = buildBackendSnapshot({ api: baseApi, executionMode: "quantum" });
-    expect(snap.executionMode).toBe("simulator");
+    expect(snap.executionMode).toBeNull();
   });
 
   it("reads the mode from the stored result when /logs omits it", () => {

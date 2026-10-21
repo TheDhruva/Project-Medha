@@ -34,6 +34,11 @@ _SYSTEM_BY_KIND: dict[str, str] = {
     ),
     "repo_interpretation": (
         "You interpret deployment manifests for a DevOps reviewer. "
+        "Also write `summary`: 1-2 neutral sentences (max 35 words) stating the "
+        "repository's purpose and primary stack, using only the provided README "
+        "excerpt and manifest evidence. Hedge inference ('appears to', 'manifests "
+        "indicate'). Do not repeat the repository name, URL, or branch, and never "
+        "claim deployment health, security, production readiness, or quality. "
         + _DATA_FRAME
     ),
     "plan_suggestion": (

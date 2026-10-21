@@ -35,7 +35,7 @@ export function AgentActivity() {
         <h2 className="font-display text-sm font-semibold tracking-wide text-medha-text">
           AGENT ACTIVITY
         </h2>
-        <span className="text-[11px] text-medha-tertiary">
+        <span className="text-[12px] text-medha-tertiary">
           {attention.length > 0 ? `${attention.length} need${attention.length === 1 ? "s" : ""} attention` : "all settled"}
         </span>
       </div>
@@ -71,7 +71,7 @@ export function AgentActivity() {
                 </summary>
                 <div className="mt-1 border-t border-medha-border pt-1">
                   <p className="text-[12px] leading-relaxed text-medha-secondary">{agent.activity}</p>
-                  <p className={cn("medha-mono mt-0.5 text-[11px] text-medha-tertiary", !technical && "truncate")}>
+                  <p className={cn("medha-mono mt-0.5 text-[12px] text-medha-tertiary", !technical && "truncate")}>
                     last: {agent.lastEvent}
                   </p>
                 </div>

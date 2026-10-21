@@ -23,14 +23,10 @@ export function Section({
     <section className={cn("rounded-xl border border-medha-border bg-medha-surface p-5 sm:p-6", className)}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          {eyebrow ? (
-            <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
-              {eyebrow}
-            </p>
-          ) : null}
-          <h2 className="mt-1 text-lg font-semibold tracking-tight text-medha-text">{title}</h2>
+          {eyebrow ? <p className="medha-label">{eyebrow}</p> : null}
+          <h2 className="mt-0.5 text-[18px] font-semibold leading-snug tracking-tight text-medha-text">{title}</h2>
           {description ? (
-            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-medha-secondary">
+            <p className="mt-1 max-w-2xl text-[13.5px] leading-relaxed text-medha-secondary">
               {description}
             </p>
           ) : null}
@@ -67,14 +63,10 @@ export function Collapsible({
         className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition hover:bg-medha-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
       >
         <span className="min-w-0">
-          {eyebrow ? (
-            <span className="block text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
-              {eyebrow}
-            </span>
-          ) : null}
-          <span className="mt-0.5 block text-[15px] font-semibold text-medha-text">{title}</span>
+          {eyebrow ? <span className="medha-label block">{eyebrow}</span> : null}
+          <span className="mt-0.5 block text-[16px] font-semibold text-medha-text">{title}</span>
           {description && !open ? (
-            <span className="mt-0.5 block truncate text-[13px] text-medha-secondary">
+            <span className="mt-0.5 line-clamp-2 block text-[13px] leading-5 text-medha-secondary">
               {description}
             </span>
           ) : null}
@@ -108,7 +100,7 @@ export function EnvBadge({ isDemo, size = "md" }: { isDemo: boolean; size?: "sm"
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border font-semibold",
-        size === "sm" ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
+        size === "sm" ? "px-2 py-0.5 text-[11.5px]" : "px-2.5 py-1 text-[12px]",
         isDemo
           ? "border-medha-border bg-medha-muted text-medha-secondary"
           : "border-medha-run/25 bg-medha-run-soft text-medha-run-ink",
@@ -154,7 +146,7 @@ export function ExecutionModeBadge({
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border font-semibold",
-        size === "sm" ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
+        size === "sm" ? "px-2 py-0.5 text-[11.5px]" : "px-2.5 py-1 text-[12px]",
         hot
           ? "border-medha-success/30 bg-medha-success-soft text-medha-success-ink"
           : "border-medha-border bg-medha-muted text-medha-secondary",
@@ -202,7 +194,7 @@ export function StatusBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px] font-semibold",
         cls,
       )}
     >

@@ -7,6 +7,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { EnvBadge } from "@/components/ui/Section";
 import { fetchRunsList, type RunSummary } from "@/lib/api/client";
 import { scenarioDisplayName } from "@/lib/runs/display";
+import { summarizeRunFailure } from "@/lib/projects/projects";
 
 function outcomeFor(status: string): { icon: React.ReactNode; label: string } {
   switch (status) {
@@ -58,9 +59,9 @@ function formatDateTime(iso: string): string {
 
 function conciseOutcome(run: RunSummary): string | null {
   if (run.result_kind === "partial_recovery") return "Recovered with scoped rollback";
-  if (run.result_kind === "failed") return run.error_summary || "Blocked before execution";
+  if (run.result_kind === "failed") return summarizeRunFailure(run);
   if (run.status === "completed") return "All checks passed";
-  if (run.status === "failed") return run.error_summary || "Blocked";
+  if (run.status === "failed") return summarizeRunFailure(run);
   return null;
 }
 
@@ -99,8 +100,8 @@ export function RunsList() {
       <div className="space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-medha-text">Runs</h1>
-            <p className="mt-1 text-sm text-medha-secondary">
+            <h1 className="text-[28px] font-semibold tracking-tight text-medha-text">Runs</h1>
+            <p className="mt-1 text-[14px] text-medha-secondary">
               Every verification Medha has performed, with its decision and evidence.
             </p>
           </div>
@@ -119,22 +120,22 @@ export function RunsList() {
         ) : error ? (
           <section
             role="alert"
-            className="rounded-md border border-medha-danger/30 bg-medha-danger-soft p-4 text-sm text-medha-danger"
+            className="rounded-md border border-medha-danger/30 bg-medha-danger-soft p-4 text-[13.5px] leading-relaxed text-medha-text"
           >
             <p className="font-semibold">Unable to load runs.</p>
             <p className="mt-1">{error}</p>
             <button
               type="button"
               onClick={() => void load()}
-              className="mt-3 rounded-md border border-medha-danger/30 bg-white px-3 py-1.5 text-xs font-semibold text-medha-danger hover:bg-medha-danger-soft"
+              className="mt-3 rounded-md border border-medha-danger/30 bg-white px-3 py-1.5 text-[12.5px] font-semibold text-medha-danger hover:bg-medha-danger-soft"
             >
               Retry
             </button>
           </section>
         ) : runs.length === 0 ? (
           <section className="flex flex-col items-center rounded-md border border-medha-border bg-medha-surface p-8 text-center">
-            <p className="text-[13px] font-semibold text-medha-text">No runs yet.</p>
-            <p className="mt-1 max-w-md text-sm text-medha-secondary">
+            <p className="text-[15px] font-semibold text-medha-text">No runs yet.</p>
+            <p className="mt-1 max-w-md text-[13.5px] leading-relaxed text-medha-secondary">
               Start your first verification to see Medha analyze, resolve, and verify
               a change.
             </p>
@@ -147,7 +148,7 @@ export function RunsList() {
           </section>
         ) : (
           <>
-            <p className="text-xs text-medha-tertiary" aria-live="polite">
+            <p className="text-[12.5px] text-medha-secondary" aria-live="polite">
               {total} run{total === 1 ? "" : "s"}
             </p>
             <section aria-label="Runs">
@@ -163,10 +164,10 @@ export function RunsList() {
                       >
                         {outcome.icon}
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-medium text-medha-text">
+                          <span className="block truncate text-[14.5px] font-semibold text-medha-text">
                             {scenarioDisplayName(run)}
                           </span>
-                          <span className="mt-0.5 block truncate text-xs text-medha-secondary">
+                          <span className="mt-0.5 line-clamp-2 block text-[12.5px] leading-4 text-medha-secondary">
                             {outcome.label}
                             {detail ? ` · ${detail}` : ""}
                             {run.duration_seconds != null

@@ -26,7 +26,7 @@ export function WhatMedhaIsDoing({ showToggle = true }: { showToggle?: boolean }
           />
           <Meta label="Status" value={explain.statusLabel} />
         </dl>
-        <p className="mt-3 text-[11px] text-medha-tertiary">
+        <p className="mt-3 text-[12px] text-medha-tertiary">
           Observable system events only — no fabricated chain-of-thought.
         </p>
       </div>

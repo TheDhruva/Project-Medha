@@ -29,11 +29,34 @@ export function getApiBaseUrl(): string {
 
 let tokenGetter: (() => Promise<string | null>) | null = null;
 
-export function registerAuthTokenGetter(fn: (() => Promise<string | null>) | null): void {
-  tokenGetter = fn;
+/* Resolved once the Clerk token getter has been registered (or immediately
+ * when Clerk is not configured). useProjects/useProjectData await this before
+ * their initial fetch so the Authorization header is present on the very
+ * first request, preventing a 401 on cold start when the token getter
+ * registration effect has not yet run. */
+const authReadySlot: { resolve: (() => void) | null } = { resolve: null };
+export const authReady: Promise<void> = new Promise<void>((resolve) => {
+  authReadySlot.resolve = resolve;
+});
+
+// When Clerk keys are absent (layout renders without ClerkProvider), there is
+// no ClerkTokenSync to register a getter; auth is trivially ready.
+if (typeof process === "object" && process.env && !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+  if (authReadySlot.resolve) {
+    authReadySlot.resolve();
+    authReadySlot.resolve = null;
+  }
 }
 
-async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+export function registerAuthTokenGetter(fn: (() => Promise<string | null>) | null): void {
+  tokenGetter = fn;
+  if (authReadySlot.resolve) {
+    authReadySlot.resolve();
+    authReadySlot.resolve = null;
+  }
+}
+
+export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   try {
     const token = tokenGetter ? await tokenGetter() : null;
@@ -562,6 +585,16 @@ export async function fetchChangeImpact(
 
 // --- Phase 3 Product API (runs list, artifacts, timeline) ---
 
+export interface RepositorySummary {
+  status: "available" | "stale" | "unavailable";
+  text: string | null;
+  source: "ai" | "deterministic" | null;
+  commit_sha: string | null;
+  generated_at: string | null;
+  technologies: string[];
+  ai?: Record<string, unknown> | null;
+}
+
 export interface RunSummary {
   deployment_id: string;
   status: string;
@@ -592,6 +625,8 @@ export interface RunSummary {
   error_summary: string | null;
   ai_outcome?: string | null;
   ai_provider?: string | null;
+  /** Additive: revision-scoped repository summary for the overview header. */
+  repository_summary?: RepositorySummary;
 }
 
 export interface RunsListResponse {

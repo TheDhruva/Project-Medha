@@ -181,25 +181,33 @@ def test_webhook_short_sha_ignored(client, monkeypatch):
 def test_scores_deterministic_and_missing_is_none():
     from app.scores.compute import VERSION, compute_all
 
-    assert VERSION == "scores-v1"
+    assert VERSION == "scores-v2"
     kwargs = dict(verification={"checks": []}, critic=None, change_intel=None)
     first = compute_all(**kwargs)
     second = compute_all(**kwargs)
     assert first == second
+    assert first["code_quality"]["value"] is None
     assert first["deployment_readiness"]["value"] is None
     assert first["security"]["value"] is None
+    assert first["verification_confidence"]["value"] is None
 
 
-def test_scores_security_cap_on_unresolved():
+def test_scores_security_cap_on_secret_finding():
     from app.scores.compute import compute_all
 
     out = compute_all(
-        verification={"checks": []}, critic={"security": 100},
-        change_intel={"risk": {"level": "none", "factors": []},
-                      "requirements": [], "unresolved": [{"path": "x"}]},
+        verification={"checks": []}, critic=None, change_intel=None,
+        repository_analysis={
+            "analysis_status": "completed",
+            "applications": [{"path": "."}],
+            "findings": [{"scanner": "gitleaks", "severity": "high",
+                          "rule_id": "secret", "path": "a", "line": 1,
+                          "message": "secret detected"}],
+            "scanners": [{"name": "gitleaks", "status": "completed_with_findings"}],
+        },
     )
     assert out["security"]["value"] is not None
-    assert out["security"]["value"] <= 85
+    assert out["security"]["value"] <= 30
 
 
 def test_scores_api_and_history(client):
@@ -216,15 +224,21 @@ def test_scores_api_and_history(client):
     r = client.get(f"/api/deploy/{dep_id}/scores")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body["scores"]) == {"deployment_readiness", "performance",
-                                   "optimization", "security"}
+    assert set(body["scores"]) == {
+        "code_quality", "security", "verification_confidence",
+        "deployment_readiness", "performance", "optimization",
+    }
     for entry in body["scores"].values():
-        assert entry["version"] == "scores-v1"
+        assert entry["version"] == "scores-v2"
         assert entry["computed_at"]
         assert entry["inputs_hash"]
+    for name in ("code_quality", "security", "verification_confidence",
+                 "deployment_readiness"):
+        evidence = body["scores"][name]["evidence"]
+        assert "checks" in evidence and "coverage" in evidence
     r2 = client.get("/api/scores/history", params={"run_id": dep_id})
-    assert r2.status_code == 200 and r2.json()["total"] == 4
-    # Reproducible: second fetch returns identical values.
+    assert r2.status_code == 200 and r2.json()["total"] == 6
+    # Reproducible: the stored snapshot is reused while inputs are unchanged.
     r3 = client.get(f"/api/deploy/{dep_id}/scores")
     assert r3.json()["scores"] == body["scores"]
 

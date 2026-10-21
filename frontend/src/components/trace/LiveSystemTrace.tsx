@@ -68,7 +68,7 @@ export function LiveSystemTrace() {
         <h2 className="font-display text-sm font-semibold tracking-wide text-medha-text">
           EVENT TIMELINE
         </h2>
-        <span className="rounded-full bg-medha-warning-soft px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-medha-warning">
+        <span className="rounded-full bg-medha-warning-soft px-2 py-0.5 text-[12.5px] font-semibold uppercase tracking-wide text-medha-warning">
           {source} events · {events.length}
         </span>
       </div>
@@ -92,7 +92,7 @@ export function LiveSystemTrace() {
                 <details>
                   <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
                     <span className="flex flex-wrap items-baseline gap-x-2">
-                      <time className="medha-mono shrink-0 text-[11px] text-medha-tertiary">{event.time}</time>
+                      <time className="medha-mono shrink-0 text-[12px] text-medha-tertiary">{event.time}</time>
                       <span className="min-w-0 flex-1 text-[13px] text-medha-text">
                         <span aria-hidden className={cn("mr-1", DOT[event.tone].replace("bg-", "text-"))}>
                           {GLYPH[event.tone]}
@@ -106,7 +106,7 @@ export function LiveSystemTrace() {
                       {event.message}
                     </p>
                     {event.technical ? (
-                      <p className="medha-mono mt-1 break-words text-[11px] text-medha-tertiary">
+                      <p className="medha-mono mt-1 break-words text-[12px] text-medha-tertiary">
                         {event.technical}
                       </p>
                     ) : null}

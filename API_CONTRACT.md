@@ -294,7 +294,7 @@ tokens, or repository contents appear in this surface.
 | GET | `/api/deploy/{id}/verification` | Stored verification + critic artifacts |
 | GET | `/api/deploy/{id}/rollback` | Stored rollback scope |
 | GET | `/api/deploy/{id}/execution` | Stored result + graph + rollback |
-| GET | `/api/deploy/{id}/scores` | Four versioned evidence-backed scores (`scores-v1`; §18) |
+| GET | `/api/deploy/{id}/scores` | Six versioned evidence-backed scores (`scores-v2`; §18) |
 | GET | `/api/scores/history` | Score history by `run_id` or `project_id` (§18) |
 | GET | `/api/deploy/{id}/health` | Observed runtime health (live probe; `healthy` only on evidence, else `unhealthy`/`unknown`/`test_only`/`demo`) |
 | GET | `/api/config/status` | Presence-only environment diagnostics (booleans, never secret values) + structured `execution_readiness` (`status`/`reason_code`/`message`/`next_actions`/restart & operator flags; §17) |
@@ -538,14 +538,30 @@ their provenance:
 
 ---
 
-## 18. Scores (`scores-v1`)
+## 18. Scores (`scores-v2`)
 
-`GET /api/deploy/{id}/scores` computes four deterministic scores from stored
-evidence and persists snapshots: `deployment_readiness`, `performance`,
-`optimization`, `security`. Higher always means better. Missing evidence
-yields `value: null` (unmeasured), never success. Each entry carries
-`version`, `computed_at`, `inputs_hash`, `target_sha`, and `evidence`.
-`GET /api/scores/history?run_id=…&project_id=…` queries snapshots.
+`GET /api/deploy/{id}/scores` computes six deterministic scores from stored
+evidence and persists snapshots: `code_quality`, `security`,
+`verification_confidence`, `deployment_readiness`, `performance`,
+`optimization`. Higher always means better. Missing evidence yields
+`value: null` (unmeasured), never success. Each entry carries `version`,
+`computed_at`, `inputs_hash`, `target_sha`, and `evidence`; category evidence
+adds `checks`, `coverage`, `top_finding`, `assessed_at`, `revision`, and
+optional `reason`/`caps_applied`. The four UI categories are computed
+independently from repository analysis and stored artifacts:
+
+- `code_quality`: build result (25), repository static analysis (35), secret
+  findings (20), blocker findings (20).
+- `security`: container verification check (30), semgrep (25), trivy (25),
+  gitleaks (20).
+- `verification_confidence`: the 9 required verifier checks; warnings count
+  half, absent required checks are `not_assessed`.
+- `deployment_readiness`: target support (25), application inventory (20),
+  verification gate (25), real execution (20), observed health (10).
+
+Unavailable scanners, skipped checks and unrun health checks are
+`not_assessed`, not passes. Coverage caps keep unknown areas from scoring
+full. `GET /api/scores/history?run_id=…&project_id=…` queries snapshots.
 
 ## 19. Commit history
 

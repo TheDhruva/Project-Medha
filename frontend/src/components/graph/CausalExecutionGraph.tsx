@@ -44,7 +44,7 @@ function CegServiceNode({ data, selected }: NodeProps<CegFlowNode>) {
       style={{ borderColor: colors.border, background: colors.bg, color: colors.text }}
     >
       <Handle type="target" position={Position.Top} className="!bg-medha-accent !h-2 !w-2" />
-      <p className="text-[10px] font-semibold tracking-wide">{node.service}</p>
+      <p className="text-[12.5px] font-semibold tracking-wide">{node.service}</p>
       <p className="mt-0.5 text-xs opacity-80">
         <span aria-hidden>{statusGlyph(node.status)} </span>
         {labelStatus(node.status)}
@@ -100,7 +100,7 @@ export function CausalExecutionGraph() {
             Dependency-aware recovery — research contribution #2
           </p>
         </div>
-        <span className="text-[10px] text-medha-tertiary">Click a node for details</span>
+        <span className="text-[12.5px] text-medha-tertiary">Click a node for details</span>
       </div>
 
       <div className="grid lg:grid-cols-[1fr_280px]">
@@ -225,7 +225,7 @@ export function CausalExecutionGraph() {
                         </span>
                       </span>
                       {viewMode === "technical" && d.note ? (
-                        <span className="medha-mono text-[9px] text-medha-tertiary">{d.note}</span>
+                        <span className="medha-mono text-[12px] text-medha-tertiary">{d.note}</span>
                       ) : null}
                     </li>
                   ))}

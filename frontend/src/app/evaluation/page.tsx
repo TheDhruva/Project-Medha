@@ -62,7 +62,7 @@ export default function EvaluationPage() {
         </div>
 
         <section aria-label="Research contributions" className="rounded-xl border border-medha-border bg-white p-5 sm:p-6">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+          <p className="medha-label">
             Medha research contributions
           </p>
           <div className="mt-3 space-y-4">
@@ -95,7 +95,7 @@ export default function EvaluationPage() {
         </section>
 
         <section aria-label="Measured results" className="rounded-xl border border-medha-border bg-white p-5 sm:p-6">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-medha-tertiary">
+          <p className="medha-label">
             Measured results
           </p>
           <p className="mt-1 text-sm text-medha-secondary">
@@ -167,7 +167,7 @@ export default function EvaluationPage() {
                     }
                   />
                 </dl>
-                <p className="mt-3 text-xs leading-relaxed text-medha-tertiary">
+                <p className="mt-3 text-[13px] leading-relaxed text-medha-tertiary">
                   Seeded CNP cases only. Passing here means the protocol matched expected outcomes
                   on this dataset — not that all real-world conflicts are solved.
                 </p>
@@ -175,7 +175,7 @@ export default function EvaluationPage() {
             ) : (
               <p className="text-sm text-medha-secondary">
                 No evaluation runs available. Click “Run CNP evaluation” or use{" "}
-                <span className="medha-mono text-[11px]">python -m app.evaluation.run_cnp</span>.
+                <span className="medha-mono text-[12px]">python -m app.evaluation.run_cnp</span>.
               </p>
             )}
           </Panel>
@@ -204,7 +204,7 @@ export default function EvaluationPage() {
                     }
                   />
                 </dl>
-                <p className="mt-3 text-xs leading-relaxed text-medha-tertiary">
+                <p className="mt-3 text-[13px] leading-relaxed text-medha-tertiary">
                   {String(ceg.total_cases ?? "—")} CEG scenarios evaluated. On these fixtures,
                   MEDHA scoped rollback affected fewer nodes than the global rollback baseline.
                   Scope efficiency is project-defined — not an established academic metric.
@@ -213,15 +213,15 @@ export default function EvaluationPage() {
             ) : (
               <p className="text-sm text-medha-secondary">
                 No evaluation runs available. Click “Run CEG evaluation” or use{" "}
-                <span className="medha-mono text-[11px]">python -m app.evaluation.run_ceg</span>.
+                <span className="medha-mono text-[12px]">python -m app.evaluation.run_ceg</span>.
               </p>
             )}
           </Panel>
         </div>
 
-        <p className="mt-6 text-xs text-medha-tertiary">{data?.note}</p>
+        <p className="mt-6 text-[13px] text-medha-tertiary">{data?.note}</p>
         {data?.commands ? (
-          <pre className="medha-mono mt-3 overflow-x-auto rounded-xl border border-medha-border bg-white p-3 text-[11px] text-medha-secondary">
+          <pre className="medha-mono mt-3 overflow-x-auto rounded-xl border border-medha-border bg-white p-3 text-[12px] text-medha-secondary">
             {Object.entries(data.commands)
               .map(([k, v]) => `${k}: ${v}`)
               .join("\n")}
@@ -246,7 +246,7 @@ function Contribution({
     <div className="border-l-2 border-medha-border pl-4">
       <h3 className="text-[15px] font-semibold text-medha-text">{title}</h3>
       <p className="mt-1 text-sm leading-relaxed text-medha-text">{simple}</p>
-      <p className="mt-1 text-xs leading-relaxed text-medha-secondary">{technical}</p>
+      <p className="mt-1 text-[13px] leading-relaxed text-medha-secondary">{technical}</p>
     </div>
   );
 }
@@ -263,7 +263,7 @@ function Panel({
   return (
     <section className="rounded-xl border border-medha-border bg-medha-muted/40 p-4">
       <h2 className="text-sm font-semibold text-medha-text">{title}</h2>
-      {subtitle ? <p className="mt-1 text-[11px] text-medha-tertiary">{subtitle}</p> : null}
+      {subtitle ? <p className="mt-1 text-[12px] text-medha-tertiary">{subtitle}</p> : null}
       <div className="mt-3">{children}</div>
     </section>
   );

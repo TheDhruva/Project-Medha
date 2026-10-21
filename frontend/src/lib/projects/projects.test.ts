@@ -14,6 +14,7 @@ import {
   shortNameForRepo,
   shortSha,
   sortProjects,
+  summarizeRunFailure,
 } from "@/lib/projects/projects";
 import { derivePipeline, summarizeVerification } from "@/lib/projects/useProjectData";
 
@@ -429,5 +430,37 @@ describe("derivePipeline", () => {
     expect(byId.preflight.state).toBe("done");
     expect(byId.analyze.state).toBe("active");
     expect(byId.execute.durationMs == null).toBe(true);
+  });
+});
+
+describe("summarizeRunFailure", () => {
+  it("prefixes the backend code in plain language", () => {
+    expect(
+      summarizeRunFailure({ error_code: "BUILD_FAILED", error_summary: "missing AUTH_KEY" }),
+    ).toBe("Build failed: missing AUTH_KEY");
+  });
+
+  it("uses the first meaningful line and strips ANSI", () => {
+    expect(
+      summarizeRunFailure({
+        error_code: null,
+        error_summary: "\u001b[31mREADINESS_FAILED: probe timed out\u001b[0m\ndetails...",
+      }),
+    ).toBe("Application did not become ready: probe timed out");
+  });
+
+  it("never invents a cause when none was recorded", () => {
+    expect(summarizeRunFailure({ error_code: "BUILD_TIMEOUT", error_summary: null })).toBe(
+      "Build timed out.",
+    );
+    expect(summarizeRunFailure({ error_code: null, error_summary: null })).toBe(
+      "No error summary was recorded.",
+    );
+  });
+
+  it("does not duplicate an already-explicit summary", () => {
+    expect(
+      summarizeRunFailure({ error_code: "BUILD_FAILED", error_summary: "Build failed at Dockerfile line 4" }),
+    ).toBe("Build failed at Dockerfile line 4");
   });
 });

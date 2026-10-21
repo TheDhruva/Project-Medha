@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -41,9 +42,43 @@ ALLOWED_VERBS = frozenset(
 
 
 class DockerOpsError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "DOCKER_ERROR") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "DOCKER_ERROR",
+        log: str | None = None,
+        exit_code: int | None = None,
+        error_code: str | None = None,
+        log_truncated: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        # Structured, bounded build diagnostics (never a secret; callers redact).
+        self.log = log
+        self.exit_code = exit_code
+        self.error_code = error_code
+        self.log_truncated = log_truncated
+
+
+# npm's own machine-readable error code embedded in build output, e.g.
+# "npm error code ERESOLVE". Falls back to well-known npm code tokens.
+_NPM_CODE_RE = re.compile(r"npm error code ([A-Z][A-Z0-9_]*)")
+_NPM_KNOWN_RE = re.compile(
+    r"\b(ERESOLVE|EUSAGE|ELIFECYCLE|ENOENT|EACCES|EPERM|EBADENGINE|"
+    r"ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENOSPC|EINTEGRITY)\b"
+)
+
+
+def _npm_error_code(text: str) -> str | None:
+    match = _NPM_CODE_RE.search(text) or _NPM_KNOWN_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _tail(text: str, limit: int) -> str:
+    """Keep the END of a log — where the failing command's error lives."""
+    cleaned = (text or "").strip()
+    return cleaned if len(cleaned) <= limit else "…[earlier output trimmed]\n" + cleaned[-limit:]
 
 
 def docker_cli_available() -> bool:
@@ -435,9 +470,19 @@ def build_image(*, context_dir: str, dockerfile: str, tag: str, timeout: float =
     except OSError as exc:
         raise DockerOpsError(f"Docker CLI error: {exc}", code="OS_ERROR") from exc
     if proc.returncode != 0:
+        # Keep both streams and the TAIL: docker logs the failing npm error at
+        # the end, so a head-truncated blob hides the real cause.
+        combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        npm_code = _npm_error_code(combined)
+        summary = _tail(combined, 800)
+        label = f" (npm {npm_code})" if npm_code else ""
         raise DockerOpsError(
-            f"Image build failed: {(proc.stderr or proc.stdout or '').strip()[:1000]}",
+            f"Image build failed{label} (exit={proc.returncode}): {summary}",
             code="BUILD_FAILED",
+            log=_tail(combined, 8000),
+            exit_code=proc.returncode,
+            error_code=npm_code,
+            log_truncated=len(combined) > 8000,
         )
     inspect = _run(["inspect", "--format", "{{.Id}}", tag], timeout=30, check=False)
     digest = (inspect.stdout or "").strip() if inspect.returncode == 0 else ""

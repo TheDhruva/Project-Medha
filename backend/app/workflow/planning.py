@@ -138,6 +138,7 @@ def _terminal_provenance(
     selected_mode: str,
     port_contract: dict[str, Any] | None,
     repository_intelligence: dict | None = None,
+    repository_analysis: dict | None = None,
 ) -> dict[str, Any]:
     """Explicit run identity for terminal payloads (no inferred mode/revision).
 
@@ -154,6 +155,7 @@ def _terminal_provenance(
         "repository_url": repository_url,
         "port_contract": port_contract,
         "repository_intelligence": repository_intelligence,
+        "repository_analysis": repository_analysis,
     }
 
 
@@ -368,6 +370,11 @@ class PlanningPipeline:
         self._pipeline_t0 = pipeline_t0
         self.tracker = StageTracker()
         self.stage_timings = {}
+        # Comprehensive repository inventory (set after ANALYSIS; advisory).
+        self._repository_analysis: dict | None = None
+        # Immutable SHA bound before analysis; reused for late failure
+        # provenance so a real-execute failure never reads "Revision Unknown".
+        self._resolved_sha: str | None = None
         run_control.clear_run(deployment_id)
         # One shared HTTP client for all AI assists in this run (keep-alive
         # reuse instead of a new TCP/TLS pool per assist). Closed in finally.
@@ -499,6 +506,41 @@ class PlanningPipeline:
                             "simple": "MEDHA pinned the requested revision to an immutable commit.",
                             "technical": (
                                 f"requested_ref={requested_ref} · resolved_sha={resolved_sha}"
+                            ),
+                            "requested_ref": requested_ref,
+                            "resolved_sha": resolved_sha,
+                        },
+                    )
+
+            # Local git checkouts: bind HEAD explicitly when no revision was
+            # requested (or the requested ref did not resolve), so a repository
+            # that actually has history is never reported with an "Unknown"
+            # revision. A non-git local directory stays honestly unbound.
+            # Guard on a real worktree root: a plain sub-directory of some other
+            # checkout must not inherit that enclosing repo's HEAD.
+            _local_root = resolve_local_repo_path(record.repository_url)
+            if (
+                resolved_sha is None
+                and _local_root is not None
+                and (_local_root / ".git").exists()
+            ):
+                try:
+                    resolved_sha = await asyncio.to_thread(
+                        resolve_ref_to_sha, record.repository_url, "HEAD",
+                    )
+                except Exception:  # noqa: BLE001 - local dir without git history
+                    resolved_sha = None
+                if resolved_sha:
+                    await self._emit(
+                        deployment_id,
+                        EventType.SYSTEM_MESSAGE,
+                        f"Source pinned to local HEAD {resolved_sha[:12]}.",
+                        stage=StageId.ANALYZE.value,
+                        metadata={
+                            "simple": "MEDHA bound the local checkout to its current commit.",
+                            "technical": (
+                                f"requested_ref={requested_ref or 'HEAD'} · "
+                                f"resolved_sha={resolved_sha}"
                             ),
                             "requested_ref": requested_ref,
                             "resolved_sha": resolved_sha,
@@ -679,6 +721,7 @@ class PlanningPipeline:
                 )
                 return
             self._record_timing("analyze", analyze_timer.elapsed)
+            self._resolved_sha = resolved_sha
             await self._agent_done(
                 deployment_id, "analyzer", analysis.summary, ok=analysis.ok)
             if self._cancel_observed(deployment_id):
@@ -696,6 +739,11 @@ class PlanningPipeline:
                     _fresh_ci.get("tier"), dict) and _fresh_ci["tier"].get("tier") == 1
             except Exception:
                 _tier_one = False
+            # README prose is evidence for the summary in the same
+            # repo_interpretation call (no extra model call).
+            from app.analysis.summary import read_readme_excerpt
+
+            readme_excerpt = read_readme_excerpt(acquisition.path)
             # change_summary and repo_interpretation are independent payloads
             # (shared budget + semaphore bound them safely) — overlap them.
             # _ai_assist never raises, so gather is latency-only.
@@ -711,7 +759,10 @@ class PlanningPipeline:
                     self._ai_assist(
                         deployment_id,
                         "repo_interpretation",
-                        {"profile": self._dump_profile(profile)},
+                        {
+                            "profile": self._dump_profile(profile),
+                            "readme_excerpt": readme_excerpt,
+                        },
                         ai_ctx,
                         stage=StageId.ANALYZE.value,
                     ),
@@ -773,14 +824,68 @@ class PlanningPipeline:
                 deployment_id, record, acquisition, resolved_sha,
             )
 
+            # Comprehensive, revision-scoped repository inventory. Runs for
+            # every outcome so the analysis report survives even when
+            # deployment is blocked on an explicit target. Never raises.
+            effective_target = deploy_target or profile.inferred_stack.selected_target
+            try:
+                from app.analysis.inventory import build_repository_inventory
+
+                repository_analysis = await asyncio.to_thread(
+                    build_repository_inventory,
+                    acquisition.path,
+                    commit_sha=acquisition.checked_sha or resolved_sha,
+                    selected_target=effective_target,
+                )
+            except Exception as exc:  # noqa: BLE001 - analysis is advisory to the run
+                logger.warning(
+                    "Repository inventory failed deployment_id=%s: %s",
+                    deployment_id, type(exc).__name__,
+                )
+                repository_analysis = {
+                    "schema": "repository-analysis/v1",
+                    "analysis_status": "failed",
+                    "commit_sha": acquisition.checked_sha or resolved_sha,
+                    "applications": [],
+                    "languages": [],
+                    "findings": [],
+                    "tasks": [],
+                    "coverage": {"gaps": [f"inventory build failed: {type(exc).__name__}"]},
+                }
+            repository_analysis["revision"] = {
+                "sha": resolved_sha,
+                "available": bool(resolved_sha),
+                "reason": (
+                    None if resolved_sha
+                    else "no immutable revision bound (local checkout without git history)"
+                ),
+            }
+            # Compact repository summary for the overview header. Reuses the
+            # already-budgeted repo_interpretation note; deterministic fallback
+            # keeps this working with AI disabled. Failure only omits the
+            # summary - the analysis report and prior runs stay intact.
+            try:
+                from app.analysis.summary import build_repository_summary
+
+                note = (ai_ctx.get("notes") or {}).get("repo_interpretation") or {}
+                data = note.get("data") if isinstance(note, dict) else None
+                repository_analysis["summary"] = build_repository_summary(
+                    acquisition.path,
+                    repository_analysis,
+                    ai_summary=data.get("summary") if isinstance(data, dict) else None,
+                    ai_meta=note.get("meta") if isinstance(note, dict) else None,
+                    readme_excerpt=readme_excerpt,
+                )
+            except Exception as exc:  # noqa: BLE001 - summary is advisory
+                logger.warning(
+                    "Repository summary failed deployment_id=%s: %s",
+                    deployment_id, type(exc).__name__,
+                )
+            self._repository_analysis = repository_analysis
+
             support = assess_plan_support(profile, selected_target=deploy_target)
             if not support.supported:
                 stack = profile.inferred_stack
-                candidates = [
-                    {"path": c.path, "technologies": c.technologies, "evidence": c.evidence}
-                    if hasattr(c, "path") else c
-                    for c in []
-                ]
                 details = support.details or {}
                 target_selection = {
                     "candidates": details.get("candidates", [
@@ -802,6 +907,9 @@ class PlanningPipeline:
                     )
                 else:
                     user_message = support.message
+                # Analysis completed; only DEPLOYMENT is blocked. Report both
+                # states separately and keep the analysis report on the run so
+                # a blocked deployment never hides what was discovered.
                 result = {
                     "kind": "failed",
                     "title": support.code or "DEPLOYMENT_UNSUPPORTED",
@@ -815,8 +923,27 @@ class PlanningPipeline:
                     "phase": PHASE_LABEL,
                     "is_demo": False,
                     "code": support.code,
+                    "blocked": True,
+                    "blocked_stage": "analyze",
+                    "analysis_status": repository_analysis.get("analysis_status"),
+                    "deployment_status": "blocked",
+                    "analysis": {
+                        "status": repository_analysis.get("analysis_status"),
+                        "commit_sha": repository_analysis.get("commit_sha"),
+                        "coverage": repository_analysis.get("coverage"),
+                        "finding_count": repository_analysis.get("finding_count", 0),
+                    },
+                    "deployment": {
+                        "status": "blocked",
+                        "code": support.code,
+                        "reason": support.message,
+                        "next_actions": target_selection["next_actions"],
+                    },
+                    "repository_analysis": repository_analysis,
+                    "repository_intelligence": repository_intelligence,
                     "target_selection": target_selection,
                     "deployment_id": deployment_id,
+                    "timings": self._result_timings(),
                 }
                 self.repo.save_artifacts(
                     deployment_id, result=result, updated_at=utc_now_iso()
@@ -1135,6 +1262,7 @@ class PlanningPipeline:
                 intent=record.intent,
                 change_intel=change_intel,
                 repository_intelligence=repository_intelligence,
+                repository_analysis=getattr(self, "_repository_analysis", None),
                 plan_only=plan_only,
                 expected_plan_hash=expected_plan_hash,
                 proposal_id=proposal_id,
@@ -1929,6 +2057,7 @@ class PlanningPipeline:
         intent: str | None,
         change_intel=None,
         repository_intelligence: dict | None = None,
+        repository_analysis: dict | None = None,
         plan_only: bool = False,
         expected_plan_hash: str | None = None,
         proposal_id: str | None = None,
@@ -2489,6 +2618,7 @@ class PlanningPipeline:
                         if port_resolution.get("contract") is not None
                         else None,
                         repository_intelligence=repository_intelligence,
+                        repository_analysis=repository_analysis,
                     ),
                 },
             )
@@ -2532,6 +2662,7 @@ class PlanningPipeline:
                         selected_mode=selected_mode,
                         port_contract=port_contract_dict,
                         repository_intelligence=repository_intelligence,
+                        repository_analysis=repository_analysis,
                     ),
                 },
             )
@@ -2563,6 +2694,7 @@ class PlanningPipeline:
                         selected_mode=selected_mode,
                         port_contract=port_contract_dict,
                         repository_intelligence=repository_intelligence,
+                        repository_analysis=repository_analysis,
                     ),
                 },
             )
@@ -2686,6 +2818,7 @@ class PlanningPipeline:
                 synthetic_services=synthetic_services,
                 expanded_to_canonical=expanded_to_canonical,
                 repository_intelligence=repository_intelligence,
+                repository_analysis=repository_analysis,
                 port_contract=port_contract_dict,
                 selected_mode=selected_mode,
             )
@@ -2915,6 +3048,8 @@ class PlanningPipeline:
             )
             result["phase"] = PHASE_LABEL
             result["timings"] = self._result_timings()
+            result["repository_intelligence"] = repository_intelligence
+            result["repository_analysis"] = repository_analysis
             if self._current_status(deployment_id) == DeploymentStatus.CANCELLED.value:
                 logger.info(
                     "Dropping late rollback terminal for cancelled run deployment_id=%s",
@@ -2994,6 +3129,8 @@ class PlanningPipeline:
         )
         result["phase"] = PHASE_LABEL
         result["timings"] = self._result_timings()
+        result["repository_intelligence"] = repository_intelligence
+        result["repository_analysis"] = repository_analysis
         result["execution_mode"] = "controlled_test" if exec_result.executor == "docker" else exec_result.executor
         result["synthetic_services"] = []
         result["expanded_to_canonical"] = False
@@ -3072,6 +3209,7 @@ class PlanningPipeline:
         synthetic_services: list[str],
         expanded_to_canonical: bool,
         repository_intelligence: dict | None = None,
+        repository_analysis: dict | None = None,
         port_contract: dict[str, Any] | None = None,
         selected_mode: str = "real",
     ) -> None:
@@ -3112,6 +3250,7 @@ class PlanningPipeline:
                             selected_mode=selected_mode,
                             port_contract=port_contract,
                             repository_intelligence=repository_intelligence,
+                            repository_analysis=repository_analysis,
                         ),
                         "plan": canonical_plan, "plan_hash": plan_digest,
                         "phase": PHASE_LABEL, "is_demo": False,
@@ -3180,6 +3319,7 @@ class PlanningPipeline:
                     "plan": canonical_plan, "plan_hash": plan_digest,
                     "phase": PHASE_LABEL, "is_demo": False, "code": exc.code,
                     "repository_intelligence": repository_intelligence,
+                    "repository_analysis": repository_analysis,
                 },
             )
             return
@@ -3191,6 +3331,8 @@ class PlanningPipeline:
             "repository_url": (lambda r: r.repository_url if r else None)(
                 self.repo.get(deployment_id)
             ),
+            "repository_intelligence": repository_intelligence,
+            "repository_analysis": repository_analysis,
             "profile": outcome.profile,
             "image": outcome.image,
             "image_digest": outcome.image_digest,
@@ -3204,6 +3346,11 @@ class PlanningPipeline:
             "phase": PHASE_LABEL,
             "is_demo": False,
             "repository_intelligence": repository_intelligence,
+            "repository_analysis": repository_analysis,
+            # Structured build diagnostics when the build stage failed
+            # (stage/command/exit_code/npm error_code/bounded log tail).
+            "build": outcome.build or None,
+            "timings": self._result_timings(),
         }
         if outcome.ok:
             # Mark CEG app nodes success with real provenance.
@@ -3491,12 +3638,13 @@ class PlanningPipeline:
         # Late-result guard: a cancelled/completed run must never be flipped
         # to failed by a racing stage (cancellation always wins the race).
         # update_status refuses terminal overwrites as a second line of defense.
+        # AWAITING_APPROVAL is intentionally absent: an approved run must be
+        # able to record a real failure (it is a resumable pause, not terminal).
         current_status = self._current_status(deployment_id)
         if current_status is not None and current_status in {
             DeploymentStatus.CANCELLED.value,
             DeploymentStatus.COMPLETED.value,
             DeploymentStatus.PARTIAL_RECOVERY.value,
-            DeploymentStatus.AWAITING_APPROVAL.value,
         }:
             logger.info(
                 "Dropping late failure for terminal run deployment_id=%s status=%s",
@@ -3521,9 +3669,24 @@ class PlanningPipeline:
         payload.setdefault("phase", PHASE_LABEL)
         payload.setdefault("code", technical)
         payload.setdefault("timings", self._result_timings())
+        # Preserve repository-analysis provenance on a late failure (e.g. the
+        # execute stage): a genuine failure must never hide what analysis
+        # already found, nor leave the revision reading "Unknown".
+        _analysis = getattr(self, "_repository_analysis", None)
+        if isinstance(_analysis, dict):
+            payload.setdefault("repository_analysis", _analysis)
+            payload.setdefault("analysis_status", _analysis.get("analysis_status"))
+        _sha = getattr(self, "_resolved_sha", None)
+        if _sha and not payload.get("target_sha"):
+            payload.setdefault("target_sha", _sha)
         tracker = getattr(self, "tracker", None)
         if tracker is not None:
             tracker.fail_remaining(error=message[:200])
+        # Persist the failure result BEFORE flipping to the terminal status: the
+        # post-terminal guard refuses result writes once the run is terminal,
+        # so writing after update_status would drop this enriched payload
+        # (timings + analysis provenance) and keep a thinner earlier result.
+        self.repo.save_artifacts(deployment_id, result=payload, updated_at=utc_now_iso())
         self.repo.update_status(
             deployment_id,
             status=DeploymentStatus.FAILED,
@@ -3533,7 +3696,6 @@ class PlanningPipeline:
             error_summary=message,
             updated_at=utc_now_iso(),
         )
-        self.repo.save_artifacts(deployment_id, result=payload, updated_at=utc_now_iso())
         if run_control.claim_terminal(deployment_id):
             await self._emit(
                 deployment_id,

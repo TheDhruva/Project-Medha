@@ -173,7 +173,7 @@ export function LatestCommitCard({
       eyebrow={commit ? `${shortSha(commit.sha)} · ${formatActivity(commit.committed_at)}` : "Source revision"}
       action={
         commit?.github_url ? (
-          <a href={commit.github_url} target="_blank" rel="noreferrer" className="rounded text-[12px] font-semibold text-medha-accent hover:underline">
+          <a href={commit.github_url} target="_blank" rel="noreferrer" className="rounded text-[13px] font-semibold text-medha-accent hover:underline">
             Open in GitHub →
           </a>
         ) : undefined
@@ -193,21 +193,21 @@ export function LatestCommitCard({
             <GitCommitHorizontal className="mt-0.5 h-4 w-4 shrink-0 text-medha-secondary" aria-hidden />
             <span className="min-w-0">{headline ?? "(no commit message recorded)"}</span>
           </p>
-          <p className="medha-mono text-[12px] text-medha-secondary">
+          <p className="medha-mono text-[13px] text-medha-secondary">
             {shortSha(commit.sha)}{commit.author ? ` · ${commit.author}` : ""}{commit.branch ? ` · ${commit.branch}` : ""}
             {analyzedSha && analyzedSha !== commit.sha ? ` · analyzed ${shortSha(analyzedSha)}` : " · analyzed revision"}
           </p>
           {stale ? (
-            <p className="rounded-lg border border-medha-warning/30 bg-medha-warning-soft px-2.5 py-1.5 text-[12px] text-medha-warning">
+            <p className="rounded-lg border border-medha-warning/30 bg-medha-warning-soft px-2.5 py-1.5 text-[13px] text-medha-warning">
               Showing newest known commit; the selected run analyzed {shortSha(analyzedSha)}.
             </p>
           ) : null}
           {message && message.includes("\n") ? (
-            <p className="line-clamp-2 text-[12.5px] text-medha-secondary">{message.split("\n").slice(1).join(" ").trim()}</p>
+            <p className="line-clamp-3 text-[13.5px] leading-5 text-medha-secondary">{message.split("\n").slice(1).join(" ").trim()}</p>
           ) : null}
           {detail ? (
             <>
-              <p className="text-[12.5px] text-medha-secondary">
+              <p className="text-[13.5px] text-medha-secondary">
                 <span className="font-semibold text-medha-text">+{detail.added} −{detail.deleted}</span>
                 {" · "}{files.length} file{files.length === 1 ? "" : "s"}
                 {dirs.length > 0 ? ` · mostly ${dirs.join(", ")}` : ""}
@@ -215,20 +215,20 @@ export function LatestCommitCard({
               {implications.length > 0 ? (
                 <ul className="space-y-1">
                   {implications.map((i) => (
-                    <li key={i} className="flex items-start gap-1.5 text-[12.5px] text-medha-secondary">
+                    <li key={i} className="flex items-start gap-1.5 text-[13.5px] text-medha-secondary">
                       <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-medha-run-ink" aria-hidden /> {i}
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="text-[12px] text-medha-tertiary">No deployment-sensitive paths detected in this change.</p>
+                <p className="text-[13px] text-medha-tertiary">No deployment-sensitive paths detected in this change.</p>
               )}
               {files.length > 5 ? (
                 <details>
-                  <summary className="cursor-pointer text-[12.5px] font-semibold text-medha-accent">
+                  <summary className="cursor-pointer text-[13.5px] font-semibold text-medha-accent">
                     Show all {files.length} changed files
                   </summary>
-                  <ul className="medha-mono mt-1.5 max-h-40 space-y-0.5 overflow-y-auto text-[11.5px] text-medha-secondary">
+                  <ul className="medha-mono mt-1.5 max-h-40 space-y-0.5 overflow-y-auto text-[12px] text-medha-secondary">
                     {files.map((f) => (
                       <li key={f.path} className="flex justify-between gap-2">
                         <span className="truncate">{f.path}</span>
@@ -238,7 +238,7 @@ export function LatestCommitCard({
                   </ul>
                 </details>
               ) : files.length > 0 ? (
-                <ul className="medha-mono space-y-0.5 text-[11.5px] text-medha-secondary">
+                <ul className="medha-mono space-y-0.5 text-[12px] text-medha-secondary">
                   {top.map((f) => (
                     <li key={f.path} className="flex justify-between gap-2">
                       <span className="truncate">{f.path}</span>
@@ -247,11 +247,11 @@ export function LatestCommitCard({
                   ))}
                 </ul>
               ) : (
-                <p className="text-[12px] text-medha-tertiary">Changed-file detail unavailable for this commit.</p>
+                <p className="text-[13px] text-medha-tertiary">Changed-file detail unavailable for this commit.</p>
               )}
             </>
           ) : (
-            <p className="text-[12px] text-medha-tertiary">
+            <p className="text-[13px] text-medha-tertiary">
               {message ? "Changed-file detail unavailable for this commit." : "Richer summary unavailable — showing recorded metadata only."}
             </p>
           )}
@@ -292,7 +292,7 @@ function useRepoIntel(runId: string | null): { intel: RepositoryIntelResponse | 
 
 function IntelRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex gap-2 text-[12.5px]">
+    <div className="flex gap-2 text-[13.5px]">
       <dt className="w-24 shrink-0 text-medha-tertiary">{label}</dt>
       <dd className="min-w-0 flex-1 text-medha-text">{children}</dd>
     </div>
@@ -313,7 +313,7 @@ export function RepoIntelCard({ runId, detailHref }: { runId: string | null; det
     <Panel
       title="Repository intelligence"
       eyebrow={intel ? `Analyzed ${shortSha(str(r?.commit_sha))}` : "Detected facts"}
-      action={<Link href={detailHref} className="rounded text-[12px] font-semibold text-medha-accent hover:underline">Full analysis →</Link>}
+      action={<Link href={detailHref} className="rounded text-[13px] font-semibold text-medha-accent hover:underline">Full analysis →</Link>}
     >
       {loading ? (
         <p className="text-[13px] text-medha-secondary">Reading analysis…</p>
@@ -336,7 +336,7 @@ export function RepoIntelCard({ runId, detailHref }: { runId: string | null; det
           </IntelRow>
           <IntelRow label="Entry points">
             {strList(r.entry_points).length > 0 ? (
-              <span className="medha-mono text-[12px]">{strList(r.entry_points).slice(0, 2).join(", ")}</span>
+              <span className="medha-mono text-[13px]">{strList(r.entry_points).slice(0, 2).join(", ")}</span>
             ) : unknown}
           </IntelRow>
           <IntelRow label="Services">
@@ -346,22 +346,22 @@ export function RepoIntelCard({ runId, detailHref }: { runId: string | null; det
           </IntelRow>
           <IntelRow label="Ports">
             {numList(runtime.suggested_ports).length > 0 ? (
-              <span className="medha-mono text-[12px]">{numList(runtime.suggested_ports).join(", ")}</span>
+              <span className="medha-mono text-[13px]">{numList(runtime.suggested_ports).join(", ")}</span>
             ) : unknown}
           </IntelRow>
           <IntelRow label="Manifests">
             {strList(deployCfg.manifests_examined).length > 0 ? (
-              <span className="medha-mono text-[12px]">
+              <span className="medha-mono text-[13px]">
                 {(strList(deployCfg.manifests_examined).includes("Dockerfile") || (deployCfg.has_dockerfile as boolean) ? "Dockerfile ✓ · " : "")}
                 {strList(deployCfg.manifests_examined).slice(0, 3).join(", ")}
               </span>
             ) : unknown}
           </IntelRow>
           {strList(r.unknowns).length > 0 ? (
-            <p className="border-t border-medha-border pt-1.5 text-[12px] text-medha-tertiary">{strList(r.unknowns)[0]}</p>
+            <p className="border-t border-medha-border pt-1.5 text-[13px] text-medha-tertiary">{strList(r.unknowns)[0]}</p>
           ) : null}
           {strList(r.unsupported).length > 0 ? (
-            <p className="flex items-start gap-1.5 text-[12px] text-medha-warning">
+            <p className="flex items-start gap-1.5 text-[13px] text-medha-warning">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /> {strList(r.unsupported)[0]}
             </p>
           ) : null}
@@ -405,21 +405,21 @@ export function DeployHealthCard({
     <Panel
       title="Deployment health"
       eyebrow="Observed evidence only"
-      action={<Link href={detailHref} className="rounded text-[12px] font-semibold text-medha-accent hover:underline">Deployments →</Link>}
+      action={<Link href={detailHref} className="rounded text-[13px] font-semibold text-medha-accent hover:underline">Deployments →</Link>}
     >
       <div key={label} className="medha-health-in space-y-2">
         <p>
           <Badge tone={tone}>{label}</Badge>
-          {health?.is_demo ? <span className="ml-2 text-[11px] font-semibold text-medha-tertiary">DEMO/MOCK</span> : null}
+          {health?.is_demo ? <span className="ml-2 text-[12px] font-semibold text-medha-tertiary">DEMO/MOCK</span> : null}
         </p>
-        {health?.reason ? <p className="text-[12.5px] text-medha-secondary">{health.reason}</p> : null}
+        {health?.reason ? <p className="text-[13.5px] text-medha-secondary">{health.reason}</p> : null}
         <dl className="space-y-1.5">
           <IntelRow label="Checked">
             {health?.checked_at ? formatActivity(health.checked_at) : <span className="text-medha-tertiary">No health check recorded</span>}
           </IntelRow>
           <IntelRow label="Container">
             {runtimeLogs?.container || health?.container ? (
-              <span className="medha-mono text-[12px]">{runtimeLogs?.container ?? health?.container}</span>
+              <span className="medha-mono text-[13px]">{runtimeLogs?.container ?? health?.container}</span>
             ) : (
               <span className="text-medha-tertiary">No container observed</span>
             )}
@@ -429,14 +429,14 @@ export function DeployHealthCard({
           ) : null}
         </dl>
         {stderrTail ? (
-          <pre className="medha-mono max-h-20 overflow-y-auto rounded-lg border border-medha-danger/25 bg-medha-danger-soft p-2 text-[11px] text-medha-danger">{stderrTail}</pre>
+          <pre className="medha-mono max-h-20 overflow-y-auto rounded-lg border border-medha-danger/25 bg-medha-danger-soft p-2 text-[12px] leading-4 text-medha-danger">{stderrTail}</pre>
         ) : stdoutTail ? (
-          <pre className="medha-mono max-h-20 overflow-y-auto rounded-lg border border-medha-border bg-medha-muted p-2 text-[11px] text-medha-secondary">{stdoutTail}</pre>
+          <pre className="medha-mono max-h-20 overflow-y-auto rounded-lg border border-medha-border bg-medha-muted p-2 text-[12px] leading-4 text-medha-secondary">{stdoutTail}</pre>
         ) : (
-          <p className="text-[12px] text-medha-tertiary">No recent container logs observed.</p>
+          <p className="text-[13px] text-medha-tertiary">No recent container logs observed.</p>
         )}
         {!health ? (
-          <p className="border-t border-medha-border pt-1.5 text-[12px] text-medha-tertiary">
+          <p className="border-t border-medha-border pt-1.5 text-[13px] text-medha-tertiary">
             Health monitoring has not reported for this run — a running container is not shown as healthy.
           </p>
         ) : null}
@@ -568,11 +568,11 @@ export function EventsCard({ runId, logs }: { runId: string | null; logs: RunLog
           >
             <span className={cn("status-dot mt-1.5", TONE_DOT[e.tone])} aria-hidden />
             <div className="min-w-0 flex-1">
-              <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-[12.5px]">
+              <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-[13.5px]">
                 <span className="font-semibold text-medha-text">{e.label}</span>
-                <time className="shrink-0 text-[11px] text-medha-tertiary">{formatActivity(e.ts)}</time>
+                <time className="shrink-0 text-[12px] text-medha-tertiary">{formatActivity(e.ts)}</time>
               </p>
-              {e.detail ? <p className="mt-0.5 line-clamp-2 break-words text-[12px] text-medha-secondary">{e.detail}</p> : null}
+              {e.detail ? <p className="mt-0.5 line-clamp-2 break-words text-[13px] text-medha-secondary">{e.detail}</p> : null}
             </div>
           </li>
         ))}
@@ -607,13 +607,13 @@ export function FindingsStrip({
             f.tone === "info" && "border-medha-run/25 bg-medha-run-soft",
           )}
         >
-          <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-medha-text">
+          <p className="flex items-center gap-1.5 text-[13.5px] font-semibold text-medha-text">
             {f.tone === "error" ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-medha-danger" aria-hidden /> : null}
             {f.title}
           </p>
-          <p className="mt-0.5 line-clamp-2 text-[12px] text-medha-secondary">{f.body}</p>
+          <p className="mt-0.5 line-clamp-2 text-[13px] text-medha-secondary">{f.body}</p>
           {f.action ? (
-            <Link href={f.action.href} className="mt-0.5 inline-block rounded text-[12px] font-semibold text-medha-accent hover:underline">
+            <Link href={f.action.href} className="mt-0.5 inline-block rounded text-[13px] font-semibold text-medha-accent hover:underline">
               {f.action.label}
             </Link>
           ) : null}

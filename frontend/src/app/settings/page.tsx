@@ -79,7 +79,7 @@ export default function SettingsPage() {
           <dl className="mt-3 grid gap-3 sm:grid-cols-2">
             <div className="rounded-medha-sm border border-medha-border bg-medha-muted px-3 py-2">
               <dt className="medha-label">API base URL</dt>
-              <dd className="medha-mono mt-1 text-xs text-medha-text">{getApiBaseUrl() || "(same origin)"}</dd>
+              <dd className="medha-mono mt-1 text-[13px] text-medha-text">{getApiBaseUrl() || "(same origin)"}</dd>
             </div>
             <div className="rounded-medha-sm border border-medha-border bg-medha-muted px-3 py-2">
               <dt className="medha-label">Health</dt>
@@ -90,7 +90,7 @@ export default function SettingsPage() {
                 />
                 {health == null ? "checking…" : health ? "OK" : "Unreachable"}
               </dd>
-              <p className="mt-0.5 text-xs text-medha-tertiary">{detail}</p>
+              <p className="mt-0.5 text-[13px] text-medha-tertiary">{detail}</p>
             </div>
           </dl>
           <button
@@ -117,17 +117,17 @@ export default function SettingsPage() {
                 <dd className="mt-1 text-sm font-semibold text-medha-text">
                   {ai.enabled ? "AI-assisted (advisory)" : "Rule-based (deterministic)"}
                 </dd>
-                <p className="mt-0.5 text-xs text-medha-tertiary">
+                <p className="mt-0.5 text-[13px] text-medha-tertiary">
                   AI notes are advisory only; deterministic gates always decide.
                 </p>
               </div>
               <div className="rounded-medha-sm border border-medha-border bg-medha-muted px-3 py-2">
                 <dt className="medha-label">Providers</dt>
-                <dd className="medha-mono mt-1 text-xs text-medha-text">
+                <dd className="medha-mono mt-1 text-[13px] text-medha-text">
                   {ai.primary_provider}/{ai.primary_model} → {ai.fallback_provider}/
                   {ai.fallback_model}
                 </dd>
-                <p className="mt-0.5 text-xs text-medha-tertiary">
+                <p className="mt-0.5 text-[13px] text-medha-tertiary">
                   {["groq", "gemini"]
                     .map((name) => {
                       const p = ai.health.providers[name];
@@ -139,7 +139,7 @@ export default function SettingsPage() {
               </div>
             </dl>
           )}
-          <p className="mt-2 text-xs text-medha-tertiary">
+          <p className="mt-2 text-[13px] text-medha-tertiary">
             Budget: {ai?.max_calls_per_run ?? "—"} calls per run · timeout{" "}
             {ai?.request_timeout_seconds ?? "—"}s · max {ai?.max_output_tokens ?? "—"}{" "}
             tokens. Enable with MEDHA_AI_ENABLED + provider keys (server-only env).
@@ -152,20 +152,20 @@ export default function SettingsPage() {
           </h2>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div className="rounded-medha-sm border border-medha-border bg-medha-muted p-3">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-medha-secondary">
+              <p className="medha-label">
                 DEMO / MOCK (removed)
               </p>
-              <p className="mt-1 text-xs leading-relaxed text-medha-text">
+              <p className="mt-1 text-[13px] leading-relaxed text-medha-text">
                 Demo execution was removed from the product. Historical
                 DEMO/MOCK records keep their labels; no new demo runs can be
                 created.
               </p>
             </div>
             <div className="rounded-medha-sm border border-medha-run/25 bg-medha-run-soft p-3">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-medha-run-ink">
+              <p className="text-[12px] font-semibold leading-5 tracking-[0.01em] text-medha-run-ink">
                 REAL / LIVE
               </p>
-              <p className="mt-1 text-xs leading-relaxed text-medha-text">
+              <p className="mt-1 text-[13px] leading-relaxed text-medha-text">
                 Local pipeline against a real local git repository. Analysis, verification,
                 execution, and evidence reflect real Docker/git outcomes. One real deployment at a
                 time.
@@ -187,8 +187,8 @@ export default function SettingsPage() {
               <dl className="mt-3 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-medha-sm border border-medha-border bg-medha-muted px-3 py-2">
                   <dt className="medha-label">Executor mode</dt>
-                  <dd className="medha-mono mt-1 text-xs text-medha-text">{config.executor_mode}</dd>
-                  <p className="mt-0.5 text-[11px] text-medha-tertiary">
+                  <dd className="medha-mono mt-1 text-[13px] text-medha-text">{config.executor_mode}</dd>
+                  <p className="mt-0.5 text-[12px] text-medha-tertiary">
                     Docker execution {config.docker_execute ? "enabled" : "disabled"} · environment {config.env}
                   </p>
                 </div>
@@ -212,7 +212,7 @@ export default function SettingsPage() {
                       : config.execution_readiness.status}
                   </dd>
                   {config.execution_readiness ? (
-                    <p className="medha-mono mt-0.5 text-[11px] text-medha-tertiary">
+                    <p className="medha-mono mt-0.5 text-[12px] text-medha-tertiary">
                       {config.execution_readiness.reason_code}
                     </p>
                   ) : null}
@@ -245,7 +245,7 @@ export default function SettingsPage() {
                   ) : null}
                 </div>
               ) : null}
-              <p className="mt-3 text-xs text-medha-tertiary">
+              <p className="mt-3 text-[13px] text-medha-tertiary">
                 Server-side environment only (MEDHA_EXECUTOR_MODE, MEDHA_DOCKER_EXECUTE).
                 Presence and readiness only — no environment values or secrets are shown here.
               </p>
@@ -276,12 +276,12 @@ export default function SettingsPage() {
           <div className="mt-3 space-y-3">
             <div className="rounded-lg border border-medha-border px-3 py-2.5">
               <p className="text-sm font-medium text-medha-text">Bright theme</p>
-              <p className="text-xs text-medha-secondary">MEDHA V1 ships bright-only; there is no dark mode.</p>
+              <p className="text-[13px] text-medha-secondary">MEDHA V1 ships bright-only; there is no dark mode.</p>
             </div>
             <div className="flex items-center justify-between gap-3 rounded-lg border border-medha-border px-3 py-2.5">
               <div>
                 <p className="text-sm font-medium text-medha-text">Reduce motion</p>
-                <p className="text-xs text-medha-secondary">Disables smooth scrolling and entrance motion.</p>
+                <p className="text-[13px] text-medha-secondary">Disables smooth scrolling and entrance motion.</p>
               </div>
               <button
                 type="button"
@@ -293,7 +293,7 @@ export default function SettingsPage() {
                 <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${reduceMotion ? "left-[22px]" : "left-0.5"}`} aria-hidden />
               </button>
             </div>
-            <p className="text-xs text-medha-secondary">Keyboard: all flows are keyboard-navigable with visible focus. Status is never color-only. Graphs include list alternatives.</p>
+            <p className="text-[13px] text-medha-secondary">Keyboard: all flows are keyboard-navigable with visible focus. Status is never color-only. Graphs include list alternatives.</p>
           </div>
         </section>
 

@@ -19,7 +19,7 @@ export function Pipeline() {
         <h2 className="font-display text-sm font-semibold tracking-wide text-medha-text">
           PIPELINE
         </h2>
-        <span className="text-[11px] text-medha-tertiary">{source} progress</span>
+        <span className="text-[12px] text-medha-tertiary">{source} progress</span>
       </div>
       <ol className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-4">
         {snapshot.pipeline.map((stage) => (
@@ -41,7 +41,7 @@ export function Pipeline() {
               </span>
               <span className="truncate">{stage.label}</span>
             </p>
-            <p className="mt-0.5 truncate text-[10.5px] opacity-80">
+            <p className="mt-0.5 truncate text-[12px] opacity-80">
               {labelStatus(stage.status)}
               {stage.durationMs ? ` · ${(stage.durationMs / 1000).toFixed(1)}s` : ""}
             </p>

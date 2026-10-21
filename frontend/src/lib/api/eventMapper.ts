@@ -56,7 +56,8 @@ export function createRunningSnapshot(
   return {
     deploymentId,
     isDemo: false,
-    executionMode: "controlled_test",
+    // No evidence yet at start: unknown, never a fabricated executor claim.
+    executionMode: null,
     runtimeLogs: null,
     scenario: null,
     runStatus: "running",
@@ -574,14 +575,16 @@ export interface BackendHydrationInput {
 
 /**
  * Resolve how a run actually executed. Explicit backend `execution_mode`
- * (from /logs, falling back to the stored result) wins; otherwise derive
- * honestly from is_demo. Never claims "real" without backend evidence.
+ * (from /logs, falling back to the stored result) wins. When there is no
+ * backend evidence a demo run is "demo"; anything else is `null` (unknown) —
+ * never a fabricated "simulator", so a real failure is never reported as a
+ * simulation and an unknown mode never renders as "real".
  */
 export function resolveExecutionMode(
   executionMode: string | null | undefined,
   result: Record<string, unknown> | null | undefined,
   isDemo: boolean,
-): ExecutionMode {
+): ExecutionMode | null {
   const raw =
     (typeof executionMode === "string" && executionMode) ||
     (typeof result?.["execution_mode"] === "string" ? (result["execution_mode"] as string) : "");
@@ -595,7 +598,7 @@ export function resolveExecutionMode(
   ) {
     return normalized;
   }
-  return isDemo ? "demo" : "simulator";
+  return isDemo ? "demo" : null;
 }
 
 export function buildBackendSnapshot(input: BackendHydrationInput): DeploymentSnapshot {

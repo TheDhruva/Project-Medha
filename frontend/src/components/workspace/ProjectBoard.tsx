@@ -3,34 +3,31 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  ArrowRight,
-  Loader2,
-  PlayCircle,
-  Settings,
-} from "lucide-react";
+import { Loader2, PlayCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { MedhaFace, faceStateFromRun } from "@/components/medha/MedhaFace";
 import { Badge, EmptyState, ErrorBox, Panel, Skeleton } from "@/components/ui/primitives";
-import { ExecutionModeBadge } from "@/components/ui/Section";
+import { DeploymentDetailsPopover } from "@/components/workspace/DeploymentDetailsPopover";
 import { MetricCard } from "@/components/workspace/MetricCard";
+import { OperationalStatus } from "@/components/workspace/OperationalStatus";
 import { PipelineTimeline } from "@/components/workspace/PipelineTimeline";
+import { RepositorySummaryBlock } from "@/components/workspace/RepositorySummaryBlock";
 import {
   DeployHealthCard,
   EventsCard,
   FindingsStrip,
   LatestCommitCard,
   RepoIntelCard,
-  deployStateOf,
 } from "@/components/workspace/DashboardSections";
 import { deriveFindings, deriveScorecards } from "@/lib/projects/metrics";
 import {
   derivePipeline,
-  resolveAgents,
   summarizeVerification,
   useProjectData,
 } from "@/lib/projects/useProjectData";
-import { formatActivity, isRunningStatus } from "@/lib/projects/projects";
+import type { PhaseId } from "@/lib/projects/executionPhases";
+import { canonicalRepoKey, formatActivity, isRunningStatus } from "@/lib/projects/projects";
+import { selectRepositorySummary } from "@/lib/projects/repositorySummary";
 import {
   createProjectRun,
   fetchConfigStatus,
@@ -47,11 +44,6 @@ function statusTone(status: string): "success" | "warning" | "error" | "info" | 
   if (status === "failed" || status === "cancelled") return "error";
   if (isRunningStatus(status)) return "info";
   return "neutral";
-}
-
-function shortSha(v: string | null | undefined): string | null {
-  if (!v) return null;
-  return v.length > 12 ? v.slice(0, 7) : v;
 }
 
 const TABS = [
@@ -73,19 +65,26 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
   const [readiness, setReadiness] = useState<ExecutionReadiness | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [selectedPhase, setSelectedPhase] = useState<PhaseId | null>(null);
 
   const selected = useMemo(
     () => runs.find((r) => r.deployment_id === selectedId) ?? latest,
     [runs, selectedId, latest],
   );
+  const selectedIndex = useMemo(
+    () => (selected ? runs.findIndex((r) => r.deployment_id === selected.deployment_id) : -1),
+    [runs, selected],
+  );
   const verification = useMemo(
     () => summarizeVerification(hydration?.verification ?? null),
     [hydration],
   );
-  const agents = useMemo(
-    () => (hydration ? resolveAgents(hydration, selected?.current_stage ?? null, selected?.status ?? null).agents : []),
-    [hydration, selected],
-  );
+
+  // Phase details belong to one run; never carry them across a run or project switch.
+  useEffect(() => {
+    setSelectedPhase(null);
+  }, [projectId, selected?.deployment_id]);
+
   const pipeline = useMemo(
     () =>
       hydration
@@ -141,23 +140,27 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
     [selected, readiness, verification, securityFailures, conflicts, hydration, pendingApprovals, projectId],
   );
 
-  const configBlocked = pipeline.some((s) => s.state === "blocked" && s.reason === "config");
-  const running = selected ? isRunningStatus(selected.status) : false;
-  const deploy = deployStateOf(selected ?? null, hydration?.health ?? null);
   const blockers = findings.filter((f) => f.tone === "error").length;
-  const lastCompleted = useMemo(
-    () => runs.find((r) => r.status === "completed") ?? null,
-    [runs],
-  );
-  const failingStage = useMemo(() => pipeline.find((s) => s.state === "blocked") ?? null, [pipeline]);
+  const repositorySummary = useMemo(() => selectRepositorySummary(runs), [runs]);
+  const analyzing = latest ? isRunningStatus(latest.status) : false;
+  const repoIdentity = useMemo(() => {
+    if (project) {
+      return {
+        label: `${project.repo_owner}/${project.repo_name}`,
+        href: `https://github.com/${project.repo_owner}/${project.repo_name}`,
+      };
+    }
+    const key = repo ? canonicalRepoKey(repo) : null;
+    return key
+      ? { label: key, href: `https://github.com/${key}` }
+      : { label: repo ?? "", href: null };
+  }, [project, repo]);
   const isCanonical = projectId.startsWith("prj_");
 
   // Score snapshots for the selected run (404/failure → honest "not assessed").
   useEffect(() => {
-    if (!selectedId) {
-      setScores(null);
-      return;
-    }
+    setScores(null);
+    if (!selectedId) return;
     let cancelled = false;
     fetchScores(selectedId)
       .then((value) => {
@@ -226,7 +229,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
       {activeRunHref ? (
         <Link
           href={activeRunHref}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-medha-run/25 bg-medha-run-soft px-3 py-2 text-[13px] font-semibold text-medha-run-ink transition hover:brightness-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-medha-run/25 bg-medha-run-soft px-3 py-2 text-[14px] font-semibold text-medha-run-ink transition hover:brightness-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
         >
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
           View active run
@@ -235,7 +238,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
       {(pendingApprovals.length > 0 || selected?.status === "awaiting_approval") && !activeRunHref ? (
         <Link
           href={`/projects/${projectId}/changes`}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 py-2 text-[13px] font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 py-2 text-[14px] font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
         >
           Review plan ({pendingApprovals.length || 1})
         </Link>
@@ -243,7 +246,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
       {selected?.status === "failed" && runHref ? (
         <Link
           href={runHref}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 py-2 text-[13px] font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 py-2 text-[14px] font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
         >
           Inspect failure
         </Link>
@@ -289,7 +292,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="break-words text-[19px] font-bold leading-tight tracking-tight text-medha-text">{name}</h1>
+                <h1 className="break-words text-[24px] font-semibold leading-tight tracking-tight text-medha-text">{name}</h1>
                 {latest && !loading ? (
                   <span className="inline-flex items-center gap-1.5">
                     <MedhaFace
@@ -304,57 +307,66 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                       size={24}
                     />
                     <Badge tone={statusTone(latest.status)}>{latest.status.replace(/_/g, " ")}</Badge>
-                    {latest.is_demo ? <span className="text-[11px] font-semibold text-medha-tertiary">DEMO/MOCK</span> : null}
+                    {latest.is_demo ? <span className="text-[12px] font-semibold text-medha-tertiary">DEMO/MOCK</span> : null}
                   </span>
                 ) : null}
               </div>
-              <p title={repo} className="medha-mono mt-0.5 truncate text-[12px] text-medha-secondary">
-                {repo}{project?.branch ? ` · ${project.branch}` : ""}
-              </p>
-              {selected && !loading ? (
-                <dl className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-medha-secondary">
-                  <div className="flex gap-1.5">
-                    <dt className="text-medha-tertiary">Run</dt>
-                    <dd className="medha-mono font-medium text-medha-text">{selected.deployment_id.slice(0, 12)}…</dd>
-                  </div>
-                  <div className="flex gap-1.5">
-                    <dt className="text-medha-tertiary">Revision</dt>
-                    <dd className="medha-mono font-medium text-medha-text">{shortSha(selected.target_revision) ?? "—"}</dd>
-                  </div>
-                  <div className="flex gap-1.5">
-                    <dt className="text-medha-tertiary">Pipeline</dt>
-                    <dd className="font-medium text-medha-text">{selected.current_stage ?? selected.status.replace(/_/g, " ")}</dd>
-                  </div>
-                  <div className="flex gap-1.5">
-                    <dt className="text-medha-tertiary">Deployment</dt>
-                    <dd className={cn("font-medium", deploy.tone === "success" ? "text-medha-success-ink" : deploy.tone === "error" ? "text-medha-danger" : "text-medha-text")}>
-                      {deploy.label}
-                    </dd>
-                  </div>
-                  {lastCompleted ? (
-                    <div className="flex gap-1.5">
-                      <dt className="text-medha-tertiary">Last completed</dt>
-                      <dd className="font-medium text-medha-text">{formatActivity(lastCompleted.updated_at)}</dd>
-                    </div>
-                  ) : null}
-                  {blockers > 0 ? (
-                    <div className="flex gap-1.5">
-                      <dt className="text-medha-tertiary">Blockers</dt>
-                      <dd className="font-semibold text-medha-danger">{blockers}</dd>
-                    </div>
-                  ) : null}
-                </dl>
-              ) : null}
+              <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[13px] text-medha-secondary">
+                {repoIdentity.href ? (
+                  <a
+                    href={repoIdentity.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={repo ?? undefined}
+                    className="medha-mono truncate font-medium text-medha-secondary transition hover:text-medha-text hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                  >
+                    {repoIdentity.label}
+                  </a>
+                ) : (
+                  <span title={repo ?? undefined} className="medha-mono truncate">
+                    {repoIdentity.label}
+                  </span>
+                )}
+                {project?.branch ? (
+                  <>
+                    <span className="text-medha-tertiary" aria-hidden>·</span>
+                    <span className="medha-mono text-medha-tertiary">{project.branch}</span>
+                  </>
+                ) : null}
+              </div>
+              <RepositorySummaryBlock
+                summary={repositorySummary.summary}
+                revision={repositorySummary.revision}
+                stale={repositorySummary.stale}
+                loading={loading}
+                analyzing={analyzing}
+              />
             </div>
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <div
+              className="flex shrink-0 flex-wrap items-start justify-end gap-2"
+              data-testid="project-actions"
+            >
               {secondaryActions}
-              <Link
-                href={`/projects/${projectId}/settings`}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 py-2 text-[13px] font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
-              >
-                <Settings className="h-4 w-4" aria-hidden /> Settings
-              </Link>
-              {primaryAction}
+              <div className="flex flex-col items-stretch gap-1.5">
+                {primaryAction}
+                <DeploymentDetailsPopover
+                  projectId={projectId}
+                  runs={runs}
+                  selectedRun={selected ?? null}
+                  selectedIndex={selectedIndex}
+                  health={hydration?.health ?? null}
+                  hydrating={hydrating}
+                  blockers={blockers}
+                  loading={loading && runs.length === 0}
+                  error={error}
+                  executionMode={hydration?.executionMode ?? null}
+                  starting={starting}
+                  canStartRun={Boolean(project)}
+                  onSelectRun={selectRun}
+                  onRetry={refresh}
+                  onStartRun={() => void startRun()}
+                />
+              </div>
             </div>
           </div>
           {/* Secondary navigation — existing routes, no duplicate destinations */}
@@ -365,7 +377,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                 href={tabHref(t.id)}
                 aria-current={t.id === "overview" ? "page" : undefined}
                 className={cn(
-                  "rounded-md px-2.5 py-1 text-[12.5px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent",
+                  "rounded-md px-3 py-1.5 text-[13.5px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent",
                   t.id === "overview"
                     ? "bg-medha-text text-white"
                     : "text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text",
@@ -379,7 +391,8 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
 
         {!backendReachable && !loading ? <ErrorBox message={error ?? "Cannot reach MEDHA backend."} onRetry={() => refresh()} /> : null}
         {startError ? (
-          <p role="alert" className="rounded-lg border border-medha-danger/30 bg-medha-danger-soft px-3.5 py-2 text-[13px] font-medium text-medha-danger">
+          <p role="alert" className="rounded-lg border border-medha-danger/30 bg-medha-danger-soft px-3.5 py-2 text-[13.5px] leading-relaxed text-medha-text">
+            <span className="font-semibold text-medha-danger">Could not start the run. </span>
             {startError}
           </p>
         ) : null}
@@ -409,34 +422,6 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
           />
         ) : (
           <>
-            {/* Run selector — compact */}
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 py-1.5">
-              <label htmlFor="board-run" className="medha-label shrink-0">Run</label>
-              <select
-                id="board-run"
-                value={selected?.deployment_id ?? ""}
-                onChange={(e) => selectRun(e.target.value)}
-                className="min-w-0 max-w-full flex-1 rounded-md border border-medha-border bg-medha-surface px-2 py-1 text-[13px] text-medha-text focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent/30"
-              >
-                {runs.map((r) => (
-                  <option key={r.deployment_id} value={r.deployment_id}>
-                    {r.deployment_id.slice(0, 12)}… · {r.status.replace(/_/g, " ")}
-                  </option>
-                ))}
-              </select>
-              <ExecutionModeBadge mode={hydration?.executionMode} size="sm" />
-              {selected ? (
-                <span className="shrink-0 text-[12px] text-medha-tertiary">
-                  {selected.duration_seconds != null ? `${selected.duration_seconds}s · ` : ""}{formatActivity(selected.updated_at)}
-                </span>
-              ) : null}
-              {selected ? (
-                <Link href={`/projects/${projectId}/runs/${selected.deployment_id}`} className="inline-flex shrink-0 items-center gap-1 rounded text-[13px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
-                  Open run <ArrowRight className="h-3.5 w-3.5" aria-hidden />
-                </Link>
-              ) : null}
-            </div>
-
             {/* Four semicircular assessment cards */}
             <div className="grid grid-cols-2 gap-3 xl:grid-cols-4" aria-label="Run scorecards">
               {scorecards.map((metric) => (
@@ -446,84 +431,30 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
 
             {/* Pipeline + operational status */}
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-              <Panel
-                className="lg:col-span-7"
-                title="Execution pipeline"
-                eyebrow={selected ? `${selected.deployment_id.slice(0, 12)}… · ${selected.current_stage ?? "no stage reported"}` : "Pipeline"}
-                action={<Link href={`/projects/${projectId}/runs`} className="rounded text-[12px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">All executions →</Link>}
-              >
-                <PipelineTimeline
-                  stages={pipeline}
-                  running={running}
-                  blockedHint={
-                    configBlocked && selected
-                      ? `Execution was not attempted (${selected.error_code ?? "execution not configured"}). Analysis and verification completed and remain valid — configure execution in Settings.`
-                      : null
-                  }
-                />
-                {selected?.status === "failed" ? (
-                  <p className="mt-2 border-t border-medha-border pt-2 text-[12.5px] text-medha-secondary">
-                    {failingStage ? <>Failed at <span className="font-semibold text-medha-danger">{failingStage.label}</span>{selected.error_summary ? ` — ${selected.error_summary}` : ""} </> : (selected.error_summary ?? "Run failed. ")}
-                    {runHref ? <Link href={runHref} className="rounded font-semibold text-medha-accent hover:underline">Error details →</Link> : null}
-                  </p>
-                ) : selected?.status === "completed" ? (
-                  <p className="mt-2 border-t border-medha-border pt-2 text-[12.5px] text-medha-secondary">
-                    Execution completed{hydration?.health?.health_status === "healthy" ? " and application health confirmed." : " — application health " + (hydration?.health ? "reported separately." : "not yet confirmed.")}
-                  </p>
-                ) : null}
-                {hydration?.rollback ? (
-                  <p className="mt-1.5 text-[12.5px] text-medha-secondary">
-                    Rollback scope recorded — see <Link href={`/projects/${projectId}/graphs`} className="rounded font-medium text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">Graphs & Impact</Link> for preserved vs rolled-back services.
-                  </p>
-                ) : null}
-              </Panel>
+              <PipelineTimeline
+                projectId={projectId}
+                run={selected ?? null}
+                stages={pipeline}
+                logs={hydration?.logs ?? []}
+                hydrating={hydrating}
+                selectedPhase={selectedPhase}
+                onSelectPhase={setSelectedPhase}
+              />
 
-              <Panel
-                className="lg:col-span-5"
-                title="Operational status"
-                eyebrow="Pipeline vs deployment, kept separate"
-                action={<Link href={`/projects/${projectId}/orchestration`} className="rounded text-[12px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">Activity →</Link>}
-              >
-                <dl className="space-y-1.5 text-[12.5px]">
-                  <div className="flex gap-2"><dt className="w-24 shrink-0 text-medha-tertiary">Pipeline</dt><dd className="font-medium text-medha-text">{selected ? selected.status.replace(/_/g, " ") : "—"}{selected?.current_stage ? ` · ${selected.current_stage}` : ""}</dd></div>
-                  <div className="flex gap-2"><dt className="w-24 shrink-0 text-medha-tertiary">Deployment</dt><dd className="font-medium text-medha-text">{deploy.label}</dd></div>
-                  <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 text-medha-tertiary">Verification</dt>
-                    <dd className="text-medha-text">
-                      {verification ? (
-                        verification.total > 0
-                          ? `${verification.passed === true ? "Passed" : verification.passed === false ? "Failed" : "Inconclusive"} · ${verification.total} checks`
-                          : "No checks recorded"
-                      ) : hydrating ? "Loading…" : "No artifact yet"}
-                      {" · "}<Link href={`/projects/${projectId}/verification`} className="rounded font-medium text-medha-accent hover:underline">details</Link>
-                    </dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 text-medha-tertiary">Negotiation</dt>
-                    <dd className="text-medha-text">
-                      {hydration?.negotiation ? `${hydration.negotiation.status} · round ${hydration.negotiation.round}/${hydration.negotiation.maxRounds}` : hydrating ? "Loading…" : "No CNP artifact"}
-                      {" · "}<Link href={`/projects/${projectId}/constraints`} className="rounded font-medium text-medha-accent hover:underline">constraints</Link>
-                    </dd>
-                  </div>
-                  {pendingApprovals.length > 0 ? (
-                    <div className="flex gap-2"><dt className="w-24 shrink-0 text-medha-tertiary">Approvals</dt><dd><Link href={`/projects/${projectId}/changes`} className="rounded font-medium text-medha-accent hover:underline">{pendingApprovals.length} awaiting decision →</Link></dd></div>
-                  ) : null}
-                </dl>
-                {agents.length > 0 ? (
-                  <ul className="mt-2 grid grid-cols-1 gap-0.5 border-t border-medha-border pt-2">
-                    {agents.filter((a) => a.state !== "idle").slice(0, 4).map((a) => (
-                      <li key={a.id} className="flex items-center gap-2 text-[12px]" title={a.detail}>
-                        <span className={cn("status-dot", a.state === "done" ? "bg-medha-success" : a.state === "active" ? "bg-medha-run medha-stage-pulse" : "bg-medha-danger")} aria-hidden />
-                        <span className="font-medium text-medha-text">{a.label}</span>
-                        <span className="truncate text-medha-tertiary">· {a.state}</span>
-                      </li>
-                    ))}
-                    {agents.every((a) => a.state === "idle") ? (
-                      <li className="text-[12px] text-medha-tertiary">No agent activity observed for this run.</li>
-                    ) : null}
-                  </ul>
-                ) : null}
-              </Panel>
+              <OperationalStatus
+                projectId={projectId}
+                run={selected ?? null}
+                stages={pipeline}
+                logs={hydration?.logs ?? []}
+                hydrating={hydrating}
+                health={hydration?.health ?? null}
+                verification={verification}
+                negotiation={hydration?.negotiation ?? null}
+                rollback={hydration?.rollback ?? null}
+                executionMode={hydration?.executionMode ?? null}
+                selectedPhase={selectedPhase}
+                onClear={() => setSelectedPhase(null)}
+              />
             </div>
 
             {/* Latest commit + events */}
@@ -541,7 +472,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
               <div className="lg:col-span-6">
                 <RepoIntelCard runId={selected?.deployment_id ?? null} detailHref={selected ? `/projects/${projectId}/runs/${selected.deployment_id}` : `/projects/${projectId}/orchestration`} />
               </div>
-              <div className="lg:col-span-6">
+              <div id="deployment-health" className="scroll-mt-20 lg:col-span-6">
                 <DeployHealthCard
                   run={selected ?? null}
                   health={hydration?.health ?? null}
@@ -554,6 +485,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
             {/* Findings + recent runs */}
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
               <Panel
+                id="findings"
                 className="lg:col-span-7"
                 title="Findings"
                 eyebrow={findings.length > 0 ? `${findings.length} open · blockers first` : "Clear"}
@@ -564,11 +496,11 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                 className="lg:col-span-5"
                 title="Recent runs"
                 eyebrow={`${runs.length} recorded`}
-                action={<Link href={`/projects/${projectId}/runs`} className="rounded text-[12px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">All executions →</Link>}
+                action={<Link href={`/projects/${projectId}/runs`} className="rounded text-[13px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">All executions →</Link>}
               >
                 <ol className="divide-y divide-medha-border">
                   {runs.slice(0, 4).map((r) => (
-                    <li key={r.deployment_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 py-1.5 text-[12.5px]">
+                    <li key={r.deployment_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 py-2 text-[13px]">
                       <Badge tone={statusTone(r.status)}>{r.status.replace(/_/g, " ")}</Badge>
                       <Link href={`/projects/${projectId}/runs/${r.deployment_id}`} className="medha-mono min-w-0 truncate rounded font-medium text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
                         {r.deployment_id.slice(0, 12)}…

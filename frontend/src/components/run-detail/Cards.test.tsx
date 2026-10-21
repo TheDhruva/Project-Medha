@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { DecisionCard, SummaryRow } from "@/components/run-detail/Cards";
+import { DecisionCard, SummaryRow, buildRemediation, modeLabel } from "@/components/run-detail/Cards";
 import { createIdleSnapshot } from "@/lib/demo/frames";
 import type { DeploymentSnapshot } from "@/lib/demo/types";
 
@@ -155,10 +155,31 @@ describe("SummaryRow", () => {
       />,
     );
     expect(screen.getByText("Mode")).toBeInTheDocument();
-    expect(screen.getByText("Real")).toBeInTheDocument();
+    expect(screen.getByText("Real execution")).toBeInTheDocument();
     expect(screen.getByText("Duration")).toBeInTheDocument();
     expect(screen.getByText("1m 30s")).toBeInTheDocument();
     expect(screen.queryByText("real", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("maps every mode to a human word and unknown to null (never a token)", () => {
+    expect(modeLabel("real")).toBe("Real execution");
+    expect(modeLabel("simulator")).toBe("Simulated");
+    expect(modeLabel("controlled_test")).toBe("Controlled test");
+    expect(modeLabel("demo")).toBe("Demo");
+    expect(modeLabel("unconfigured")).toBe("Not configured");
+    expect(modeLabel(null)).toBeNull();
+  });
+
+  it("maps known build error codes to grounded remediation only", () => {
+    expect(buildRemediation("ERESOLVE")).toContain(".npmrc");
+    expect(buildRemediation("EUSAGE")).toContain("lockfile");
+    expect(buildRemediation("ETIMEDOUT")).toContain("network");
+    expect(buildRemediation("EBADENGINE")).toContain("engine");
+    expect(buildRemediation("ENOENT")).toContain("missing");
+    expect(buildRemediation("ELIFECYCLE")).toContain("lifecycle");
+    // Unknown codes never invent advice.
+    expect(buildRemediation("EUNKNOWN")).toBeNull();
+    expect(buildRemediation(null)).toBeNull();
   });
 
   it("shows an honest unavailable duration when unmeasured", () => {

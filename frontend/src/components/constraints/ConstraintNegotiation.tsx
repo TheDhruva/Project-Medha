@@ -93,7 +93,7 @@ export function ConstraintNegotiation() {
               onClick={() => setFilter(f)}
               aria-pressed={filter === f}
               className={cn(
-                "rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition",
+                "rounded-md px-2 py-1 text-[12.5px] font-semibold uppercase tracking-wide transition",
                 filter === f
                   ? "bg-medha-accent text-white"
                   : "bg-medha-surface-muted text-medha-secondary hover:text-medha-text",
@@ -118,7 +118,7 @@ export function ConstraintNegotiation() {
             <span aria-hidden>{statusGlyph(primary.status)} </span>
             {primary.summary}
           </p>
-          <p className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-medha-secondary">
+          <p className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[12.5px] text-medha-secondary">
             {negotiation?.method ? <span>Method: <span className="font-medium text-medha-text">{negotiation.method}</span></span> : null}
             {negotiation?.resolution ? <span>Resolution: <span className="font-medium text-medha-text">{negotiation.resolution}</span></span> : null}
             {affectedServices.length > 0 ? <span>Services: {affectedServices.join(", ")}</span> : null}
@@ -128,13 +128,13 @@ export function ConstraintNegotiation() {
 
       {technical && negotiation ? (
         <div className="mt-2.5 rounded-medha-sm border border-medha-border bg-white px-3 py-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-medha-tertiary">
+          <p className="medha-label">
             Negotiation history
           </p>
           <p className="mt-1 text-[12.5px] leading-relaxed text-medha-secondary">
             {(negotiation.technicalNotes ?? []).join(" · ") || negotiation.simpleExplanation}
           </p>
-          <p className="medha-mono mt-1 text-[11px] text-medha-tertiary">
+          <p className="medha-mono mt-1 text-[12px] text-medha-tertiary">
             status={negotiation.status} · {involvedIds.length} involved constraint{involvedIds.length === 1 ? "" : "s"}
           </p>
         </div>
@@ -153,7 +153,7 @@ export function ConstraintNegotiation() {
                   <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12.5px]">
                     <span className="font-semibold text-medha-accent">{c.type}</span>
                     <span className="min-w-0 flex-1 truncate font-medium text-medha-text">{c.summary}</span>
-                    <span className="shrink-0 text-[10px] font-semibold uppercase text-medha-secondary">
+                    <span className="shrink-0 text-[12.5px] font-semibold uppercase text-medha-secondary">
                       <span aria-hidden>{statusGlyph(c.status)} </span>
                       {labelStatus(c.status)}
                     </span>
@@ -161,14 +161,14 @@ export function ConstraintNegotiation() {
                 </summary>
                 <div className="border-t border-medha-border px-3 py-2">
                   <p className="text-[12.5px] text-medha-secondary">{c.detail}</p>
-                  <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-medha-tertiary">
+                  <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[12px] text-medha-tertiary">
                     <span className="medha-mono">{c.id}</span>
                     <span>{c.sourceAgent}</span>
                     <span>priority: {c.priority}</span>
                     {c.service ? <span>service: {c.service}</span> : null}
                   </p>
                   {technical && c.technical ? (
-                    <pre className="medha-mono mt-1.5 overflow-x-auto rounded bg-medha-muted p-2 text-[10.5px] text-medha-secondary">
+                    <pre className="medha-mono mt-1.5 overflow-x-auto rounded bg-medha-muted p-2 text-[12px] text-medha-secondary">
                       {JSON.stringify(c.technical.payload, null, 2)}
                     </pre>
                   ) : null}

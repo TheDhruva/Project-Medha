@@ -19,23 +19,25 @@
   --medha-surface-muted: #F1F5F9;
   --medha-surface-soft: #F8FAFC;
   --medha-surface-raised: #F1F5F9;
-  --medha-border: #E2E8F0;
-  --medha-border-strong: #CBD5E1;
-  --medha-text: #111827;
-  --medha-text-secondary: #64748B;
-  --medha-text-tertiary: #64748B;
-  --medha-accent: #2563EB;
-  --medha-accent-hover: #1D4ED8;
+  --medha-border: #D7E0EA;
+  --medha-border-strong: #B7C4D3;
+  --medha-text: #172033;
+  /* Secondary carries real descriptions; tertiary is metadata only.
+     Both clear WCAG AA on white, canvas, and muted surfaces. */
+  --medha-text-secondary: #475569;
+  --medha-text-tertiary: #5B6779;
+  --medha-accent: #1D4ED8;
+  --medha-accent-hover: #1E40AF;
   --medha-accent-soft: #EFF6FF;
   --medha-accent-ink: #FFFFFF;
-  --medha-run: #2563EB;
+  --medha-run: #1D4ED8;
   --medha-run-soft: #EFF6FF;
-  --medha-run-ink: #1D4ED8;
-  --medha-success: #059669;
+  --medha-run-ink: #1E40AF;
+  --medha-success: #15803D;
   /* Darker green for small text on tinted backgrounds (AA). */
-  --medha-success-ink: #047857;
-  --medha-success-soft: #ECFDF5;
-  --medha-warning: #92400E;
+  --medha-success-ink: #166534;
+  --medha-success-soft: #F0FDF4;
+  --medha-warning: #B45309;
   --medha-warning-soft: #FFFBEB;
   --medha-danger: #B91C1C;
   --medha-danger-soft: #FEF2F2;
@@ -115,8 +117,18 @@ body {
   box-shadow: var(--medha-neu);
 }
 
+/* Section eyebrows and field labels: readable sentence case, not tiny caps. */
 .medha-label {
-  @apply text-[11px] font-medium uppercase tracking-[0.08em] text-medha-secondary;
+  @apply text-[12px] font-semibold leading-5 tracking-[0.01em] text-medha-secondary;
+}
+
+/* Supporting copy and secondary metadata share one predictable scale. */
+.medha-meta {
+  @apply text-[13px] leading-5 text-medha-secondary;
+}
+
+.medha-meta-sm {
+  @apply text-[12px] leading-4 text-medha-tertiary;
 }
 
 .medha-mono {
@@ -162,11 +174,16 @@ button.medha-ghost {
 
 /* Sidebar nav link */
 .sidebar-nav-link {
-  @apply flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text;
+  @apply relative flex h-9 items-center gap-2.5 rounded-md px-3 text-[14px] font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-medha-accent;
 }
 
 .sidebar-nav-link-active {
   @apply bg-medha-accent-soft font-semibold text-medha-accent-hover;
+}
+
+.sidebar-nav-link-active::before {
+  content: "";
+  @apply absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-medha-accent;
 }
 
 /* Empty states */
@@ -181,7 +198,7 @@ button.medha-ghost {
 
 /* Alert badge */
 .alert-badge {
-  @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold;
+  @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-semibold;
 }
 
 /* High contrast focus */

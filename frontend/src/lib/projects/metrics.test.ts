@@ -39,87 +39,132 @@ function readiness(overrides: Partial<ExecutionReadiness> = {}): ExecutionReadin
 
 const NO_SUMMARY = null;
 
-describe("deriveScorecards", () => {
-  const scores = {
+function productScore(overrides: Record<string, unknown> = {}) {
+  return {
+    value: 82,
+    version: "scores-v2",
+    computed_at: "2026-01-01T00:01:00Z",
+    inputs_hash: "abc",
+    target_sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    evidence: {
+      top_finding: "1 high-severity static-analysis finding",
+      coverage: { assessed: 2, applicable: 3, ratio: 0.67 },
+      checks: [
+        {
+          id: "static_analysis",
+          title: "Static analysis",
+          status: "failed",
+          severity: "high",
+          finding: "1 high-severity static-analysis finding",
+          evidence_source: "scanner:semgrep",
+          score_impact: 20,
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+function scoresResponse(overrides: Record<string, unknown> = {}): ScoresResponse {
+  return {
     deployment_id: "dep_1",
     is_demo: false,
     label: null,
     scores: {
-      security: {
-        value: 78,
-        version: "scores-v1",
-        computed_at: "2026-01-01T00:01:00Z",
-        inputs_hash: "abc",
-        target_sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        evidence: { security_failures: 1, critic_security: 65 },
-      },
-      deployment_readiness: {
+      code_quality: productScore(),
+      security: productScore({ value: 78, evidence: { top_finding: "1 high-severity finding", coverage: { assessed: 3, applicable: 4 } } }),
+      verification_confidence: productScore({ value: 95, evidence: { top_finding: "1 warning reduced this score", coverage: { assessed: 9, applicable: 9 } } }),
+      deployment_readiness: productScore({
         value: null,
-        version: "scores-v1",
-        computed_at: "2026-01-01T00:01:00Z",
-        inputs_hash: "abc",
-        target_sha: null,
-        evidence: { reason: "no verification evidence" },
-      },
+        evidence: { reason: "health evidence is unavailable", coverage: { assessed: 3, applicable: 5 } },
+      }),
     },
-  };
+    ...overrides,
+  } as ScoresResponse;
+}
 
-  it("maps artifacts to the four scorecards with real values", () => {
+describe("deriveScorecards", () => {
+  it("maps backend-owned scores and evidence to the four cards", () => {
     const cards = deriveScorecards({
       run: run({ status: "completed" }),
-      verification: {
-        passed: true,
-        score: 95,
-        checks: [
-          { status: "pass" },
-          { status: "pass" },
-          { status: "warning" },
-        ],
-      },
-      critic: {
-        breakdown: { completeness: 82 },
-        recommendation: "WARN",
-        findings: ["one"],
-      },
-      scores: scores as ScoresResponse,
+      scores: scoresResponse(),
       projectId: "prj_1",
     });
     const byId = Object.fromEntries(cards.map((c) => [c.id, c]));
     expect(cards).toHaveLength(4);
     expect(byId["code-quality"].value).toBe(82);
-    expect(byId["code-quality"].evidence).toContain("WARN");
-    expect(byId.verification.value).toBe(95);
-    expect(byId.verification.evidence).toBe("2/3 checks passed · 1 warning");
+    expect(byId["code-quality"].evidence).toContain("high-severity");
+    expect(byId["code-quality"].status).toBe("critical");
+    expect(byId["code-quality"].coverage).toEqual({ assessed: 2, applicable: 3 });
     expect(byId.security.value).toBe(78);
-    expect(byId.security.evidence).toContain("1 security failures");
+    expect(byId.verification.value).toBe(95);
     expect(byId.readiness.value).toBeNull();
-    expect(byId.readiness.evidence).toContain("no verification evidence");
+    expect(byId.readiness.status).toBe("not_assessed");
+    expect(byId.readiness.evidence).toContain("health evidence is unavailable");
     expect(byId.security.revision).toBe("deadbeef");
+    expect(byId["code-quality"].href).toContain("run=dep_1");
+    expect(byId.readiness.href).toContain("/runs/dep_1");
   });
 
-  it("reports unassessed when artifacts are missing — never 0 or 100", () => {
+  it("never falls back to critic/verification when the score snapshot is missing", () => {
     const cards = deriveScorecards({
       run: run(),
-      verification: null,
-      critic: null,
+      verification: { passed: true, score: 100, checks: [{ status: "pass" }] },
+      critic: { breakdown: { completeness: 100 } },
       scores: null,
       projectId: "prj_1",
     });
     for (const card of cards) {
       expect(card.value).toBeNull();
+      expect(card.status).toBe("not_assessed");
       expect(card.evidence.length).toBeGreaterThan(0);
     }
-    const byId = Object.fromEntries(cards.map((c) => [c.id, c]));
-    expect(byId.verification.evidence).toContain("No verification artifact");
-    expect(byId["code-quality"].evidence).toContain("not assessed");
+  });
+
+  it("shows each project's own scores without cross-project reuse", () => {
+    const first = deriveScorecards({
+      run: run({ deployment_id: "dep_1", target_revision: "a".repeat(40) }),
+      scores: scoresResponse(),
+      projectId: "prj_1",
+    });
+    const second = deriveScorecards({
+      run: run({ deployment_id: "dep_2", target_revision: "b".repeat(40) }),
+      scores: {
+        ...scoresResponse(),
+        deployment_id: "dep_2",
+        scores: {
+          code_quality: productScore({ value: 31, target_sha: "b".repeat(40) }),
+          security: productScore({ value: 12, target_sha: "b".repeat(40) }),
+          verification_confidence: productScore({ value: 44, target_sha: "b".repeat(40) }),
+          deployment_readiness: productScore({ value: 20, target_sha: "b".repeat(40) }),
+        },
+      } as ScoresResponse,
+      projectId: "prj_2",
+    });
+    const pick = (cards: ReturnType<typeof deriveScorecards>) =>
+      Object.fromEntries(cards.map((c) => [c.id, c.value]));
+    expect(pick(first)["code-quality"]).toBe(82);
+    expect(pick(second)["code-quality"]).toBe(31);
+    expect(pick(second).security).toBe(12);
+    expect(first[0].href).toContain("/projects/prj_1/");
+  });
+
+  it("marks results from another revision as stale", () => {
+    const cards = deriveScorecards({
+      run: run({ target_revision: "c".repeat(40) }),
+      scores: scoresResponse(),
+      projectId: "prj_1",
+    });
+    const code = cards.find((c) => c.id === "code-quality");
+    expect(code?.stale).toBe(true);
+    expect(code?.status).toBe("stale");
+    expect(code?.statusLabel).toBe("Stale assessment");
   });
 
   it("labels demo runs on every card", () => {
     const cards = deriveScorecards({
       run: run({ is_demo: true }),
-      verification: null,
-      critic: null,
-      scores: null,
+      scores: scoresResponse({ is_demo: true }),
       projectId: "prj_1",
     });
     expect(cards.every((c) => c.isDemo)).toBe(true);
@@ -157,6 +202,10 @@ describe("deriveFindings", () => {
         score: 100,
         total: 5,
         failed: 0,
+        passedCount: 5,
+        assessed: 5,
+        warnings: 0,
+        pending: 0,
         summary: "Verification passed. Execution is allowed.",
         blocking: [],
       },
@@ -190,6 +239,10 @@ describe("deriveFindings", () => {
         score: 40,
         total: 2,
         failed: 1,
+        passedCount: 1,
+        assessed: 2,
+        warnings: 0,
+        pending: 0,
         summary: "Verification failed.",
         blocking: ["compose check failed"],
       },
@@ -209,6 +262,10 @@ describe("deriveFindings", () => {
         score: 100,
         total: 3,
         failed: 0,
+        passedCount: 3,
+        assessed: 3,
+        warnings: 0,
+        pending: 0,
         summary: "ok",
         blocking: [],
       },

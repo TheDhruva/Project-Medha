@@ -266,7 +266,11 @@ def _synthetic_module_symbol(path: str, language: Language) -> Symbol:
 def _remap_path(symbol: Symbol, new_path: str) -> Symbol:
     from pathlib import Path
 
-    name = Path(new_path).stem or symbol.name
+    # A file rename renames the module, not the functions/classes it holds.
+    if symbol.kind == SymbolKind.MODULE:
+        name = Path(new_path).stem or symbol.name
+    else:
+        name = symbol.name
     return Symbol(
         symbol_id=f"{new_path}::{symbol.kind.value}:{name}",
         name=name,

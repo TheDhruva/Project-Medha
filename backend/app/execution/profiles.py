@@ -121,46 +121,16 @@ def render_dockerfile(profile: BuildProfile, *, checkout: Path) -> str:
             f"EXPOSE {profile.port}\n"
         )
     if profile.name in ("node", "nextjs"):
-        pm = (profile.package_manager or "npm").lower()
-        if pm not in {"npm", "pnpm", "yarn"}:
-            raise UnsupportedStack(
-                "UNSUPPORTED_STACK",
-                f"Package manager '{profile.package_manager}' is not supported "
-                "by V1 controlled images (use npm/pnpm/yarn).",
-            )
+        pm = _node_package_manager(profile)
         copy_src = {
-            "npm": "package.json package-lock.json* npm-shrinkwrap.json*",
-            "pnpm": "package.json pnpm-lock.yaml* pnpm-workspace.yaml*",
+            # .npmrc is part of the install contract: a repository that ships
+            # one (e.g. legacy-peer-deps=true) changes npm's resolver, so
+            # omitting it breaks otherwise-valid lockfiles with ERESOLVE.
+            "npm": "package.json package-lock.json* npm-shrinkwrap.json* .npmrc*",
+            "pnpm": "package.json pnpm-lock.yaml* pnpm-workspace.yaml* .npmrc*",
             "yarn": "package.json yarn.lock* .yarnrc* .yarnrc.yml*",
         }[pm]
-        needs_build = bool(profile.build_command)
-        if pm == "npm" and not needs_build:
-            # Legacy generic-node path (unchanged): slim runtime install.
-            install = "RUN npm install --omit=dev --no-audit --no-fund || npm install --no-audit --no-fund\n"
-        elif pm == "npm":
-            # Production builds need devDependencies (typescript, tailwind…).
-            install = (
-                "RUN npm ci --no-audit --no-fund 2>/dev/null "
-                "|| npm install --no-audit --no-fund\n"
-                if _lockfile_present(checkout, ("package-lock.json", "npm-shrinkwrap.json"))
-                else "RUN npm install --no-audit --no-fund\n"
-            )
-        elif pm == "pnpm":
-            # corepack resolves the pinned pnpm from packageManager automatically.
-            # Non-interactive bootstrap: a failed download fails the build with
-            # the real error (BUILD_FAILED) instead of hanging on a prompt —
-            # a download notice on success is informational, not a failure.
-            install = (
-                "ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0\n"
-                "RUN corepack enable\n"
-                "RUN pnpm install --frozen-lockfile "
-                "|| pnpm install --no-frozen-lockfile\n"
-            )
-        else:  # yarn
-            install = (
-                "RUN yarn install --frozen-lockfile 2>/dev/null "
-                "|| yarn install\n"
-            )
+        install = node_install_fragment(profile, checkout=checkout)
         # Baked defaults so the app binds the intended interface/port even
         # when the operator env is absent (explicit -e at start still wins).
         bind_env = "".join(
@@ -198,6 +168,48 @@ def render_dockerfile(profile: BuildProfile, *, checkout: Path) -> str:
             f"CMD {json.dumps(profile.start_command)}\n"
         )
     raise UnsupportedStack("UNSUPPORTED_STACK", f"Unknown profile '{profile.name}'.")
+
+
+def _node_package_manager(profile: BuildProfile) -> str:
+    pm = (profile.package_manager or "npm").lower()
+    if pm not in {"npm", "pnpm", "yarn"}:
+        raise UnsupportedStack(
+            "UNSUPPORTED_STACK",
+            f"Package manager '{profile.package_manager}' is not supported "
+            "by V1 controlled images (use npm/pnpm/yarn).",
+        )
+    return pm
+
+
+def node_install_fragment(profile: BuildProfile, *, checkout: Path) -> str:
+    """Dependency-install Dockerfile fragment for node/nextjs profiles.
+
+    Single source of truth for both rendering and build diagnostics. npm's
+    real error is never masked (no ``2>/dev/null``) and a failing ``npm ci``
+    is never papered over with a blanket ``npm install`` — a broken install
+    fails loudly with the real npm error, never a substituted success.
+    """
+    pm = _node_package_manager(profile)
+    if pm == "npm" and not profile.build_command:
+        # Legacy generic-node path (unchanged): slim runtime install.
+        return (
+            "RUN npm install --omit=dev --no-audit --no-fund "
+            "|| npm install --no-audit --no-fund\n"
+        )
+    if pm == "npm":
+        # Production builds need devDependencies (typescript, tailwind…).
+        if _lockfile_present(checkout, ("package-lock.json", "npm-shrinkwrap.json")):
+            return "RUN npm ci --no-audit --no-fund\n"
+        return "RUN npm install --no-audit --no-fund\n"
+    if pm == "pnpm":
+        # corepack resolves the pinned pnpm from packageManager automatically.
+        return (
+            "ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0\n"
+            "RUN corepack enable\n"
+            "RUN pnpm install --frozen-lockfile "
+            "|| pnpm install --no-frozen-lockfile\n"
+        )
+    return "RUN yarn install --frozen-lockfile 2>/dev/null || yarn install\n"
 
 
 def _read_json(path: Path) -> dict:

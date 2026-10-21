@@ -71,8 +71,8 @@ export function Panel({ title, eyebrow, description, action, children, className
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           {eyebrow ? <p className="medha-label">{eyebrow}</p> : null}
-          <h2 className="mt-1 text-[16px] font-semibold tracking-tight text-medha-text">{title}</h2>
-          {description ? <p className="mt-1 max-w-2xl text-sm leading-relaxed text-medha-secondary">{description}</p> : null}
+          <h2 className="mt-0.5 text-[17px] font-semibold leading-snug tracking-tight text-medha-text">{title}</h2>
+          {description ? <p className="mt-1 max-w-2xl text-[13.5px] leading-relaxed text-medha-secondary">{description}</p> : null}
         </div>
         {action ? <div className="flex shrink-0 flex-wrap items-center gap-2">{action}</div> : null}
       </div>
@@ -92,8 +92,8 @@ export function PageHeader({ title, subtitle, actions, breadcrumbs }: {
       {breadcrumbs}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-bold leading-tight tracking-tight text-medha-text">{title}</h1>
-          {subtitle ? <p className="mt-1 max-w-3xl text-[15px] leading-relaxed text-medha-secondary">{subtitle}</p> : null}
+          <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-medha-text">{title}</h1>
+          {subtitle ? <p className="mt-1 max-w-3xl text-[14px] leading-relaxed text-medha-secondary">{subtitle}</p> : null}
         </div>
         {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
@@ -132,7 +132,7 @@ export function Badge({ tone = "neutral", children }: { tone?: "success" | "warn
     : tone === "info" ? "border-medha-run/25 bg-medha-run-soft text-medha-run-ink"
     : "border-medha-border bg-medha-muted text-medha-secondary";
   return (
-    <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-semibold", cls)}>
+    <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px] font-semibold", cls)}>
       {children}
     </span>
   );
@@ -160,7 +160,7 @@ export function Tabs<T extends string>({ tabs, active, onChange, label }: {
           type="button"
           onClick={() => onChange(t.id)}
           className={cn(
-            "rounded-lg px-3 py-1.5 text-[13px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent",
+            "rounded-lg px-3 py-1.5 text-[14px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent",
             active === t.id ? "bg-medha-text text-white" : "text-medha-secondary hover:bg-medha-muted hover:text-medha-text",
           )}
         >
@@ -189,9 +189,9 @@ export function Skeleton({ className }: { className?: string }) {
 
 export function ErrorBox({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div role="alert" className="rounded-xl border border-medha-danger/30 bg-medha-danger-soft p-4 text-sm text-medha-danger">
-      <p className="font-semibold">Something went wrong.</p>
-      <p className="mt-1">{message}</p>
+    <div role="alert" className="rounded-xl border border-medha-danger/30 bg-medha-danger-soft p-4">
+      <p className="text-sm font-semibold text-medha-danger">Something went wrong.</p>
+      <p className="mt-1 break-words text-[13.5px] leading-relaxed text-medha-text">{message}</p>
       {onRetry ? (
         <button type="button" onClick={onRetry} className="mt-3 rounded-lg border border-medha-danger/30 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-medha-danger-soft">
           Retry

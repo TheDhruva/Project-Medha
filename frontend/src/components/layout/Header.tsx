@@ -34,7 +34,7 @@ export function Header() {
           {projectName ? (
             <span className="flex min-w-0 items-center gap-2">
               <span aria-hidden className="h-4 w-px shrink-0 bg-medha-border" />
-              <span className="max-w-[38vw] truncate text-[12.5px] font-medium text-medha-secondary sm:max-w-none">
+              <span className="max-w-[38vw] truncate text-[13.5px] font-medium text-medha-secondary sm:max-w-none">
                 {projectName}
               </span>
             </span>
@@ -48,7 +48,7 @@ export function Header() {
               <SignInButton mode="modal">
                 <button
                   type="button"
-                  className="rounded-full px-2.5 py-0.5 text-[11px] font-medium text-medha-secondary transition-colors hover:bg-medha-surface-muted hover:text-medha-text"
+                  className="rounded-full px-2.5 py-0.5 text-[12px] font-medium text-medha-secondary transition-colors hover:bg-medha-surface-muted hover:text-medha-text"
                 >
                   Sign in
                 </button>

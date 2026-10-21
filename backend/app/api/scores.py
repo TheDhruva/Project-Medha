@@ -30,6 +30,40 @@ router = APIRouter(prefix="/api")
 repo = DeploymentRepository()
 scores = ScoreRepository()
 
+_SCORE_NAMES = (
+    "code_quality",
+    "security",
+    "verification_confidence",
+    "deployment_readiness",
+    "performance",
+    "optimization",
+)
+
+
+def _readiness_health(record, result: dict) -> str:
+    """Health evidence relevant to deployment readiness.
+
+    A pre-execution failure (verification, target, build) has no application
+    health evidence; it must not be reported as a confirmed unhealthy app.
+    """
+    if record.is_demo:
+        return "demo"
+    mode = result.get("execution_mode")
+    if mode in {"simulator", "simulator_fallback", "demo", "controlled_test"}:
+        return "test_only"
+    if mode != "real":
+        return "unknown"
+    readiness = result.get("readiness") if isinstance(result.get("readiness"), dict) else {}
+    kind = result.get("kind")
+    code = str(result.get("code") or "")
+    if kind == "success" and readiness.get("status") == "ready":
+        return "healthy"
+    if kind == "failed" and (
+        result.get("container") or code in {"READINESS_FAILED", "START_FAILED", "REAL_EXECUTION_FAILED"}
+    ):
+        return "unhealthy"
+    return "unknown"
+
 
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
@@ -38,10 +72,17 @@ def _error(status_code: int, code: str, message: str) -> JSONResponse:
     )
 
 
-def _inputs_hash(record, verification, critic, change_intel) -> str:
+def _inputs_hash(record, verification, change_intel, repository_analysis,
+                 result, health_status, support_code, execution_mode) -> str:
     canonical = json.dumps({
         "target": record.target_revision,
-        "v": verification, "c": critic, "ci": change_intel,
+        "v": verification,
+        "ci": change_intel,
+        "ra": repository_analysis,
+        "result": result,
+        "health": health_status,
+        "support": support_code,
+        "mode": execution_mode,
         "score_version": VERSION,
     }, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -60,32 +101,77 @@ async def get_scores(deployment_id: str, subject: str = RequireSubject):
         elif record is None or owner is not None:
             return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
     verification = record.verification if isinstance(record.verification, dict) else None
-    critic = record.critic if isinstance(record.critic, dict) else None
     change_intel = record.change_intel if isinstance(record.change_intel, dict) else None
     analysis = change_intel.get("analysis", change_intel) if change_intel else None
-    support_code = None
+    result = record.result if isinstance(record.result, dict) else {}
+    repository_analysis = (
+        result.get("repository_analysis")
+        if isinstance(result.get("repository_analysis"), dict) else None
+    )
     profile_confidence = None
     health_hints: list = []
-    result = record.result if isinstance(record.result, dict) else {}
     profile = result.get("profile") if isinstance(result, dict) else None
     if isinstance(profile, dict):
         stack = profile.get("inferred_stack", {})
         if isinstance(stack, dict):
             profile_confidence = stack.get("confidence")
             health_hints = stack.get("health_hints", []) or []
-    computed = compute_all(
-        verification=verification, critic=critic, change_intel=analysis,
-        support_code=support_code, profile_confidence=profile_confidence,
-        health_hints=health_hints,
-        runtime_measured=result.get("runtime_measured") if result else None,
-    )
-    inputs_hash = _inputs_hash(record, verification, critic, change_intel)
-    now = utc_now_iso()
+    execution_mode = result.get("execution_mode")
+    deployment = result.get("deployment") if isinstance(result.get("deployment"), dict) else {}
+    support_code = None
+    if result.get("blocked_stage") == "analyze" and deployment.get("code"):
+        support_code = str(deployment["code"])
+    elif result.get("kind") == "success" or execution_mode in {
+        "real", "simulator", "simulator_fallback", "demo", "controlled_test",
+    }:
+        support_code = "SUPPORTED"
+    health_status = _readiness_health(record, result)
     target_sha = ""
-    if isinstance(result, dict) and result.get("target_sha"):
+    if result.get("target_sha"):
         target_sha = str(result["target_sha"])
     elif record.target_revision:
         target_sha = str(record.target_revision)
+
+    inputs_hash = _inputs_hash(
+        record, verification, change_intel, repository_analysis, result,
+        health_status, support_code, execution_mode,
+    )
+    previous = await asyncio.to_thread(scores.history, run_id=deployment_id)
+    stored = {row["score_name"]: row for row in previous}
+    if stored and all(
+        name in stored
+        and stored[name].get("version") == VERSION
+        and stored[name].get("inputs_hash") == inputs_hash
+        for name in _SCORE_NAMES
+    ):
+        out = {
+            name: {
+                "value": stored[name].get("value"),
+                "version": stored[name].get("version"),
+                "computed_at": stored[name].get("computed_at"),
+                "inputs_hash": stored[name].get("inputs_hash"),
+                "target_sha": stored[name].get("target_sha") or None,
+                "evidence": stored[name].get("evidence") or {},
+            }
+            for name in _SCORE_NAMES
+        }
+        return JSONResponse({
+            "deployment_id": deployment_id,
+            "is_demo": record.is_demo,
+            "label": "DEMO/MOCK" if record.is_demo else None,
+            "scores": out,
+        })
+
+    now = utc_now_iso()
+    computed = compute_all(
+        verification=verification, critic=None, change_intel=analysis,
+        support_code=support_code, profile_confidence=profile_confidence,
+        health_hints=health_hints,
+        runtime_measured=result.get("runtime_measured") if result else None,
+        repository_analysis=repository_analysis, result=result,
+        health_status=health_status, execution_mode=execution_mode,
+        assessed_at=now, revision=target_sha or None,
+    )
     out: dict = {}
     for name, entry in computed.items():
         await asyncio.to_thread(

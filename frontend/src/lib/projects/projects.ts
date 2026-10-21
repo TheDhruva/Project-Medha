@@ -3,6 +3,7 @@ import {
   createDeployment,
   fetchProjects,
   fetchRunsList,
+  authReady,
   type DeployApiRequest,
   type Project,
   type RunSummary,
@@ -116,6 +117,56 @@ export function shortNameForRepo(repositoryUrl: string): string {
 const TERMINAL_OK = new Set(["completed"]);
 const ATTENTION_STATUS = new Set(["failed", "awaiting_approval", "partial_recovery"]);
 
+/* Plain-language prefixes for backend failure codes we actually emit. */
+const FAILURE_PREFIX: Record<string, string> = {
+  EXECUTION_NOT_CONFIGURED: "Execution not configured",
+  MULTIPLE_APPS_REQUIRE_TARGET: "Deployment target required",
+  INVALID_DEPLOYMENT_TARGET: "Deployment target invalid",
+  AMBIGUOUS_DEPLOY_TARGET: "Deployment target ambiguous",
+  DEPLOYMENT_UNSUPPORTED: "Deployment unsupported",
+  NO_TARGET_CANDIDATES: "No deployable application detected",
+  PLAN_REQUIRES_REVIEW: "Plan needs review",
+  BUILD_FAILED: "Build failed",
+  BUILD_TIMEOUT: "Build timed out",
+  BUILD_REJECTED: "Build rejected",
+  START_FAILED: "Container failed to start",
+  READINESS_FAILED: "Application did not become ready",
+  POLICY_VIOLATION: "Security policy blocked execution",
+  VERIFICATION_FAILED: "Verification failed",
+};
+
+const ANSI = /\x1b\[[0-9;]*m/g;
+
+/**
+ * One readable sentence for a failed run. Uses the backend error code for a
+ * plain-language prefix and the first meaningful summary line for detail.
+ * Never invents a cause when the backend recorded none.
+ */
+export function summarizeRunFailure(
+  run: Pick<RunSummary, "error_code" | "error_summary">,
+): string {
+  let code = (run.error_code ?? "").toUpperCase();
+  const lines = (run.error_summary ?? "")
+    .replace(ANSI, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  let detail = lines[0] ?? "";
+  const embedded = /^([A-Z][A-Z0-9_]{3,}):\s*(.*)$/.exec(detail);
+  if (embedded) {
+    if (!code) code = embedded[1]!;
+    detail = embedded[2] ?? "";
+  }
+  if (detail.length > 180) detail = `${detail.slice(0, 177).trimEnd()}...`;
+  const prefix = FAILURE_PREFIX[code];
+  if (!detail) return prefix ? `${prefix}.` : "No error summary was recorded.";
+  if (!prefix) return detail;
+  const redundant =
+    detail.toLowerCase().includes(prefix.toLowerCase()) ||
+    detail.toUpperCase().startsWith(code);
+  return redundant ? detail : `${prefix}: ${detail}`;
+}
+
 function summarize(
   id: string,
   repositoryUrl: string,
@@ -134,7 +185,7 @@ function summarize(
   const latest = sorted[0] ?? null;
   const attention: string[] = [];
   if (latest && latest.status === "failed") {
-    attention.push(latest.error_summary || "Latest run failed");
+    attention.push(summarizeRunFailure(latest));
   }
   if (latest && latest.status === "awaiting_approval") {
     attention.push("Plan awaiting approval");
@@ -417,6 +468,10 @@ export function useProjects(limit = 200, pollIntervalMs = 8000) {
   const inFlight = useRef(false);
 
   const load = useCallback(async () => {
+    // Wait for the Clerk token getter to be registered so the first API
+    // request carries the Authorization header. Without this, a cold start can
+    // race ClerkTokenSync's effect and hit the backend unauthenticated (401).
+    await authReady;
     // Guard against overlapping polls (interval + manual refresh).
     if (inFlight.current) return;
     inFlight.current = true;
