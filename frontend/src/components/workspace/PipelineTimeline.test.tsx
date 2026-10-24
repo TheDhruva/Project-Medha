@@ -88,7 +88,7 @@ function renderPipeline(props: {
 }
 
 function cards(): HTMLElement[] {
-  return within(screen.getByRole("list", { name: "Execution pipeline phases" })).getAllByRole("button");
+  return within(screen.getByRole("list", { name: "Run Timeline phases" })).getAllByRole("button");
 }
 
 describe("PipelineTimeline", () => {
@@ -114,7 +114,7 @@ describe("PipelineTimeline", () => {
   it("uses a one/two/three-column responsive grid and controlled selection", () => {
     const onSelectPhase = vi.fn();
     const { rerender } = renderPipeline({ onSelectPhase });
-    const list = screen.getByRole("list", { name: "Execution pipeline phases" });
+    const list = screen.getByRole("list", { name: "Run Timeline phases" });
     expect(list).toHaveClass("grid-cols-1", "sm:grid-cols-2", "xl:grid-cols-3");
     const first = cards()[0];
     expect(first).toHaveClass("min-w-0");

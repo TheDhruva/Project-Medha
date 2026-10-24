@@ -80,7 +80,7 @@ describe("StartVerificationFlow", () => {
 
   it("renders the real-repository analysis form with no demo choice", () => {
     render(<StartVerificationFlow />);
-    expect(screen.getByText("New analysis")).toBeInTheDocument();
+    expect(screen.getByText("New Run")).toBeInTheDocument();
     expect(screen.getByLabelText("Repository")).toBeInTheDocument();
     expect(screen.getByLabelText("Base revision")).toBeInTheDocument();
     expect(screen.queryByText("Demo scenario")).not.toBeInTheDocument();

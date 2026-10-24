@@ -38,7 +38,7 @@ function concise(message: string, limit = 140): string {
 }
 
 /**
- * Readable event timeline: recent meaningful events with concise titles,
+ * Readable Run Timeline: recent meaningful events with concise titles,
  * per-event expansion for full diagnostics, and a view-all disclosure.
  * No nested scroll container — the page scrolls. SSE dedupe happens in
  * the deployment context (event_id set); ids are deduped defensively here.
@@ -63,10 +63,10 @@ export function LiveSystemTrace() {
   const visible = showAll ? events : events.slice(0, RECENT_LIMIT);
 
   return (
-    <section className="medha-panel animate-medha-in p-4" aria-label="Event timeline">
+    <section className="medha-panel animate-medha-in p-4" aria-label="Run Timeline">
       <div className="mb-2 flex items-center justify-between gap-2">
         <h2 className="font-display text-sm font-semibold tracking-wide text-medha-text">
-          EVENT TIMELINE
+          Run Timeline
         </h2>
         <span className="rounded-full bg-medha-warning-soft px-2 py-0.5 text-[12.5px] font-semibold uppercase tracking-wide text-medha-warning">
           {source} events · {events.length}

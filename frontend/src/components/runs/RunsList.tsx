@@ -100,7 +100,7 @@ export function RunsList() {
       <div className="space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-[28px] font-semibold tracking-tight text-medha-text">Runs</h1>
+            <h1 className="text-[28px] font-semibold tracking-tight text-medha-text">Run History</h1>
             <p className="mt-1 text-[14px] text-medha-secondary">
               Every verification Medha has performed, with its decision and evidence.
             </p>
@@ -109,7 +109,7 @@ export function RunsList() {
             href="/verify"
             className="inline-flex items-center gap-1.5 rounded-md bg-medha-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
           >
-            <Plus className="h-4 w-4" aria-hidden /> New verification
+            <Plus className="h-4 w-4" aria-hidden /> New run
           </Link>
         </div>
 

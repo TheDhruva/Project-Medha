@@ -19,6 +19,7 @@ from app.changeintel.models import (
     Symbol,
     SymbolKind,
 )
+from app.core.repo_files import WalkBudget, walk_files
 
 _PY_SUFFIXES = {".py", ".pyi"}
 _JS_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
@@ -61,17 +62,49 @@ def is_ignored_path(path: str) -> bool:
     return any(part in _IGNORED_DIRS for part in parts)
 
 
-def source_files(root: Path) -> list[str]:
-    """Collect supported source/config files under root (deterministic order)."""
+def source_files(root: Path, budget: WalkBudget | None = None) -> list[str]:
+    """Collect supported source/config files under root (deterministic order).
+
+    Uses the shared budget-aware walker so that the same exclusion/depth rules
+    apply as in inventory and change-intel analysis. Returns repo-relative paths
+    of files that passed the budget and whose language is supported (not UNSUPPORTED).
+    """
+    if budget is None:
+        budget = WalkBudget(
+            max_files=20_000,
+            max_total_bytes=200 * 1024 * 1024,
+            max_file_bytes=1 * 1024 * 1024,
+            max_depth=20,
+            time_budget_s=120,
+            extra_skip_dirs=frozenset({".git", "node_modules", ".venv", "venv",
+                                         "__pycache__", ".next", "dist", "build"}),
+        )
+
+    result = walk_files(root, budget)
     found: list[str] = []
-    for child in sorted(root.rglob("*")):
-        if not child.is_file():
+    for f in result.files:
+        if not f.needs_content:
+            # Still record path for index completeness; callers may still read
+            # content themselves, but symbol extraction will note it as not parsed.
+            found.append(f.rel)
             continue
-        rel = child.relative_to(root).as_posix()
-        if is_ignored_path(rel):
+        ext = Path(f.rel).suffix.lower()
+        from app.changeintel.models import Language
+
+        lang = Language.UNSUPPORTED
+        if ext in {".py", ".pyi"}:
+            lang = Language.PYTHON
+        elif ext in {".js", ".jsx", ".mjs", ".cjs"}:
+            lang = Language.JAVASCRIPT
+        elif ext in {".ts", ".tsx"}:
+            lang = Language.TYPESCRIPT
+        elif ext in {".json", ".yml", ".yaml"}:
+            lang = Language.JSON if ext == ".json" else Language.YAML
+        else:
+            # unsupported extension — skip (do not add to found)
             continue
-        if classify_language(rel) != Language.UNSUPPORTED:
-            found.append(rel)
+        if lang != Language.UNSUPPORTED:
+            found.append(f.rel)
     return found
 
 

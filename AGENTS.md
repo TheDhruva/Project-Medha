@@ -42,6 +42,12 @@ Priority order: **WORKING > CLEVER**, **SIMPLE > OVER-ENGINEERED**, **DETERMINIS
 28. **Do not expose fake LLM chain-of-thought in the UI.** Show observable system events and decision reasons only.
 29. **UI should display observable system events and decision reasons** (constraint IDs, priorities, resolution method, verification outcomes, CEG edges, rollback scope).
 30. **Every implementation phase must leave the project runnable** (or clearly document temporary blockers).
+31. **Work in batched passes, not exploration loops.** Before editing:
+    - Read every file the change touches in **one parallel batch**, not one at a time.
+    - `grep` the symbol's callers before touching shared code (rule 2), then edit **once** — no read → tweak → re-read cycles.
+    - Run **only the tests that cover the change**, not the whole suite, unless the change is cross-cutting.
+    
+    Exploration is only sequential when the first read genuinely changes what to look at next. Do not re-verify what was already read in this session. If a step is slow for a reason other than this (hanging command, Docker, network), say so instead of silently retrying.
 
 ---
 

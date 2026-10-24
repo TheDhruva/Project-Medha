@@ -104,7 +104,7 @@ function evidenceLine(score: ProductScore | undefined): string {
   if (checks.length > 0) {
     return `All ${checks.length} assessed check${checks.length === 1 ? "" : "s"} passed`;
   }
-  return "Evidence-backed score.";
+  return "Computed from this run's stored evidence.";
 }
 
 function statusOf(
@@ -194,7 +194,7 @@ export function deriveScorecards(input: {
     make("security", "Security Posture", scores?.scores?.security, verificationHref),
     make(
       "verification",
-      "Verification Confidence",
+      "Verification",
       scores?.scores?.verification_confidence,
       verificationHref,
     ),

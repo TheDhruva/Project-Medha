@@ -106,7 +106,7 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
         d="M 14 60 A 46 46 0 0 1 106 60"
         pathLength={100}
         fill="none"
-        strokeWidth={9}
+        strokeWidth={7}
         strokeLinecap="round"
         className="stroke-medha-border"
       />
@@ -115,7 +115,7 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
           d="M 14 60 A 46 46 0 0 1 106 60"
           pathLength={100}
           fill="none"
-          strokeWidth={9}
+          strokeWidth={7}
           strokeLinecap="round"
           strokeDasharray={`${clamped} ${100 - clamped}`}
           className={cn("medha-gauge-arc", tone.stroke)}
@@ -145,7 +145,7 @@ export function MetricCard({ metric }: { metric: ScorecardMetric }) {
       ? "text-medha-tertiary"
       : TONE_CLASSES[scoreTone(metric.value)].text;
   const coverage = metric.coverage
-    ? `Assessment coverage: ${metric.coverage.assessed}/${metric.coverage.applicable} checks`
+    ? `Checks completed: ${metric.coverage.assessed}/${metric.coverage.applicable} checks`
     : null;
   const revisionNote = [
     assessed ? `Assessed ${assessed}` : "No assessment recorded",
@@ -159,9 +159,12 @@ export function MetricCard({ metric }: { metric: ScorecardMetric }) {
   return (
     <Link
       href={metric.href}
+      /* Compact card shows title, gauge, status and the findings action.
+         Coverage, timestamp and revision stay available to assistive tech
+         here and in full on the linked detail views. */
       aria-label={`${metric.title}: ${
         metric.value == null ? "not assessed" : `${metric.value} of 100`
-      }, ${metric.statusLabel}. ${metric.evidence}${coverage ? `. ${coverage}` : ""}`}
+      }, ${metric.statusLabel}. ${metric.evidence}${coverage ? `. ${coverage}` : ""}. ${revisionNote}`}
       data-status={metric.status}
       className={cn(
         "group flex h-full flex-col rounded-lg border bg-medha-surface p-3.5 text-left transition hover:border-medha-accent/50 hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent",
@@ -187,28 +190,21 @@ export function MetricCard({ metric }: { metric: ScorecardMetric }) {
         {metric.value == null ? "Not assessed" : `${metric.value}/100`}
       </p>
 
-      <p
-        className={cn(
-          "mt-0.5 flex items-center justify-center gap-1.5 text-center text-[12.5px] font-semibold leading-5",
-          STATUS_CLASSES[metric.status],
-        )}
-      >
-        <StatusIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        {metric.statusLabel}
-      </p>
-
-      <p className="mt-1 line-clamp-3 min-h-[40px] break-words text-center text-[13px] leading-5 text-medha-secondary">
-        {metric.evidence}
-      </p>
-
-      <div className="mt-auto space-y-1 border-t border-medha-border pt-2">
-        {coverage ? (
-          <p className="break-words text-center text-[12px] leading-4 text-medha-secondary">{coverage}</p>
-        ) : null}
-        <p className="break-words text-center text-[12px] leading-4 text-medha-tertiary">{revisionNote}</p>
-        <p className="text-center text-[12.5px] font-semibold text-medha-accent">
+      {/* Status and action share one bottom row; status truncates so the
+          findings link never overflows at narrow widths. */}
+      <div className="mt-auto flex items-center justify-between gap-2 border-t border-medha-border pt-2.5">
+        <span
+          className={cn(
+            "flex min-w-0 items-center gap-1.5 text-[12.5px] font-semibold leading-5",
+            STATUS_CLASSES[metric.status],
+          )}
+        >
+          <StatusIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="truncate">{metric.statusLabel}</span>
+        </span>
+        <span className="shrink-0 text-[12.5px] font-semibold text-medha-accent">
           View findings <span aria-hidden>→</span>
-        </p>
+        </span>
       </div>
     </Link>
   );

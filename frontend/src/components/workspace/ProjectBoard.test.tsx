@@ -153,17 +153,13 @@ describe("ProjectBoard header", () => {
     expect(screen.queryByRole("dialog", { name: "Deployment details" })).toBeNull();
   });
 
-  it("opens deployment details from the compact trigger and keeps project tabs", () => {
+  it("opens deployment details from the compact trigger without a duplicate tab row", () => {
     render(<ProjectBoard projectId="prj_test" />);
 
-    expect(screen.getByRole("link", { name: "Runs" })).toHaveAttribute(
-      "href",
-      "/projects/prj_test/runs",
-    );
-    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute(
-      "href",
-      "/projects/prj_test/settings",
-    );
+    // Destinations live in the sidebar only — no duplicated tab row.
+    expect(screen.queryByRole("navigation", { name: "Project sections" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Run History" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Deployment details" }));
     expect(screen.getByRole("dialog", { name: "Deployment details" })).toBeInTheDocument();
@@ -171,7 +167,7 @@ describe("ProjectBoard header", () => {
 
   it("clears phase details when the selected run changes", () => {
     const { rerender } = render(<ProjectBoard projectId="prj_test" />);
-    const list = screen.getByRole("list", { name: "Execution pipeline phases" });
+    const list = screen.getByRole("list", { name: "Run Timeline phases" });
     fireEvent.click(within(list).getAllByRole("button")[0]);
 
     expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument();
@@ -184,7 +180,7 @@ describe("ProjectBoard header", () => {
 
   it("clears phase details when the project changes", () => {
     const { rerender } = render(<ProjectBoard projectId="prj_test" />);
-    const list = screen.getByRole("list", { name: "Execution pipeline phases" });
+    const list = screen.getByRole("list", { name: "Run Timeline phases" });
     fireEvent.click(within(list).getAllByRole("button")[0]);
 
     expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument();

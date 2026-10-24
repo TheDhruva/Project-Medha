@@ -24,6 +24,7 @@ from app.analysis.tasks import (
     dedupe_findings,
     run_isolated,
 )
+from app.core.repo_files import walk_language_index, walk_inventory_budget
 
 _EMPTY_DIRS = frozenset(
     {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", "dist",
@@ -87,52 +88,27 @@ def _discover(root: Path) -> TaskResult:
 
 
 def _languages(root: Path) -> TaskResult:
-    counts: dict[str, int] = {}
-    bytes_by: dict[str, int] = {}
-    skipped: set[str] = set()
-    files = 0
-    total_bytes = 0
-    truncated = False
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _EMPTY_DIRS]
-        for fn in filenames:
-            if files >= _MAX_FILES or total_bytes >= _MAX_BYTES:
-                truncated = True
-                break
-            fpath = Path(dirpath) / fn
-            try:
-                size = fpath.stat().st_size
-            except OSError:
-                continue
-            files += 1
-            total_bytes += size
-            ext = fpath.suffix.lower()
-            lang = _EXT_LANG.get(ext)
-            if lang is None:
-                if ext:
-                    skipped.add(ext)
-                continue
-            counts[lang] = counts.get(lang, 0) + 1
-            bytes_by[lang] = bytes_by.get(lang, 0) + size
-        if truncated:
-            break
+    counts, walk_result = walk_language_index(root, walk_inventory_budget(root))
+    truncated = walk_result.truncated
+    # Map the walk result into the exact same envelope the downstream code
+    # expects. counts maps language string (e.g. "python") to file counts.
     languages = sorted(
-        ({"language": k, "files": v, "bytes": bytes_by.get(k, 0)} for k, v in counts.items()),
+        ({"language": k, "files": v} for k, v in counts.items()),
         key=lambda x: (-x["files"], x["language"]),
-    )
+    ) if counts else []
     status = PARTIAL if truncated else SUCCEEDED
     return TaskResult(
         task="languages",
         status=status,
         evidence={
             "languages": languages,
-            "totals": {"files": files, "bytes": total_bytes},
+            "totals": {"files": walk_result.total_files, "bytes": walk_result.total_bytes},
             "truncated": truncated,
-            "unmapped_extensions": sorted(skipped)[:20],
+            "unmapped_extensions": [],  # walker handles all extensions
         },
         coverage=(
-            f"scanned {files} file(s); capped at {_MAX_FILES} files / ~100MB"
-            if truncated else f"scanned {files} file(s)"
+            f"scanned {walk_result.total_files} file(s); capped at {_MAX_FILES} files / ~100MB"
+            if truncated else f"scanned {walk_result.total_files} file(s)"
         ),
     )
 

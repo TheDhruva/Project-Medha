@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import type { RunSummary } from "@/lib/api/client";
 import {
   canonicalRepoKey,
+  conciseRepositorySummary,
   connectionLabel,
   deriveProjects,
   filterProjects,
   filterProjectsByStatus,
+  formatActivityCompact,
   projectCardStatus,
   projectHealth,
   projectIdForRepo,
@@ -240,6 +242,77 @@ describe("deriveProjects demo exclusion", () => {
     expect(summaries[0]?.repoOwner).toBe("octo");
     expect(summaries[0]?.repoName).toBe("demo");
     expect(summaries[0]?.branch).toBe("main");
+  });
+});
+
+describe("deriveProjects card summary", () => {
+  it("uses the recorded repository summary and drops missing-evidence fallback text", () => {
+    const summaryRun = run({
+      deployment_id: "dep_1",
+      repository_summary: {
+        status: "available",
+        text: "A task tracker for small teams built with Next.js and FastAPI.",
+        source: "ai",
+        commit_sha: null,
+        generated_at: "2026-10-01T10:00:00Z",
+        technologies: ["Next.js", "FastAPI"],
+      },
+    });
+    const withSummary = deriveProjects([summaryRun]);
+    expect(withSummary[0]?.summary).toBe(
+      "A task tracker for small teams built with Next.js and FastAPI.",
+    );
+
+    const fallback = deriveProjects([
+      run({
+        deployment_id: "dep_2",
+        repository_summary: {
+          status: "available",
+          text: "Python repository with 1 detected application; no README description was available.",
+          source: "deterministic",
+          commit_sha: null,
+          generated_at: "2026-10-01T10:00:00Z",
+          technologies: ["Python"],
+        },
+      }),
+    ]);
+    expect(fallback[0]?.summary).toBeNull();
+  });
+
+  it("bounds summaries to a single short sentence", () => {
+    const long = `${"word ".repeat(20)}end. Second sentence.`;
+    expect(conciseRepositorySummary(long)?.split(" ").length).toBe(14);
+    expect(conciseRepositorySummary("First sentence. Second sentence.")).toBe(
+      "First sentence.",
+    );
+    expect(conciseRepositorySummary("")).toBeNull();
+  });
+});
+
+describe("formatActivityCompact", () => {
+  const now = new Date(2026, 9, 22, 12, 0);
+
+  it("formats today, yesterday, and older activity in local time", () => {
+    expect(
+      formatActivityCompact(new Date(2026, 9, 22, 10, 35).toISOString(), now),
+    ).toMatch(/^10:35\s?AM$/i);
+    expect(
+      formatActivityCompact(new Date(2026, 9, 21, 16, 30).toISOString(), now),
+    ).toBe("Yesterday");
+    expect(
+      formatActivityCompact(new Date(2026, 9, 15, 11, 49).toISOString(), now),
+    ).toBe("Oct 15");
+  });
+
+  it("includes the year only when it differs from the current year", () => {
+    expect(
+      formatActivityCompact(new Date(2025, 9, 15, 11, 49).toISOString(), now),
+    ).toBe("Oct 15, 2025");
+  });
+
+  it("returns null instead of inventing a timestamp", () => {
+    expect(formatActivityCompact(null, now)).toBeNull();
+    expect(formatActivityCompact("not-a-date", now)).toBeNull();
   });
 });
 

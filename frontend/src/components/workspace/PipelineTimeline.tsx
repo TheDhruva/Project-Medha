@@ -70,12 +70,6 @@ function StatusIcon({ state }: { state: VisualState }) {
   return <Circle className={common} aria-hidden />;
 }
 
-/**
- * Six-phase execution card grid. Every state, duration and activity line is
- * derived from observed backend logs; missing evidence stays Unknown rather
- * than becoming a completed phase. Selecting a card opens the adjacent
- * Operational status panel rather than expanding inside the grid.
- */
 export function PipelineTimeline({
   projectId,
   run,
@@ -110,7 +104,7 @@ export function PipelineTimeline({
   return (
     <Panel
       className="lg:col-span-7"
-      title="Execution pipeline"
+      title="Run Timeline"
       eyebrow="Observed backend phases"
       action={
         <Link
@@ -132,7 +126,7 @@ export function PipelineTimeline({
 
       <ol
         className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3"
-        aria-label="Execution pipeline phases"
+        aria-label="Run Timeline phases"
       >
         {PIPELINE_PHASES.map((phase, index) => {
           const state = states[phase.id];

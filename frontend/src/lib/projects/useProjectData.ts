@@ -17,6 +17,7 @@ import {
   type RunSummary,
   type RuntimeLogsResponse,
 } from "@/lib/api/client";
+import { toneForEvent } from "@/lib/api/eventMapper";
 import type {
   CegEdge,
   CegNode,
@@ -517,6 +518,266 @@ function parseTs(ts: string): number {
  * target (execute), else the furthest observed stage (remediation/rollback
  * excluded — it runs after the failure point).
  */
+/* ================= Activity Center conversation feed ================= */
+
+export interface FeedHandoff {
+  /** Feed index of the entry that produced the input (for in-page linking). */
+  fromIndex: number;
+  fromLabel: string;
+}
+
+export interface FeedEntry {
+  /** Stable list key (timestamp + position in the ordered feed). */
+  key: string;
+  /** Raw event timestamp for <time dateTime>; kept verbatim. */
+  ts: string;
+  /** Local-zone clock label, e.g. "9:24:07 AM"; null when unparseable. */
+  timeLabel: string | null;
+  /** Recorded agent name, "Agent" for unattributed agent output, or "MEDHA". */
+  actor: string;
+  isAgent: boolean;
+  /** Resolved registry agent id when attribution succeeded; null otherwise. */
+  agentId: string | null;
+  /** Recorded event type (agent.started, stage.completed, …) for provenance. */
+  type: string;
+  /** Recorded event message — never rewritten dialogue. */
+  message: string;
+  outcome: "error" | "warning" | "success" | null;
+  /** Measured agent duration from the backend snapshot; null when unknown. */
+  durationMs: number | null;
+  /** Recorded agent error from the backend snapshot; null when none. */
+  error: string | null;
+  /** Recorded dependency edges whose completion precedes this agent's start. */
+  handoffs: FeedHandoff[];
+}
+
+const AGENT_STARTED_SUFFIX = " started";
+
+/**
+ * Conversation-style feed for one run, built only from recorded evidence:
+ *
+ * - `agent.started` messages are constructed backend-side as "{id} started",
+ *   so the agent name is parsed from the recorded text (only known ids match).
+ * - `agent.completed` messages carry the agent's summary but not its id in the
+ *   REST log, so attribution happens only on an exact match against one
+ *   snapshot row that recorded the same text; ambiguous or missing matches
+ *   stay generic ("Agent") — never guessed.
+ * - Handoffs appear only when a declared snapshot dependency recorded its
+ *   completion earlier in the feed.
+ * - Everything else is a factual system update with the recorded message.
+ *
+ * There is no agent-to-agent dialogue in the data model; none is invented.
+ */
+export function buildRunFeed(
+  logs: RunLogLine[],
+  agents: AgentSnapshotRow[] | null,
+): FeedEntry[] {
+  // Dedupe identical recorded lines (same ts/type/source/message) that some
+  // refreshes return twice. Array sort is stable, so equal timestamps keep
+  // their stored order — the key's index is the tie-breaker.
+  const seen = new Set<string>();
+  const deduped = logs.filter((line) => {
+    const sig = `${line.ts}|${line.type}|${line.source}|${line.message}`;
+    if (seen.has(sig)) return false;
+    seen.add(sig);
+    return true;
+  });
+  const ordered = [...deduped].sort((a, b) => {
+    const ta = Date.parse(a.ts);
+    const tb = Date.parse(b.ts);
+    const va = Number.isNaN(ta) ? Number.MAX_SAFE_INTEGER : ta;
+    const vb = Number.isNaN(tb) ? Number.MAX_SAFE_INTEGER : tb;
+    return va - vb;
+  });
+  const rows = agents ?? [];
+  const rowById = new Map(rows.map((r) => [r.id, r]));
+
+  // Unique snapshot row recording the exact same summary text — attribution
+  // by recorded evidence only; two rows with identical text stay unattributed.
+  const attributed: (AgentSnapshotRow | null)[] = ordered.map((line) => {
+    if (line.type !== "agent.completed") return null;
+    const msg = line.message.trim();
+    const matches = rows.filter(
+      (r) => (r.activity || "").trim() === msg || (r.lastEvent || "").trim() === msg,
+    );
+    return matches.length === 1 ? matches[0] : null;
+  });
+  const completionIndexByAgent = new Map<string, number>();
+  attributed.forEach((row, i) => {
+    if (row && !completionIndexByAgent.has(row.id)) completionIndexByAgent.set(row.id, i);
+  });
+
+  return ordered.map((line, i) => {
+    let actor = "MEDHA";
+    let isAgent = false;
+    let agentId: string | null = null;
+    let message = line.message;
+    let durationMs: number | null = null;
+    let error: string | null = null;
+    let handoffs: FeedHandoff[] = [];
+
+    if (line.type === "agent.started") {
+      const text = line.message.trim();
+      const id = text.endsWith(AGENT_STARTED_SUFFIX)
+        ? text.slice(0, -AGENT_STARTED_SUFFIX.length)
+        : "";
+      if (id && SNAPSHOT_LABELS[id]) {
+        isAgent = true;
+        agentId = id;
+        actor = SNAPSHOT_LABELS[id] ?? id;
+        message = "Started.";
+        handoffs = (rowById.get(id)?.deps ?? []).flatMap((dep) => {
+          const idx = completionIndexByAgent.get(dep);
+          const label = SNAPSHOT_LABELS[dep];
+          return idx !== undefined && idx < i && label
+            ? [{ fromIndex: idx, fromLabel: label }]
+            : [];
+        });
+      }
+    } else if (line.type === "agent.completed") {
+      isAgent = true;
+      const row = attributed[i];
+      agentId = row?.id ?? null;
+      actor = row ? (SNAPSHOT_LABELS[row.id] ?? row.name ?? "Agent") : "Agent";
+      durationMs = row?.durationMs ?? null;
+      error = row?.error ?? null;
+    }
+
+    const tone = toneForEvent(line.type, line.level);
+    const outcome: FeedEntry["outcome"] =
+      line.level === "error" || line.status === "failed" || tone === "error"
+        ? "error"
+        : line.level === "warning" || line.status === "warning" || tone === "warning"
+          ? "warning"
+          : tone === "success"
+            ? "success"
+            : null;
+
+    return {
+      key: `${line.ts}-${i}`,
+      ts: line.ts,
+      timeLabel: formatFeedTime(line.ts),
+      actor,
+      isAgent,
+      agentId,
+      type: line.type,
+      message,
+      outcome,
+      durationMs,
+      error,
+      handoffs,
+    };
+  });
+}
+
+/** Local-zone feed clock, e.g. "9:24:07 AM"; null when ts is unparseable. */
+export function formatFeedTime(ts: string): string | null {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+export interface RosterAgent {
+  id: string;
+  label: string;
+  /** Initials for the avatar bubble (max 2 letters). */
+  initials: string;
+  /** Stable conversation side: even roster index left, odd right. */
+  side: "left" | "right";
+  /** Backend snapshot state when this agent has a row; null when unknown. */
+  state: AgentState["state"] | null;
+  /** Snapshot-recorded activity/error; null when no snapshot row exists. */
+  detail: string | null;
+  /** True when this agent authored at least one feed message. */
+  spoke: boolean;
+}
+
+/** Two-letter initials from a display label ("Code Analyzer" → "CA"). */
+export function agentInitials(label: string): string {
+  const parts = label.split(/[\s/]+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+}
+
+/**
+ * Participating-agent roster for one run, discovered from recorded evidence:
+ * agents that authored feed messages, plus snapshot rows with observed
+ * activity. Unattributed "Agent" messages get a generic roster entry only
+ * when no resolved agent spoke. Sides alternate in registry order so every
+ * agent keeps a stable, visually balanced alignment across refreshes.
+ */
+export function buildRunRoster(
+  feed: FeedEntry[],
+  agents: AgentSnapshotRow[] | null,
+): RosterAgent[] {
+  const snapshotById = new Map((agents ?? []).map((r) => [r.id, r]));
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string) => {
+    if (!seen.has(id)) {
+      seen.add(id);
+      order.push(id);
+    }
+  };
+  // Registry order first (stable identity), then any snapshot-only agents.
+  for (const id of Object.keys(SNAPSHOT_LABELS)) {
+    const inFeed = feed.some((e) => e.agentId === id);
+    const row = snapshotById.get(id);
+    const observed =
+      row != null &&
+      (row.status === "running" ||
+        row.status === "complete" ||
+        row.status === "failed" ||
+        row.status === "timed_out");
+    if (inFeed || observed) add(id);
+  }
+  for (const row of agents ?? []) {
+    if (!SNAPSHOT_LABELS[row.id]) add(row.id);
+  }
+
+  const roster: RosterAgent[] = order.map((id, i) => {
+    const row = snapshotById.get(id) ?? null;
+    let state: AgentState["state"] | null = null;
+    if (row) {
+      state = "idle";
+      if (row.status === "complete") state = "done";
+      else if (row.status === "failed" || row.status === "timed_out") state = "blocked";
+      else if (row.status === "running") state = "active";
+    }
+    const detail = row
+      ? row.error || row.activity || row.lastEvent || null
+      : null;
+    return {
+      id,
+      label: SNAPSHOT_LABELS[id] ?? row?.name ?? id,
+      initials: agentInitials(SNAPSHOT_LABELS[id] ?? row?.name ?? id),
+      side: i % 2 === 0 ? "left" : "right",
+      state,
+      detail: detail === "—" ? null : detail,
+      spoke: feed.some((e) => e.agentId === id),
+    };
+  });
+
+  // Unattributed agent output still deserves a visible, honestly generic sender.
+  if (feed.some((e) => e.isAgent && e.agentId === null)) {
+    roster.push({
+      id: "unattributed",
+      label: "Agent",
+      initials: "AG",
+      side: roster.length % 2 === 0 ? "left" : "right",
+      state: null,
+      detail: null,
+      spoke: true,
+    });
+  }
+  return roster;
+}
+
 export function derivePipeline(
   logs: RunLogLine[],
   currentStage: string | null,

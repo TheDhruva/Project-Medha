@@ -25,11 +25,33 @@ from app.changeintel.models import (
     UnresolvedDependency,
 )
 from app.changeintel.symbols import (
+    FileSymbols,
+    Language as _Lang,
     resolve_import,
     source_files,
+    _module_symbol,
+    _fqn_for_path,
 )
+from app.core.repo_files import WalkBudget as _WB
+
 
 _SCHEMA_MARKERS = {"schema", "schemas", "models", "model", "db", "database", "persistence", "tables"}
+
+
+def _language_for_rel(path: str) -> Language:
+    """Map a repo-relative path to a Language based on its suffix."""
+    ext = Path(path).suffix.lower()
+    if ext in {".py", ".pyi"}:
+        return Language.PYTHON
+    if ext in {".js", ".jsx", ".mjs", ".cjs"}:
+        return Language.JAVASCRIPT
+    if ext in {".ts", ".tsx"}:
+        return Language.TYPESCRIPT
+    if ext == ".json":
+        return Language.JSON
+    if ext in {".yml", ".yaml"}:
+        return Language.YAML
+    return Language.UNSUPPORTED
 
 
 @dataclass
@@ -63,19 +85,110 @@ class DependencyIndex:
         return self.files.get(path)
 
 
-def build_index(root, backend_paths: list[str] | None = None) -> DependencyIndex:
-    """Parse all supported files under root into a DependencyIndex."""
-    paths = backend_paths or source_files(root)
+def build_index(root, backend_paths: list[str] | None = None, budget: WalkBudget | None = None) -> DependencyIndex:
+    """Parse all supported files under root into a DependencyIndex.
+
+    Uses the shared budget-aware walker so that the same traversal limits
+    apply as in inventory and change-intel analysis.  When a budget is not
+    supplied a sensible default for a change-intel index is used.
+
+    Index coverage metadata is stored in ``index.coverage`` so callers can
+    report truncation/skipping honestly.
+    """
+    from app.core.repo_files import WalkBudget as _WB, walk_files as _wf
+
+    if budget is None:
+        budget = _WB(
+            max_files=20_000,
+            max_total_bytes=200 * 1024 * 1024,
+            max_file_bytes=1 * 1024 * 1024,
+            max_depth=20,
+            time_budget_s=120,
+            extra_skip_dirs=frozenset({".git", "node_modules", ".venv", "venv",
+                                         "__pycache__", ".next", "dist", "build"}),
+        )
+
+    result = _wf(root, budget)
     index = DependencyIndex()
-    for rel in sorted(paths):
-        full = root / rel
+    index.coverage = _IndexCoverage(
+        files_seen=result.total_files,
+        files_indexed=len(result.files),
+        files_skipped=sum(result.skipped_reasons.values()),
+        bytes_read=result.total_bytes,
+        truncated=result.truncated,
+        skipped_reasons=result.skipped_reasons,
+        skipped_by_gitignore=result.skipped_by_gitignore,
+        respected_depth=result.respected_depth,
+        elapsed_s=result.elapsed_s,
+    )
+
+    for f in result.files:
+        full = root / f.rel
         try:
             content = full.read_text(encoding="utf-8", errors="replace")
         except OSError:
             content = ""
-        index.contents[rel] = content
-        index.files[rel] = _parse(rel, content)
+        index.contents[f.rel] = content
+        # When needs_content was False the walker recorded the path but didn't
+        # guarantee readable content; store a minimal FileSymbols with module-only
+        # symbols so that import resolution has a path to look up, and record the
+        # coverage note below.
+        if not f.needs_content:
+            index.files[f.rel] = FileSymbols(
+                path=f.rel,
+                language=_language_for_rel(f.rel),
+                symbols=[_module_symbol(f.rel, _language_for_rel(f.rel))],
+                imports=[],
+                parse_error="content not parsed (file exceeds budget; see index coverage)",
+            )
+            continue
+        index.files[f.rel] = _parse(f.rel, content)
+
     return index
+
+
+class _IndexCoverage:
+    """Lightweight coverage metadata attached to a DependencyIndex result.
+
+    This is additive; existing code that accesses ``index.coverage`` will get a
+    dict-like object with the fields below.  Front-end UI can render keys it
+    knows and ignore the rest.
+    """
+
+    def __init__(
+        self,
+        files_seen: int,
+        files_indexed: int,
+        files_skipped: int,
+        bytes_read: int,
+        truncated: bool,
+        skipped_reasons: dict[str, int],
+        skipped_by_gitignore: int,
+        respected_depth: int,
+        elapsed_s: float,
+    ):
+        self.files_seen = files_seen
+        self.files_indexed = files_indexed
+        self.files_skipped = files_skipped
+        self.bytes_read = bytes_read
+        self.truncated = truncated
+        self.skipped_reasons = skipped_reasons
+        self.skipped_by_gitignore = skipped_by_gitignore
+        self.respected_depth = respected_depth
+        self.elapsed_s = elapsed_s
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "files_seen": self.files_seen,
+            "files_indexed": self.files_indexed,
+            "files_skipped": self.files_skipped,
+            "bytes_read": self.bytes_read,
+            "truncated": self.truncated,
+            "skipped_reasons": self.skipped_reasons,
+            "skipped_by_gitignore": self.skipped_by_gitignore,
+            "respected_depth": self.respected_depth,
+            "elapsed_s": round(self.elapsed_s, 2),
+        }
 
 
 def index_file(index: DependencyIndex, rel_path: str, content: str) -> FileSymbols:
@@ -305,20 +418,57 @@ def _js_edges(
 
 
 def _config_edges(path: str, index: DependencyIndex, edges: list[EdgeCandidate]) -> None:
+    """Config dependency edges using token-indexed lookups (Phase 2).
+
+    Instead of iterating all candidate files for each config and doing O(N) substring
+    probes, we tokenize the config content once and build a reverse map from tokens
+    to candidate paths.  This prevents the O(files²) probe scan that could stress
+    large repositories.
+
+    Every edge carries ``Confidence.MEDIUM`` — these are heuristic references,
+    not structurally verified imports.
+    """
     content = index.contents.get(path, "")
     if not content:
         return
-    refs: dict[str, int] = {}
-    for candidate, other in sorted(index.files.items()):
-        if candidate == path:
-            continue
+
+    # ------------------------------------------------------------------
+    # Build a map from file-identifier tokens to candidate paths.
+    # For each file in the index we record its path, fqn (path without ext),
+    # and stem (filename without ext) as lookup keys.
+    # ------------------------------------------------------------------
+    token_to_candidate: dict[str, str] = {}
+    for candidate in index.files:
+        # The full repo-relative path
+        if len(candidate) >= 3:
+            token_to_candidate.setdefault(candidate, candidate)
+        # File-quality name (path stem)
         fqn = _fqn_for(candidate)
-        for probe in {candidate, fqn, _stem(candidate)}:
-            if probe and len(probe) >= 3 and probe in content:
-                refs.setdefault(probe, content.find(probe))
-                break
+        if len(fqn) >= 3:
+            token_to_candidate.setdefault(fqn, candidate)
+        # File stem (filename without extension)
+        stem = _stem(candidate)
+        if len(stem) >= 3:
+            token_to_candidate.setdefault(stem, candidate)
+
+    # Tokenize the config content: find every unique token >= 3 chars composed
+    # of word chars, dots, slashes, at-signs, and hyphens.
+    import re as _re
+    tokens: set[str] = set(_re.findall(r"[\w./@-]{3,}", content))
+
+    # For each token found in the config, look up the candidate path.
+    refs: dict[str, int] = {}  # probe -> first position in content
+    for token in tokens:
+        if token in token_to_candidate:
+            target = token_to_candidate[token]
+            pos = content.find(token)
+            if pos != -1:
+                refs[token] = pos
+
+    # Build edges from the collected references, sorted by position so that
+    # evidence ordering is deterministic.
     for probe, pos in sorted(refs.items(), key=lambda item: item[1]):
-        target = _probe_to_path(probe, index)
+        target = token_to_candidate.get(probe)
         if target is None:
             continue
         edges.append(

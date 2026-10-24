@@ -6,7 +6,7 @@ import type { ExecutionMode, RuntimeLogsView } from "@/lib/demo/types";
  * Real container stdout/stderr for `real` executions, from GET /logs
  * `runtime_logs`. Renders only backend-provided strings — never synthesized
  * output, and never the SSE event replay (that lives in the event timeline).
- * Returns null when runtime logs don't apply to this run.
+ * Returns null when Execution Logs don't apply to this run.
  */
 export function RuntimeLogsPanel({
   executionMode,
@@ -20,11 +20,11 @@ export function RuntimeLogsPanel({
 
   return (
     <section
-      aria-label="Runtime logs"
+      aria-label="Execution Logs"
       className="rounded-xl border border-medha-border bg-white p-5 sm:p-6"
     >
       <p className="medha-label">
-        Runtime logs
+        Execution Logs
       </p>
       <h2 className="mt-1 text-lg font-semibold tracking-tight text-medha-text">
         Application container output

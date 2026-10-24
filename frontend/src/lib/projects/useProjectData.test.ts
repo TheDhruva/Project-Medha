@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
 
-import type { AgentSnapshotRow } from "@/lib/api/client";
+import type { AgentSnapshotRow, RunLogLine } from "@/lib/api/client";
 import {
   agentsFromSnapshot,
+  agentInitials,
+  buildRunFeed,
+  buildRunRoster,
+  formatFeedTime,
   resolveAgents,
   type RunHydration,
 } from "@/lib/projects/useProjectData";
+
+function log(
+  partial: Partial<RunLogLine> & { ts: string; message: string; type: string },
+): RunLogLine {
+  return {
+    level: "info",
+    source: "system",
+    stage: null,
+    status: null,
+    is_demo: false,
+    ...partial,
+  };
+}
 
 function row(partial: Partial<AgentSnapshotRow> & { id: string }): AgentSnapshotRow {
   return {
@@ -76,5 +93,217 @@ describe("backend agent snapshot mapping", () => {
     expect(fromLogs.source).toBe("logs");
     // Fallback never claims unobserved stages as done.
     expect(fromLogs.agents.every((a) => a.state !== "done")).toBe(true);
+  });
+});
+
+describe("buildRunFeed", () => {
+  it("orders recorded events chronologically and renders system updates factually", () => {
+    const feed = buildRunFeed(
+      [
+        log({
+          ts: "2026-10-23T10:00:10Z",
+          type: "deployment.completed",
+          message: "Deployment completed successfully.",
+          status: "success",
+        }),
+        log({
+          ts: "2026-10-23T10:00:00Z",
+          type: "stage.started",
+          source: "ANALYZE",
+          stage: "ANALYZE",
+          message: "MEDHA is identifying the application's deployment structure.",
+        }),
+      ],
+      null,
+    );
+    expect(feed.map((e) => e.ts)).toEqual([
+      "2026-10-23T10:00:00Z",
+      "2026-10-23T10:00:10Z",
+    ]);
+    expect(feed[0]).toMatchObject({
+      actor: "MEDHA",
+      isAgent: false,
+      message: "MEDHA is identifying the application's deployment structure.",
+      outcome: null,
+    });
+    expect(feed[1].outcome).toBe("success");
+    expect(feed[0].timeLabel).not.toBeNull();
+  });
+
+  it("attributes agent events and handoffs only from recorded evidence", () => {
+    const snapshot = [
+      row({
+        id: "analyzer",
+        status: "complete",
+        activity: "Repository analysis found 2 services.",
+        lastEvent: "Repository analysis found 2 services.",
+        durationMs: 4000,
+        deps: ["preflight"],
+      }),
+      row({
+        id: "docker",
+        status: "complete",
+        activity: "Container plan ready.",
+        lastEvent: "Container plan ready.",
+        durationMs: 1500,
+        deps: ["analyzer"],
+      }),
+    ];
+    const feed = buildRunFeed(
+      [
+        log({ ts: "2026-10-23T10:00:01Z", type: "agent.started", message: "analyzer started" }),
+        log({
+          ts: "2026-10-23T10:00:05Z",
+          type: "agent.completed",
+          message: "Repository analysis found 2 services.",
+          status: "success",
+        }),
+        log({ ts: "2026-10-23T10:00:06Z", type: "agent.started", message: "docker started" }),
+      ],
+      snapshot,
+    );
+    expect(feed[0]).toMatchObject({ actor: "Code Analyzer", isAgent: true, message: "Started." });
+    // preflight never recorded a completion → no handoff is invented.
+    expect(feed[0].handoffs).toEqual([]);
+    expect(feed[1]).toMatchObject({ actor: "Code Analyzer", durationMs: 4000, outcome: "success" });
+    // analyzer completed earlier in the feed and docker declares it as a dep.
+    expect(feed[2].actor).toBe("Docker");
+    expect(feed[2].handoffs).toEqual([{ fromIndex: 1, fromLabel: "Code Analyzer" }]);
+  });
+
+  it("never guesses attribution, severity comes from the record", () => {
+    const ambiguous = [
+      row({ id: "docker", status: "complete", activity: "Same summary." }),
+      row({ id: "nginx", status: "complete", activity: "Same summary." }),
+    ];
+    const feed = buildRunFeed(
+      [
+        log({ ts: "2026-10-23T10:00:01Z", type: "agent.started", message: "docker started" }),
+        log({ ts: "2026-10-23T10:00:02Z", type: "agent.completed", message: "Same summary.", status: "success" }),
+        log({ ts: "2026-10-23T10:00:03Z", type: "agent.completed", message: "No snapshot recorded this.", status: "failed" }),
+        log({ ts: "2026-10-23T10:00:04Z", type: "stage.completed", stage: "VERIFY", status: "warning", message: "One check to review." }),
+        log({ ts: "2026-10-23T10:00:05Z", type: "deployment.failed", message: "Run failed." }),
+      ],
+      ambiguous,
+    );
+    // Two snapshot rows recorded the same text → stays generic, never guessed.
+    expect(feed[1].actor).toBe("Agent");
+    expect(feed[1].durationMs).toBeNull();
+    expect(feed[2].actor).toBe("Agent");
+    // "agent.completed" with a recorded failure is an error, not a success.
+    expect(feed[2].outcome).toBe("error");
+    expect(feed[3].outcome).toBe("warning");
+    expect(feed[4].outcome).toBe("error");
+  });
+
+  it("dedupes repeated records, keeps unknown events and bad timestamps safe", () => {
+    const dup = log({
+      ts: "2026-10-23T10:00:01Z",
+      type: "stage.started",
+      source: "PREFLIGHT",
+      stage: "PREFLIGHT",
+      message: "Preflight started.",
+    });
+    const feed = buildRunFeed(
+      [
+        dup,
+        // Same event returned twice by a refresh — must not double-render.
+        { ...dup },
+        log({ ts: "2026-10-23T10:00:02Z", type: "mystery.event", message: "Unrecognized but recorded." }),
+        log({ ts: "not-a-timestamp", type: "stage.completed", message: "No parseable time." }),
+      ],
+      null,
+    );
+    expect(feed).toHaveLength(3);
+    // Unknown event types stay factual system entries; nothing crashes.
+    expect(feed[1]).toMatchObject({ isAgent: false, actor: "MEDHA", message: "Unrecognized but recorded." });
+    // Unparseable ts sorts last and simply has no clock label.
+    expect(feed[2].ts).toBe("not-a-timestamp");
+    expect(feed[2].timeLabel).toBeNull();
+    // Feed keys stay unique even for identical inputs.
+    expect(new Set(feed.map((e) => e.key)).size).toBe(feed.length);
+  });
+
+  it("keeps runs isolated: the same helper on another run's records never mixes", () => {
+    const runA = buildRunFeed(
+      [log({ ts: "2026-10-23T10:00:01Z", type: "agent.started", message: "docker started" })],
+      null,
+    );
+    const runB = buildRunFeed(
+      [log({ ts: "2026-10-23T11:00:01Z", type: "stage.started", source: "VERIFY", stage: "VERIFY", message: "Verifying." })],
+      null,
+    );
+    // Each call only reflects its own input — no cross-run leakage by construction.
+    expect(runA.map((e) => e.message)).toEqual(["Started."]);
+    expect(runA.map((e) => e.agentId)).toEqual(["docker"]);
+    expect(runB.map((e) => e.message)).toEqual(["Verifying."]);
+  });
+});
+
+describe("buildRunRoster", () => {
+  const started = (id: string, ts: string) =>
+    log({ ts, type: "agent.started", message: `${id} started` });
+
+  it("discovers participating agents from recorded evidence with stable sides", () => {
+    const feed = buildRunFeed(
+      [
+        started("analyzer", "2026-10-23T10:00:01Z"),
+        started("docker", "2026-10-23T10:00:02Z"),
+      ],
+      null,
+    );
+    const roster = buildRunRoster(feed, null);
+    expect(roster.map((a) => a.id)).toEqual(["analyzer", "docker"]);
+    expect(roster.map((a) => a.label)).toEqual(["Code Analyzer", "Docker"]);
+    // Stable, visually balanced alternating sides; every agent still named.
+    expect(roster.map((a) => a.side)).toEqual(["left", "right"]);
+    expect(roster.every((a) => a.spoke)).toBe(true);
+    // Sides are deterministic across rebuilds (refresh safety).
+    expect(buildRunRoster(feed, null).map((a) => a.side)).toEqual(["left", "right"]);
+  });
+
+  it("includes observed snapshot agents, skips idle ones, adds no invented state", () => {
+    const feed = buildRunFeed(
+      [log({ ts: "2026-10-23T10:00:09Z", type: "agent.completed", message: "Repo scan done.", status: "success" })],
+      [
+        row({ id: "nginx", status: "complete", activity: "Config ready." }),
+        row({ id: "security", status: "running", activity: "Scanning deps." }),
+        row({ id: "verifier", status: "idle", activity: "Waiting" }),
+      ],
+    );
+    const roster = buildRunRoster(feed, [
+      row({ id: "nginx", status: "complete", activity: "Config ready." }),
+      row({ id: "security", status: "running", activity: "Scanning deps." }),
+      row({ id: "verifier", status: "idle", activity: "Waiting" }),
+    ]);
+    // nginx (complete) + security (running) in registry order; idle verifier
+    // is not a participant; the unattributed slot appends last.
+    expect(roster.map((a) => a.id)).toEqual(["nginx", "security", "unattributed"]);
+    expect(roster[0].state).toBe("done");
+    expect(roster[1].state).toBe("active");
+    // The unattributed agent.completed gets a generic roster slot, honestly labeled.
+    expect(roster[2].label).toBe("Agent");
+    // Unattributed slot has no invented state or detail.
+    expect(roster[2].state).toBeNull();
+    expect(roster[2].detail).toBeNull();
+  });
+
+  it("returns an empty roster when nothing was recorded", () => {
+    expect(buildRunRoster([], null)).toEqual([]);
+  });
+});
+
+describe("agentInitials", () => {
+  it("derives up to two initials from labels", () => {
+    expect(agentInitials("Code Analyzer")).toBe("CA");
+    expect(agentInitials("Mediator / CNP")).toBe("MC");
+    expect(agentInitials("Docker")).toBe("DO");
+  });
+});
+
+describe("formatFeedTime", () => {
+  it("formats a real timestamp and returns null for unparseable input", () => {
+    expect(formatFeedTime("2026-10-23T10:00:00Z")).toMatch(/\d{1,2}:\d{2}:\d{2} (AM|PM)/);
+    expect(formatFeedTime("not-a-date")).toBeNull();
   });
 });

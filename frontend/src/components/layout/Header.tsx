@@ -2,26 +2,25 @@
 
 import Link from "next/link";
 import { Show, UserButton, SignInButton } from "@clerk/nextjs";
-import { useParams, usePathname } from "next/navigation";
-import { repoForProjectId, shortNameForRepo } from "@/lib/projects/projects";
+import { cn } from "@/lib/ui/cn";
 
 // Inlined at build time: keyless builds (Render before Clerk secrets are set)
 // have no ClerkProvider, and Clerk components throw without one — even at
 // prerender. Guest mode simply hides the account controls.
 const CLERK_ON = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
-export function Header() {
-  const pathname = usePathname() ?? "";
-  const params = useParams<{ id?: string }>();
-  const activeId = params?.id ?? null;
-
-  // Current project context only: never fixture branding, never demo badges.
-  const repo =
-    activeId && pathname.startsWith("/projects/") ? repoForProjectId(activeId) : null;
-  const projectName = repo ? shortNameForRepo(repo) : null;
-
+/* Route chrome: the project display name is resolved by the AppShell from
+   the projects API (or a legacy repository URL) — never derived from the
+   project ID, which would surface opaque `prj_*` identifiers. */
+export function Header({
+  projectName,
+  pending = false,
+}: {
+  projectName: string | null;
+  pending?: boolean;
+}) {
   return (
-    <header className="sticky top-0 z-40 h-16 shrink-0 border-b border-medha-border bg-medha-surface">
+    <header className="sticky top-0 z-40 h-14 shrink-0 border-b border-medha-border bg-medha-surface">
       <div className="mx-auto flex h-full w-full max-w-[1600px] items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
         <div className="flex min-w-0 items-center gap-2">
           <Link
@@ -31,11 +30,17 @@ export function Header() {
             MEDHA
           </Link>
 
-          {projectName ? (
+          {projectName || pending ? (
             <span className="flex min-w-0 items-center gap-2">
               <span aria-hidden className="h-4 w-px shrink-0 bg-medha-border" />
-              <span className="max-w-[38vw] truncate text-[13.5px] font-medium text-medha-secondary sm:max-w-none">
-                {projectName}
+              <span
+                className={cn(
+                  "max-w-[38vw] truncate text-[13.5px] font-medium sm:max-w-[28rem]",
+                  projectName ? "text-medha-secondary" : "text-medha-tertiary",
+                )}
+                title={projectName ?? undefined}
+              >
+                {projectName ?? "Loading project…"}
               </span>
             </span>
           ) : null}

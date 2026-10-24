@@ -137,13 +137,14 @@ Reload and restart notes:
 - Editing files under `backend/app` triggers a backend reload; the frontend keeps running and API/SSE calls resume against the reloaded backend.
 - Full restart (`Ctrl+C`, then `npm run dev` again) is required after `.env` changes, `pip install` / `npm install` changes, or port changes.
 - The reloader watches `backend/app` only — `.venv`, `data/`, caches, and build output are never watched.
+- The root dev launcher starts Next.js directly instead of through a nested `npm run`; this prevents orphaned Next processes on Windows from keeping port `3000` or stale `.next` state after a restart.
 
 Troubleshooting:
 
-- `Port 8000 ... is already in use`: another backend is running (the launcher refuses to start a duplicate). Stop the other process and retry. Same for port `3000` (Next.js reports `EADDRINUSE`); stop the other frontend and retry.
+- `Port 8000 ... is already in use`: another backend is running (the launcher refuses to start a duplicate). Stop the other process and retry. Same for port `3000` (Next.js reports `EADDRINUSE`); stop the other frontend and retry. After upgrading from an older launcher, close any stale `node`/`uvicorn` processes once before starting the new launcher.
 - Backend exits with Postgres connection errors: the backend follows `MEDHA_DATABASE_URL` from the root `.env` first (`backend/.env` is only a fallback; shell env wins over both). Empty or non-Postgres values mean local SQLite. Clear or fix the URL, then restart.
 - `npm run dev` fails immediately with both processes stopping: read the `[backend]` / `[frontend]` prefixed output — the first error names the failing side.
-- Homepage `/` returns 500 `ENOENT ... routes-manifest.json`: the one-time frontend build did not complete (offline `npm` registry, missing `frontend/.env.local` keys at build time, or a deleted `frontend/.next`). Run `npm --prefix frontend run build` once, then retry `npm run dev`. Rewrites (`/health`, `/api/*`) keep working while this is broken, so use them to tell this apart from a backend outage.
+- Homepage `/` returns 500: inspect the `[frontend]` output for the Next.js compile error. The dev launcher now starts `next dev` directly and lets Next regenerate its development artifacts; do not run a production build as a prerequisite for local development. If the generated cache is corrupted, stop the dev server and remove the specific `frontend/.next` directory, then retry.
 - Sign-in loops or Clerk errors locally: `frontend/.env.local` (untracked) must define the Clerk publishable/secret keys; the homepage and demo run without them.
 
 ## Configuration

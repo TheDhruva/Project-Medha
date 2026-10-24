@@ -35,7 +35,6 @@ import {
   type ExecutionReadiness,
   type ScoresResponse,
 } from "@/lib/api/client";
-import { cn } from "@/lib/ui/cn";
 
 /* A finished run reports completion only — never health. Only genuinely
    positive evidence (verification passed, preserved services) uses green. */
@@ -45,14 +44,6 @@ function statusTone(status: string): "success" | "warning" | "error" | "info" | 
   if (isRunningStatus(status)) return "info";
   return "neutral";
 }
-
-const TABS = [
-  { id: "overview", label: "Overview" },
-  { id: "runs", label: "Runs" },
-  { id: "architecture", label: "Architecture" },
-  { id: "deployments", label: "Deployments" },
-  { id: "settings", label: "Settings" },
-] as const;
 
 export function ProjectBoard({ projectId }: { projectId: string }) {
   const router = useRouter();
@@ -274,25 +265,15 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
     </Link>
   );
 
-  const tabHref = (id: string): string => {
-    switch (id) {
-      case "runs": return `/projects/${projectId}/runs`;
-      case "architecture": return `/projects/${projectId}/graphs`;
-      case "deployments": return selected ? `/projects/${projectId}/runs/${selected.deployment_id}` : `/projects/${projectId}/runs`;
-      case "settings": return `/projects/${projectId}/settings`;
-      default: return `/projects/${projectId}`;
-    }
-  };
-
   return (
     <AppShell>
       <div className="mx-auto w-full max-w-[1280px] space-y-3">
-        {/* ---- Compact project header + operational status ---- */}
-        <div className="rounded-lg border border-medha-border bg-medha-surface px-4 py-3">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+        {/* ---- Project header: identity, repository context, actions.
+             Borderless so white panels below carry the content hierarchy. ---- */}
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="break-words text-[24px] font-semibold leading-tight tracking-tight text-medha-text">{name}</h1>
+                <h1 className="break-words text-[26px] font-semibold leading-tight tracking-tight text-medha-text">{name}</h1>
                 {latest && !loading ? (
                   <span className="inline-flex items-center gap-1.5">
                     <MedhaFace
@@ -311,14 +292,14 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                   </span>
                 ) : null}
               </div>
-              <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[13px] text-medha-secondary">
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[12.5px] text-medha-tertiary">
                 {repoIdentity.href ? (
                   <a
                     href={repoIdentity.href}
                     target="_blank"
                     rel="noopener noreferrer"
                     title={repo ?? undefined}
-                    className="medha-mono truncate font-medium text-medha-secondary transition hover:text-medha-text hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                    className="medha-mono truncate font-medium text-medha-tertiary transition-colors hover:text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
                   >
                     {repoIdentity.label}
                   </a>
@@ -329,8 +310,8 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                 )}
                 {project?.branch ? (
                   <>
-                    <span className="text-medha-tertiary" aria-hidden>·</span>
-                    <span className="medha-mono text-medha-tertiary">{project.branch}</span>
+                    <span aria-hidden>·</span>
+                    <span className="medha-mono">{project.branch}</span>
                   </>
                 ) : null}
               </div>
@@ -368,25 +349,6 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                 />
               </div>
             </div>
-          </div>
-          {/* Secondary navigation — existing routes, no duplicate destinations */}
-          <nav aria-label="Project sections" className="mt-2.5 flex flex-wrap gap-1 border-t border-medha-border pt-2">
-            {TABS.map((t) => (
-              <Link
-                key={t.id}
-                href={tabHref(t.id)}
-                aria-current={t.id === "overview" ? "page" : undefined}
-                className={cn(
-                  "rounded-md px-3 py-1.5 text-[13.5px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent",
-                  t.id === "overview"
-                    ? "bg-medha-text text-white"
-                    : "text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text",
-                )}
-              >
-                {t.label}
-              </Link>
-            ))}
-          </nav>
         </div>
 
         {!backendReachable && !loading ? <ErrorBox message={error ?? "Cannot reach MEDHA backend."} onRetry={() => refresh()} /> : null}

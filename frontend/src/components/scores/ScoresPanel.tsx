@@ -1,18 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { fetchScores, type ProductScore } from "@/lib/api/client";
+import { scoreTone } from "@/lib/projects/metrics";
+import { Badge, Panel } from "@/components/ui/primitives";
+import { cn } from "@/lib/ui/cn";
 
-const SCORE_META: { key: string; title: string; blurb: string }[] = [
-  { key: "code_quality", title: "Code quality", blurb: "Static analysis and build/test evidence that actually ran for this run." },
-  { key: "security", title: "Security posture", blurb: "Scanner results and container security config. Missing scans are unassessed, never clean." },
-  { key: "verification_confidence", title: "Verification confidence", blurb: "Required verification checks passed, warned, or failed." },
-  { key: "deployment_readiness", title: "Deployment readiness", blurb: "Target support, verification, execution and recorded health evidence." },
-  { key: "performance", title: "Performance", blurb: "Static risk estimate. Benchmarks appear only when actually measured." },
-  { key: "optimization", title: "Optimization", blurb: "Higher means better optimized (fewer open opportunities)." },
-];
+/* Verification scores, two panels side by side on wide screens:
+   a compact clickable summary (left) and the actionable findings behind
+   low scores (right). Backed by stored scoring evidence (backend
+   `scores-v2`): 100 minus each failed/warning check's documented
+   score_impact, then capped. A check that never ran is incompleteness —
+   never a defect, never a pass. Every sentence derives from the stored
+   evidence; when the reason is not recorded, the panel says so instead
+   of guessing. */
 
-type EvidenceCheck = {
+interface ScoreFinding {
+  severity?: string;
+  rule_id?: string;
+  path?: string;
+  line?: number | string | null;
+  message?: string;
+}
+
+interface ScoreCheck {
   id?: string;
   title?: string;
   status?: string;
@@ -21,7 +33,8 @@ type EvidenceCheck = {
   evidence_source?: string;
   reference?: string | null;
   score_impact?: number;
-};
+  findings?: ScoreFinding[];
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -29,7 +42,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function evidenceChecks(score: ProductScore): EvidenceCheck[] {
+function evidenceChecks(score: ProductScore): ScoreCheck[] {
   const raw = asRecord(score.evidence)?.checks;
   return Array.isArray(raw)
     ? raw
@@ -44,85 +57,286 @@ function evidenceChecks(score: ProductScore): EvidenceCheck[] {
           evidence_source: typeof c.evidence_source === "string" ? c.evidence_source : undefined,
           reference: typeof c.reference === "string" ? c.reference : null,
           score_impact: typeof c.score_impact === "number" ? c.score_impact : undefined,
+          findings: Array.isArray(c.findings)
+            ? c.findings
+                .map(asRecord)
+                .filter((f): f is Record<string, unknown> => f !== null)
+                .map((f) => ({
+                  severity: typeof f.severity === "string" ? f.severity : undefined,
+                  rule_id: typeof f.rule_id === "string" ? f.rule_id : undefined,
+                  path: typeof f.path === "string" ? f.path : undefined,
+                  line: typeof f.line === "number" || typeof f.line === "string" ? f.line : null,
+                  message: typeof f.message === "string" ? f.message : undefined,
+                }))
+            : [],
         }))
     : [];
 }
 
-const STATUS_STYLE: Record<string, string> = {
-  passed: "text-medha-success-ink",
-  warning: "text-medha-warning",
-  failed: "text-medha-danger",
-  not_assessed: "text-medha-tertiary",
-  skipped: "text-medha-tertiary",
-  not_applicable: "text-medha-tertiary",
+/* Plain-English text for the documented score caps and unassessed reasons
+   the backend records (see backend/app/scores/compute.py). Unknown values
+   fall back to the recorded backend text — never an invented explanation. */
+const CAP_TEXT: Record<string, string> = {
+  secret_finding: "A secret (like a password or key) was found in the code.",
+  critical_security: "A critical security problem was found.",
+  high_security: "A serious security problem was found.",
+  critical_code: "A serious code problem was found.",
+  verification_failed: "Verification did not pass, so readiness cannot go above 40.",
+  unhealthy: "The application was reported unhealthy.",
+  unsupported_target: "This deployment target is not supported.",
+  missing_health: "App health was not checked, so readiness cannot go above 75.",
+  missing_execution: "The app was not really executed, so readiness cannot go above 60.",
+  simulated_execution: "This run used a simulation, which is not real deployment evidence.",
+  critical_blocker: "A critical blocker was found.",
+  no_security_scanner: "The security scan has not finished, so the score cannot go above 60.",
+  partial_security_scanner: "Some security scans did not finish, so the score cannot go above 85.",
+  no_static_analysis: "The code check has not run, so the score cannot go above 80.",
 };
 
-function ScoreCard({ title, blurb, score }: { title: string; blurb: string; score?: ProductScore }) {
-  if (!score) {
-    return (
-      <div className="rounded-lg border border-medha-border bg-white px-3.5 py-3">
-        <p className="text-[14.5px] font-semibold leading-5 text-medha-text">{title}</p>
-        <p className="mt-0.5 text-[13px] font-medium text-medha-tertiary">Not measured</p>
-        <p className="mt-1 text-[12.5px] leading-4 text-medha-secondary">{blurb}</p>
-      </div>
-    );
+const REASON_TEXT: Record<string, string> = {
+  "no code-quality check produced evidence for this run": "No code check produced evidence for this run.",
+  "no security scanner completed; security coverage is unknown": "The security scan has not finished.",
+  "no required verification check actually ran": "No required verification check actually ran.",
+  "no verification checks were recorded for this run": "No verification checks were recorded.",
+  "no deployment-readiness check produced evidence": "No deployment-readiness evidence was recorded.",
+  "no applicable check produced evidence": "No check produced evidence for this run.",
+};
+
+/* How a finding should be labelled: a confirmed problem in the repository,
+   an unfinished analysis, or a completed pass. Kept to a small, consistent
+   vocabulary so beginners can trust the colors. */
+const KIND_TEXT = {
+  code: { label: "Code issue", badge: "error" as const },
+  security: { label: "Security issue", badge: "error" as const },
+  fail: { label: "Failed check", badge: "error" as const },
+  missing: { label: "Check not run", badge: "warning" as const },
+  incomplete: { label: "Check incomplete", badge: "warning" as const },
+  risk: { label: "Recorded risk", badge: "warning" as const },
+  passed: { label: "Passed", badge: "success" as const },
+};
+
+type FindingKind = keyof typeof KIND_TEXT;
+
+interface CategoryFinding {
+  kind: FindingKind;
+  title: string;
+  points?: number;
+  files?: ScoreFinding[];
+  source?: string;
+  reference?: string | null;
+}
+
+const VALUE_TEXT: Record<string, string> = {
+  success: "text-medha-success-ink",
+  warning: "text-medha-warning",
+  danger: "text-medha-danger",
+  neutral: "text-medha-tertiary",
+};
+
+/* Which documented cap triggers mean "the analysis never ran" vs "a real
+   problem was confirmed". Mirrors backend/app/scores/compute.py CAPS. */
+const CAP_KIND: Record<string, FindingKind> = {
+  secret_finding: "security",
+  critical_security: "security",
+  high_security: "security",
+  critical_code: "code",
+  critical_blocker: "fail",
+  verification_failed: "fail",
+  unhealthy: "fail",
+  unsupported_target: "fail",
+  no_security_scanner: "missing",
+  no_static_analysis: "missing",
+  partial_security_scanner: "incomplete",
+  simulated_execution: "incomplete",
+  missing_health: "incomplete",
+  missing_execution: "incomplete",
+};
+
+const CATEGORIES = [
+  { key: "code_quality", title: "Code quality", coverageText: "completed", kind: "code" },
+  { key: "security", title: "Security", coverageText: "completed", kind: "security" },
+  { key: "verification_confidence", title: "Verification", coverageText: "passed", kind: "fail" },
+  { key: "deployment_readiness", title: "Deployment readiness", coverageText: "passed", kind: "fail" },
+] as const;
+
+function coverageLine(
+  score: ProductScore | undefined,
+  coverageText: "completed" | "passed",
+): string | null {
+  const coverage = asRecord(asRecord(score?.evidence)?.coverage);
+  if (
+    !coverage ||
+    typeof coverage.assessed !== "number" ||
+    typeof coverage.applicable !== "number" ||
+    typeof coverage.passed !== "number"
+  ) {
+    return null;
   }
+  return coverageText === "passed"
+    ? `${coverage.passed}/${coverage.applicable} checks passed`
+    : `${coverage.assessed}/${coverage.applicable} checks completed`;
+}
+
+function categoryFindings(
+  score: ProductScore | undefined,
+  fallbackKind: FindingKind,
+): CategoryFinding[] {
+  if (!score) return [];
   const ev = asRecord(score.evidence) ?? {};
-  const coverage = asRecord(ev.coverage);
   const checks = evidenceChecks(score);
-  const relevant = checks.filter((c) => c.status !== "passed" || c.severity === "critical" || c.severity === "high");
-  const top = typeof ev.top_finding === "string" ? ev.top_finding : null;
+  const caps = Array.isArray(ev.caps_applied)
+    ? ev.caps_applied.map(asRecord).filter((c): c is Record<string, unknown> => c !== null)
+    : [];
   const reason = typeof ev.reason === "string" ? ev.reason : null;
+  const out: CategoryFinding[] = [];
+
+  if (score.value == null) {
+    out.push({
+      kind: "missing",
+      title: reason ? (REASON_TEXT[reason] ?? reason) : "No evidence was recorded for this run.",
+    });
+    return out;
+  }
+
+  for (const cap of caps) {
+    const trigger = typeof cap.trigger === "string" ? cap.trigger : "";
+    out.push({
+      kind: CAP_KIND[trigger] ?? "risk",
+      title: CAP_TEXT[trigger] ?? (typeof cap.reason === "string" ? cap.reason : "A recorded risk caps this score."),
+    });
+  }
+  for (const c of checks) {
+    if ((c.status === "failed" || c.status === "warning") && (c.score_impact ?? 0) > 0) {
+      out.push({
+        kind: fallbackKind,
+        title: c.finding?.trim() || c.title || "Check recorded an issue.",
+        points: c.score_impact,
+        files: c.findings?.filter((f) => f.path) ?? [],
+        source: c.evidence_source,
+        reference: c.reference,
+      });
+    }
+  }
+  if (out.length === 0) {
+    const coverage = asRecord(ev.coverage);
+    const clean =
+      coverage &&
+      typeof coverage.assessed === "number" &&
+      typeof coverage.failed === "number" &&
+      typeof coverage.warnings === "number" &&
+      coverage.assessed > 0 &&
+      coverage.failed === 0 &&
+      coverage.warnings === 0;
+    out.push({
+      kind: "passed",
+      title: clean
+        ? "All completed checks passed."
+        : "The exact reason for this score is not recorded with the evidence.",
+    });
+  }
+  return out;
+}
+
+function ScoreRow({
+  title,
+  score,
+  coverageText,
+  href,
+}: {
+  title: string;
+  score: ProductScore | undefined;
+  coverageText: "completed" | "passed";
+  href: string;
+}) {
+  const coverage = coverageLine(score, coverageText);
   return (
-    <div className="rounded-lg border border-medha-border bg-white px-3.5 py-3">
-      <p className="text-[14.5px] font-semibold leading-5 text-medha-text">{title}</p>
-      {score.value == null ? (
-        <p className="mt-0.5 text-[13px] font-medium text-medha-tertiary">Not assessed</p>
-      ) : (
-        <p className="mt-0.5 text-[24px] font-semibold leading-none text-medha-text">{Math.round(score.value)}<span className="text-[13px] font-normal text-medha-tertiary"> / 100</span></p>
-      )}
-      {top ? <p className="mt-1 text-[13px] leading-5 text-medha-secondary">{top}</p> : null}
-      {score.value == null && reason ? (
-        <p className="mt-1 text-[12.5px] leading-5 text-medha-secondary">Reason: {reason}</p>
+    <Link
+      href={href}
+      className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-2.5 transition-colors hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+    >
+      <span className="text-[14px] font-semibold text-medha-text">
+        {title} ·{" "}
+        {score?.value == null ? (
+          <span className="text-medha-tertiary">{score ? "Not assessed" : "Not measured"}</span>
+        ) : (
+          <span className={VALUE_TEXT[scoreTone(score.value)]}>{Math.round(score.value)}/100</span>
+        )}
+      </span>
+      {coverage ? (
+        <span className="ml-auto shrink-0 text-[12.5px] text-medha-tertiary">{coverage}</span>
       ) : null}
-      {coverage && typeof coverage.assessed === "number" && typeof coverage.applicable === "number" ? (
-        <p className="mt-1 text-[12px] leading-4 text-medha-secondary">Coverage: {coverage.assessed}/{coverage.applicable} applicable checks assessed</p>
-      ) : null}
-      <p className="mt-0.5 break-words text-[12px] leading-4 text-medha-tertiary">
-        {score.version} · {score.computed_at.slice(0, 19).replace("T", " ")} · inputs {score.inputs_hash.slice(0, 12)}
-        {score.target_sha ? ` · revision ${score.target_sha.slice(0, 8)}` : ""}
-      </p>
-      <p className="mt-1 text-[12.5px] leading-4 text-medha-secondary">{blurb}</p>
-      {relevant.length > 0 ? (
-        <details className="mt-1.5">
-          <summary className="cursor-pointer text-[12.5px] font-semibold text-medha-accent">
-            Find {relevant.length} check{relevant.length === 1 ? "" : "s"} affecting this score
-          </summary>
-          <ul className="mt-1 space-y-1">
-            {relevant.map((c, i) => (
-              <li key={`${c.id ?? i}`} className="rounded border border-medha-border px-2 py-1.5 text-[12.5px]">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className={`font-semibold ${STATUS_STYLE[c.status ?? ""] ?? "text-medha-tertiary"}`}>
-                    {(c.status ?? "unknown").replace(/_/g, " ")}
-                  </span>
-                  <span className="font-medium text-medha-text">{c.title ?? c.id ?? "check"}</span>
-                  {c.severity ? <span className="text-medha-tertiary">· {c.severity}</span> : null}
-                  {c.score_impact ? <span className="text-medha-tertiary">· −{c.score_impact} pts</span> : null}
-                </div>
-                {c.finding ? <p className="text-medha-secondary">{c.finding}</p> : null}
-                <p className="text-[12px] leading-4 text-medha-tertiary">
-                  {c.evidence_source ?? "unknown source"}{c.reference ? ` · ${c.reference}` : ""}
-                </p>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
-    </div>
+    </Link>
   );
 }
 
-export function ScoresPanel({ runId }: { runId: string }) {
+function FindingRow({
+  category,
+  finding,
+  runHref,
+}: {
+  category: string;
+  finding: CategoryFinding;
+  runHref: string;
+}) {
+  const kind = KIND_TEXT[finding.kind];
+  const showActionLink = finding.kind === "missing" || finding.kind === "incomplete";
+  return (
+    <li className="py-3 first:pt-0 last:pb-0">
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Badge tone={kind.badge}>{kind.label}</Badge>
+        <span className="min-w-0 text-[13.5px] font-medium text-medha-text">{finding.title}</span>
+        {finding.points ? (
+          <span className="shrink-0 text-[12.5px] text-medha-tertiary">−{finding.points} points</span>
+        ) : null}
+      </p>
+      <p className="mt-1 text-[12.5px] text-medha-tertiary">
+        {category}
+        {finding.kind === "missing" || finding.kind === "incomplete"
+          ? " · This lowers confidence in the score until the analysis is finished."
+          : finding.points
+            ? " · This is a confirmed problem that reduced the score."
+            : null}
+      </p>
+      {(finding.files ?? []).length > 0 ? (
+        <ul className="mt-1 space-y-0.5">
+          {finding.files?.map((f, i) => (
+            <li key={i} className="text-[12.5px] leading-4 text-medha-secondary">
+              <span className="medha-mono text-medha-tertiary">
+                {f.path}
+                {f.line != null ? `:${f.line}` : ""}
+              </span>
+              {f.message ? ` — ${f.message}` : null}
+            </li>
+          ))}
+          <li className="text-[12.5px] leading-4 text-medha-tertiary">
+            Fix: review the file above and address these findings.
+          </li>
+        </ul>
+      ) : null}
+      {finding.source ? (
+        <details className="mt-1">
+          <summary className="cursor-pointer rounded text-[12.5px] font-semibold text-medha-accent transition-colors hover:text-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
+            Supporting evidence
+          </summary>
+          <p className="mt-1 text-[12px] leading-4 text-medha-tertiary">
+            {finding.source}
+            {finding.reference ? ` · ${finding.reference}` : ""}
+          </p>
+        </details>
+      ) : null}
+      {showActionLink ? (
+        <Link
+          href={runHref}
+          className="mt-1 inline-block rounded text-[12.5px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+        >
+          Open run details →
+        </Link>
+      ) : null}
+    </li>
+  );
+}
+
+export function ScoresPanel({ projectId, runId }: { projectId: string; runId: string }) {
   const [scores, setScores] = useState<Record<string, ProductScore> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -146,21 +360,56 @@ export function ScoresPanel({ runId }: { runId: string }) {
     };
   }, [runId]);
 
-  if (loading) {
-    return <p className="text-[13.5px] text-medha-secondary">Computing evidence-backed scores…</p>;
-  }
-  if (error) {
-    return (
-      <p className="text-[13px] text-medha-secondary">
-        Scores unavailable: {error}
-      </p>
-    );
-  }
+  const runHref = `/projects/${projectId}/runs/${runId}`;
+  const findings = CATEGORIES.flatMap((cat) =>
+    categoryFindings(scores?.[cat.key], cat.kind).map((f) => ({
+      category: cat.title,
+      finding: f,
+    })),
+  );
+
   return (
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-      {SCORE_META.map((m) => (
-        <ScoreCard key={m.key} title={m.title} blurb={m.blurb} score={scores?.[m.key]} />
-      ))}
+    <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
+      <Panel title="Your scores">
+        {loading ? (
+          <p className="text-[13.5px] text-medha-secondary">Loading scores…</p>
+        ) : error ? (
+          <p className="text-[13px] text-medha-secondary">Scores are unavailable: {error}</p>
+        ) : (
+          <div className="divide-y divide-medha-border">
+            {CATEGORIES.map((cat) => (
+              <ScoreRow
+                key={cat.key}
+                title={cat.title}
+                score={scores?.[cat.key]}
+                coverageText={cat.coverageText}
+                href={
+                  cat.key === "deployment_readiness"
+                    ? runHref
+                    : "#findings"
+                }
+              />
+            ))}
+          </div>
+        )}
+      </Panel>
+      <Panel id="findings" title="Findings">
+        {loading ? (
+          <p className="text-[13.5px] text-medha-secondary">Loading findings…</p>
+        ) : error ? (
+          <p className="text-[13px] text-medha-secondary">Findings are unavailable: {error}</p>
+        ) : findings.length > 0 ? (
+          <ul className="divide-y divide-medha-border">
+            {findings.map(({ category, finding }, i) => (
+              <FindingRow key={`${category}-${i}`} category={category} finding={finding} runHref={runHref} />
+            ))}
+          </ul>
+        ) : (
+          <p className="text-[13px] text-medha-secondary">
+            No score evidence was stored for this run.
+          </p>
+        )}
+      </Panel>
     </div>
   );
 }

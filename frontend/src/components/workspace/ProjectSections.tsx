@@ -3,8 +3,8 @@
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowLeft, CheckCircle2, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowLeft, ChevronDown } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { RunDetailView } from "@/components/run/RunDetailNew";
 // CommitGraph pulls @xyflow: code-split so project pages paint without it.
@@ -17,18 +17,20 @@ import {
   Badge, Breadcrumbs, Button, DemoBadge, Dialog, EmptyState, ErrorBox,
   PageHeader, Panel, Skeleton,
 } from "@/components/ui/primitives";
-import { decideProposal } from "@/lib/api/client";
+import { decideProposal, type RunHealth } from "@/lib/api/client";
 import {
-  derivePipeline, resolveAgents, summarizeVerification,
+  buildRunFeed, buildRunRoster, derivePipeline, summarizeVerification,
   useProjectData,
+  type AgentState, type PipelineStage,
 } from "@/lib/projects/useProjectData";
+import { formatDuration, runStatusBadge } from "@/lib/projects/executionPhases";
 import { formatActivity, isRunningStatus, summarizeRunFailure } from "@/lib/projects/projects";
 import { cn } from "@/lib/ui/cn";
 
 /* ================= shared ================= */
 
 function crumbs(projectId: string, name: string, tail: string) {
-  return <Breadcrumbs items={[{ label: "Projects", href: "/projects" }, { label: name, href: `/projects/${projectId}` }, { label: tail }]} />;
+  return <Breadcrumbs items={[{ label: "Project Hub", href: "/projects" }, { label: name, href: `/projects/${projectId}` }, { label: tail }]} />;
 }
 
 function NotFound({ what }: { what: string }) {
@@ -61,7 +63,9 @@ function RunPicker({ projectId, runIds, value, onChange, statuses }: {
         className="max-w-full rounded-lg border border-medha-border bg-white px-3 py-1.5 text-sm text-medha-text"
       >
         {runIds.map((r) => (
-          <option key={r.id} value={r.id}>{r.label} · {statuses[r.id] ?? ""}</option>
+          <option key={r.id} value={r.id}>
+            {r.label}{statuses[r.id] ? ` — ${statuses[r.id]}` : ""}
+          </option>
         ))}
       </select>
       <Link href={`/projects/${projectId}/runs/${value}`} className="text-[13px] font-semibold text-medha-accent hover:underline">
@@ -84,11 +88,57 @@ function proposalBadge(status: string) {
   }
 }
 
-function checkBadge(status: string) {
-  if (status === "pass") return <Badge tone="success">Pass</Badge>;
-  if (status === "fail") return <Badge tone="error">Fail</Badge>;
-  if (status === "warn" || status === "warning") return <Badge tone="warning">Warning</Badge>;
-  return <Badge tone="neutral">{status || "unknown"}</Badge>;
+/* Human-readable run stamp in the user's local zone, e.g. "Oct 23, 2026 · 9:24 AM".
+   Null when the run has no parseable timestamp — callers show a "Run details"
+   fallback instead of inventing a date. */
+function formatRunStamp(iso: string | null | undefined, opts: { year?: boolean } = {}): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const date = d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(opts.year ? { year: "numeric" } : {}),
+  });
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return `${date} · ${time}`;
+}
+
+/* Plain-English run status for selectors (raw statuses stay in routing/API). */
+function runStatusLabel(status: string): string {
+  switch (status) {
+    case "completed": return "Passed";
+    case "failed": return "Failed";
+    case "queued":
+    case "started":
+    case "running": return "Running";
+    case "awaiting_approval": return "Awaiting approval";
+    case "partial_recovery": return "Partial recovery";
+    case "cancelled": return "Cancelled";
+    default: return status.replace(/_/g, " ");
+  }
+}
+
+/* Verification check status → concise label + color. Skipped/unassessed checks
+   stay tertiary: they are incomplete, never passes. */
+function checkStatusMeta(status: string): { label: string; className: string } {
+  switch (status.toLowerCase()) {
+    case "pass":
+    case "passed":
+      return { label: "Pass", className: "text-medha-success-ink" };
+    case "fail":
+    case "failed":
+      return { label: "Failed", className: "text-medha-danger" };
+    case "warn":
+    case "warning":
+      return { label: "Warning", className: "text-medha-warning" };
+    case "skipped":
+      return { label: "Skipped", className: "text-medha-tertiary" };
+    case "pending":
+      return { label: "Not run", className: "text-medha-tertiary" };
+    default:
+      return { label: status ? status.replace(/_/g, " ") : "Not checked", className: "text-medha-tertiary" };
+  }
 }
 
 function LoadingGrid() {
@@ -112,8 +162,8 @@ export function ChangesList({ projectId }: { projectId: string }) {
     <AppShell>
       <div className="space-y-5">
         <PageHeader
-          title="Changes & Reviews"
-          subtitle="Push-triggered approval proposals for this repository. Approval binds to one exact plan hash — anything else fails closed as stale."
+          title="Change Requests"
+          subtitle="Push-triggered Approval proposals require exact plan-hash match before execution. for this repository. Approval binds to one exact plan hash — anything else fails closed as stale."
           breadcrumbs={crumbs(projectId, name, "Changes")}
           actions={<Button variant="secondary" onClick={() => refresh()}>Refresh</Button>}
         />
@@ -276,101 +326,584 @@ export function ChangeReview({ projectId, proposalId }: { projectId: string; pro
 
 /* ================= ORCHESTRATION ================= */
 
+/* Run lifecycle state in plain English for the Activity Center header
+   (runStatusLabel maps completed → "Passed" for the verification gate). */
+function runLifecycleLabel(status: string): string {
+  const text = status.replace(/_/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+const RUN_TONE_TEXT: Record<string, string> = {
+  completed: "text-medha-success-ink",
+  failed: "text-medha-danger",
+  cancelled: "text-medha-danger",
+  partial_recovery: "text-medha-warning",
+  awaiting_approval: "text-medha-warning",
+};
+
+/* Application health is reported only from the observed probe record —
+   a completed run never implies a healthy application. */
+function healthLabel(status: string): string {
+  if (status === "healthy") return "Healthy";
+  if (status === "unhealthy") return "Unhealthy";
+  return "Not verified";
+}
+
+function healthTone(status: string): "success" | "error" | "warning" {
+  if (status === "healthy") return "success";
+  if (status === "unhealthy") return "error";
+  return "warning";
+}
+
+function healthReason(health: RunHealth): string {
+  const reason = health.reason?.trim();
+  if (reason) return reason;
+  if (health.health_status === "healthy") return "The last health probe reported the application healthy.";
+  if (health.health_status === "unhealthy") return "The last health probe reported the application unhealthy.";
+  return "Health has not been confirmed for this run.";
+}
+
+/* Restrained pastel skins for agent identity. Skin index follows the roster
+   position (registry order), so an agent keeps one stable color + side for
+   the life of the run — never derived from message content. */
+const AGENT_SKINS = [
+  { bg: "bg-medha-run-soft", ink: "text-medha-run-ink" },
+  { bg: "bg-medha-success-soft", ink: "text-medha-success-ink" },
+  { bg: "bg-medha-warning-soft", ink: "text-medha-warning" },
+  { bg: "bg-medha-accent-soft", ink: "text-medha-accent-hover" },
+  { bg: "bg-medha-muted", ink: "text-medha-secondary" },
+] as const;
+
+function agentSkin(index: number) {
+  return AGENT_SKINS[index % AGENT_SKINS.length];
+}
+
+const AGENT_STATE_LABEL: Record<NonNullable<AgentState["state"]>, string> = {
+  active: "Working",
+  done: "Completed",
+  blocked: "Failed",
+  idle: "Waiting",
+};
+
+const STAGE_STATE_LABEL: Record<PipelineStage["state"], string> = {
+  done: "Completed",
+  active: "Running",
+  blocked: "Failed",
+  idle: "Waiting",
+};
+
 export function OrchestrationView({ projectId }: { projectId: string }) {
   const { repo, name, runs, loading, error, backendReachable, selectedId, selectRun, hydration, hydrating, refresh } =
     useProjectData(projectId);
   const selected = runs.find((r) => r.deployment_id === selectedId) ?? runs[0] ?? null;
-  // O(10×N) log scan per render — memoize on the actual inputs.
+  // Feed/roster derivation is O(N) over logs — memoize on the actual inputs.
   // (Hooks stay unconditional: the !repo early-return renders below them.)
-  const agents = useMemo(
-    () => (hydration ? resolveAgents(hydration, selected?.current_stage ?? null, selected?.status ?? null) : { agents: [], source: "logs" as const }),
-    [hydration, selected?.current_stage, selected?.status],
+  const feed = useMemo(
+    () => (hydration ? buildRunFeed(hydration.logs, hydration.agents) : []),
+    [hydration],
   );
-  const agentStates = agents.agents;
-  const agentSource = agents.source;
-  const pipeline = useMemo(
-    () => (hydration ? derivePipeline(hydration.logs, selected?.current_stage ?? null, selected?.status ?? null) : []),
-    [hydration, selected?.current_stage, selected?.status],
+  const roster = useMemo(
+    () => (hydration ? buildRunRoster(feed, hydration.agents) : []),
+    [feed, hydration],
   );
+  const rosterIndex = useMemo(
+    () => new Map(roster.map((a, i) => [a.id, i])),
+    [roster],
+  );
+
+  // Live conversation stickiness: stay pinned to the latest message only
+  // while the reader is already at the bottom; otherwise count new entries
+  // and offer a subtle jump affordance. Run switches reset both.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const prevLenRef = useRef(0);
+  const [atBottom, setAtBottom] = useState(true);
+  const [newCount, setNewCount] = useState(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (feed.length === prevLenRef.current) return;
+    if (feed.length < prevLenRef.current || atBottom) {
+      // Run switch or reader at the bottom: latest stays visible.
+      prevLenRef.current = feed.length;
+      setNewCount(0);
+      setAtBottom(true);
+      if (el) el.scrollTop = el.scrollHeight;
+      return;
+    }
+    setNewCount((c) => c + (feed.length - prevLenRef.current));
+    prevLenRef.current = feed.length;
+  }, [feed, atBottom]);
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setAtBottom(bottom);
+    if (bottom) setNewCount(0);
+  };
+
   if (!repo) return <NotFound what="This project link does not decode to a known repository." />;
-  const activeAgents = agentStates.filter((a) => a.state === "active" || a.state === "blocked");
+
+  const runStamp = selected && !loading ? formatRunStamp(selected.updated_at) : null;
+  const startStamp = selected && !loading ? formatRunStamp(selected.created_at) : null;
+  const duration =
+    selected?.duration_seconds != null ? formatDuration(selected.duration_seconds * 1000) : null;
+  const statusLabel = selected ? runLifecycleLabel(selected.status) : null;
+  const statusTone = selected ? (RUN_TONE_TEXT[selected.status] ?? "text-medha-secondary") : "text-medha-secondary";
+  const running = selected ? isRunningStatus(selected.status) : false;
+  const issueCount = feed.filter((entry) => entry.outcome === "error").length;
+  const agentMessageCount = feed.filter((entry) => entry.isAgent).length;
+  // Stale hydration from the previously selected run must never leak into
+  // health/raw-event sections while the new run is loading.
+  const health = !hydrating && hydration ? hydration.health : null;
+  const rawLogs = !hydrating && hydration ? hydration.logs : [];
+  const stages = hydration && selected
+    ? derivePipeline(hydration.logs, selected.current_stage, selected.status, selected.error_code ?? null)
+    : [];
+  const doneStages = stages.filter((s) => s.state === "done").length;
 
   return (
     <AppShell>
-      <div className="space-y-4">
-        <PageHeader
-          title="Orchestration"
-          subtitle="Observed agent activity and pipeline progress for the selected run — derived from backend events, never simulated."
-          breadcrumbs={crumbs(projectId, name, "Orchestration")}
-          actions={selected ? <DemoBadge isDemo={selected.is_demo} /> : undefined}
-        />
-        {!backendReachable && !loading ? <ErrorBox message={error ?? "Cannot reach MEDHA backend."} onRetry={() => refresh()} /> : null}
-        {loading ? <LoadingGrid /> : !selected ? (
-          <EmptyState title="No runs yet" body="Orchestration activity appears once this repository has a recorded run." action={<Link href="/verify" className="rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white">Start first run</Link>} />
-        ) : (
-          <>
+      <div className="mx-auto w-full max-w-[1180px] space-y-4">
+        {crumbs(projectId, name, "Orchestration")}
+        {/* Compact run header: when it ran, how it ended, how long — all recorded. */}
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+          <div className="min-w-0">
+            <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-medha-text">Activity Center</h1>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px]">
+              {runStamp ? (
+                <time dateTime={selected?.updated_at} className="text-medha-tertiary">
+                  {runStamp}
+                </time>
+              ) : null}
+              {selected && statusLabel ? (
+                <span className={cn("font-medium", statusTone)}>
+                  {statusLabel}
+                  {duration ? <span className="font-normal text-medha-tertiary"> · {duration}</span> : null}
+                </span>
+              ) : null}
+              {selected && !loading ? <DemoBadge isDemo={selected.is_demo} /> : null}
+            </div>
+          </div>
+          {selected && !loading ? (
             <RunPicker
               projectId={projectId}
-              runIds={runs.map((r) => ({ id: r.deployment_id, label: `${r.deployment_id} · ${r.is_demo ? "DEMO" : "LIVE"}` }))}
+              runIds={runs.map((r) => ({ id: r.deployment_id, label: formatRunStamp(r.updated_at) ?? "Run" }))}
               value={selected.deployment_id}
               onChange={selectRun}
-              statuses={Object.fromEntries(runs.map((r) => [r.deployment_id, r.status]))}
+              statuses={Object.fromEntries(runs.map((r) => [r.deployment_id, runLifecycleLabel(r.status)]))}
             />
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              <Panel title="Pipeline" eyebrow={selected.current_stage ? `Current: ${selected.current_stage}` : "Stages observed"}>
-                <ol className="flex flex-wrap items-center gap-1.5">
-                  {pipeline.map((s, i) => (
-                    <li key={s.id} className="flex items-center gap-1.5">
-                      {i > 0 ? <span aria-hidden className="text-medha-border-strong">→</span> : null}
-                      <span className={cn(
-                        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium",
-                        s.state === "done" && "border-medha-success/30 bg-medha-success-soft text-medha-success",
-                        s.state === "active" && "border-medha-run/25 bg-medha-run-soft text-medha-run-ink",
-                        s.state === "blocked" && "border-medha-danger/30 bg-medha-danger-soft text-medha-danger",
-                        s.state === "idle" && "border-medha-border bg-white text-medha-tertiary",
-                      )}>{s.label}</span>
-                    </li>
-                  ))}
-                </ol>
-                <p className="mt-2 text-[12px] text-medha-tertiary">Stages never observed stay idle — progress is not inferred.</p>
-              </Panel>
-              <Panel title="Agents" eyebrow={activeAgents.length > 0 ? `${activeAgents.length} need attention` : "All observed agents settled"} description={agentSource === "backend" ? "Live backend lifecycle state (durations measured server-side)." : "Backend snapshot unavailable — states inferred from stored event keywords; unobserved stages stay idle."}>
-                {hydrating ? <p className="text-[13px] text-medha-secondary">Loading events…</p> : (
-                  <ul className="max-h-64 space-y-1 overflow-y-auto">
-                    {agentStates.map((a) => (
-                      <li key={a.id} className="rounded-lg border border-medha-border bg-white px-2.5 py-1.5 text-[13px]">
-                        <p className="flex items-center gap-2 font-medium text-medha-text">
-                          <span className={cn("status-dot", a.state === "done" ? "bg-medha-success" : a.state === "active" ? "bg-medha-run" : a.state === "blocked" ? "bg-medha-danger" : "bg-medha-border-strong")} aria-hidden />
-                          {a.label} <span className="font-normal text-medha-tertiary">· {a.state}</span>
+          ) : null}
+        </div>
+        {!backendReachable && !loading ? <ErrorBox message={error ?? "Cannot reach MEDHA backend."} onRetry={() => refresh()} /> : null}
+        {loading ? <LoadingGrid /> : !selected ? (
+          <EmptyState title="No runs yet" body="Agent conversation appears once this repository has a recorded run." action={<Link href="/verify" className="rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white">Start first run</Link>} />
+        ) : (
+          <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+            {/* ---------- Central conversation panel ---------- */}
+            <section
+              aria-label="Agent conversation"
+              className="medha-panel flex min-w-0 flex-col overflow-hidden"
+            >
+              <div className="border-b border-medha-border px-4 py-3 sm:px-5">
+                <h2 className="text-[15px] font-semibold tracking-tight text-medha-text">Agent conversation</h2>
+                <p className="mt-0.5 text-[12.5px] text-medha-tertiary">
+                  Built from recorded backend events — agent summaries and factual system updates, never simulated dialogue.
+                </p>
+                {/* Participating agents discovered from this run's data. */}
+                {roster.length > 0 ? (
+                  <ul className="mt-2.5 flex flex-wrap gap-1.5" aria-label="Participating agents">
+                    {roster.map((a, i) => {
+                      const skin = agentSkin(i);
+                      return (
+                        <li
+                          key={a.id}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 rounded-full border border-medha-border px-2 py-0.5 text-[12px] font-medium text-medha-secondary",
+                            skin.bg,
+                          )}
+                        >
+                          <span aria-hidden className={cn("flex h-4 w-4 items-center justify-center rounded-full bg-white/70 text-[9px] font-bold", skin.ink)}>
+                            {a.initials}
+                          </span>
+                          {a.label}
+                          {a.state === "active" ? (
+                            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-medha-accent" />
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+              </div>
+
+              <div className="relative min-h-0 flex-1">
+                <div
+                  ref={scrollRef}
+                  onScroll={handleScroll}
+                  className="max-h-[min(60vh,600px)] overflow-y-auto px-3 py-3 sm:px-5"
+                  tabIndex={0}
+                >
+                  {!hydration || hydrating ? (
+                    <p className="py-6 text-center text-[13px] text-medha-secondary">Loading events…</p>
+                  ) : feed.length === 0 ? (
+                    <p className="py-6 text-center text-[13px] text-medha-secondary">No events are stored for this run yet.</p>
+                  ) : (
+                    <>
+                      {issueCount > 0 ? (
+                        <p className="mb-2 text-center text-[12.5px] font-semibold text-medha-danger">
+                          {issueCount} {issueCount === 1 ? "error" : "errors"} recorded in this run
                         </p>
-                        <p className="mt-0.5 truncate text-medha-secondary" title={a.detail}>{a.detail}</p>
-                      </li>
-                    ))}
+                      ) : null}
+                      {agentMessageCount === 0 ? (
+                        <p className="mb-2 rounded-lg bg-medha-muted px-3 py-1.5 text-center text-[12px] text-medha-secondary">
+                          No agent-authored messages were recorded for this run — the timeline below is the recorded system event history.
+                        </p>
+                      ) : null}
+                      <ol className="space-y-1" aria-label="Recorded conversation timeline">
+                        {feed.map((entry, i) => {
+                          const prev = feed[i - 1];
+                          const grouped =
+                            entry.isAgent &&
+                            prev?.isAgent &&
+                            prev.agentId === entry.agentId &&
+                            prev.actor === entry.actor;
+                          const skinIdx = entry.agentId != null ? rosterIndex.get(entry.agentId) ?? 0 : 0;
+                          const skin = agentSkin(skinIdx);
+                          const side = entry.isAgent && entry.agentId != null
+                            ? (roster[skinIdx]?.side ?? "left")
+                            : "left";
+
+                          if (!entry.isAgent) {
+                            // System lifecycle events: compact centered notices.
+                            return (
+                              <li
+                                key={entry.key}
+                                id={`feed-${i}`}
+                                className="flex scroll-mt-24 justify-center py-1"
+                              >
+                                <p
+                                  className={cn(
+                                    "max-w-[92%] rounded-lg px-2.5 py-1 text-center text-[11.5px] leading-snug",
+                                    entry.outcome === "error"
+                                      ? "bg-medha-danger-soft text-medha-danger"
+                                      : entry.outcome === "warning"
+                                        ? "bg-medha-warning-soft text-medha-warning"
+                                        : "bg-medha-muted text-medha-secondary",
+                                  )}
+                                >
+                                  {entry.message}
+                                  {entry.timeLabel ? (
+                                    <>
+                                      {" "}
+                                      <time dateTime={entry.ts} className="medha-mono text-[10.5px] opacity-70">
+                                        {entry.timeLabel}
+                                      </time>
+                                    </>
+                                  ) : null}
+                                  {entry.outcome === "error" ? (
+                                    <>
+                                      {" · "}
+                                      <Link
+                                        href={`/projects/${projectId}/runs/${selected.deployment_id}#diagnosis`}
+                                        className="font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                                      >
+                                        Open error details →
+                                      </Link>
+                                    </>
+                                  ) : null}
+                                </p>
+                              </li>
+                            );
+                          }
+
+                          // Agent-authored messages: aligned bubbles, sender always named.
+                          return (
+                            <li
+                              key={entry.key}
+                              id={`feed-${i}`}
+                              data-agent={entry.agentId ?? "agent"}
+                              data-side={side}
+                              className={cn(
+                                "flex scroll-mt-24 gap-2",
+                                side === "right" ? "justify-end" : "justify-start",
+                                grouped ? "mt-0.5" : "mt-2",
+                              )}
+                            >
+                              {!grouped ? (
+                                <span
+                                  aria-hidden
+                                  className={cn(
+                                    "mt-5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold",
+                                    skin.bg,
+                                    skin.ink,
+                                  )}
+                                >
+                                  {entry.agentId != null ? (roster[skinIdx]?.initials ?? "AG") : "AG"}
+                                </span>
+                              ) : null}
+                              <div
+                                className={cn(
+                                  "max-w-[min(85%,560px)] rounded-2xl px-3 py-2",
+                                  skin.bg,
+                                  entry.outcome === "error" ? "ring-1 ring-inset ring-medha-danger/40" : "",
+                                )}
+                              >
+                                <p className={cn("flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[12.5px]", skin.ink)}>
+                                  <span className="font-semibold">{entry.actor}</span>
+                                  {entry.timeLabel ? (
+                                    <time dateTime={entry.ts} className="medha-mono text-[10.5px] font-normal text-medha-tertiary">
+                                      {entry.timeLabel}
+                                    </time>
+                                  ) : null}
+                                  {entry.durationMs != null ? (
+                                    <span className="text-[10.5px] font-normal text-medha-tertiary">
+                                      in {formatDuration(entry.durationMs)}
+                                    </span>
+                                  ) : null}
+                                  {entry.outcome === "error" ? (
+                                    <span className="text-[10.5px] font-semibold text-medha-danger">failed</span>
+                                  ) : null}
+                                  {entry.outcome === "warning" ? (
+                                    <span className="text-[10.5px] font-semibold text-medha-warning">warning</span>
+                                  ) : null}
+                                </p>
+                                <p
+                                  className={cn(
+                                    "mt-0.5 break-words text-[13.5px] leading-relaxed",
+                                    entry.outcome === "error" ? "text-medha-danger" : "text-medha-text",
+                                  )}
+                                >
+                                  {entry.message}
+                                </p>
+                                {entry.error ? (
+                                  <p className="mt-0.5 break-words text-[12px] text-medha-danger">{entry.error}</p>
+                                ) : null}
+                                {entry.handoffs.length > 0 ? (
+                                  <p className="mt-1 text-[11.5px] text-medha-tertiary">
+                                    ↳ Inputs from{" "}
+                                    {entry.handoffs.map((h, hi) => (
+                                      <span key={`${h.fromIndex}-${hi}`}>
+                                        {hi > 0 ? ", " : ""}
+                                        <a
+                                          href={`#feed-${h.fromIndex}`}
+                                          className="rounded font-medium text-medha-accent hover:underline"
+                                        >
+                                          {h.fromLabel}
+                                        </a>
+                                      </span>
+                                    ))}
+                                  </p>
+                                ) : null}
+                                {entry.outcome === "error" ? (
+                                  <Link
+                                    href={`/projects/${projectId}/runs/${selected.deployment_id}#diagnosis`}
+                                    className="mt-1 inline-block rounded text-[12px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                                  >
+                                    Open error details →
+                                  </Link>
+                                ) : null}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    </>
+                  )}
+                </div>
+                {/* Subtle new-activity affordance: never yanks a reader of older messages. */}
+                {newCount > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const el = scrollRef.current;
+                      if (el) el.scrollTop = el.scrollHeight;
+                      setAtBottom(true);
+                      setNewCount(0);
+                    }}
+                    className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-medha-accent/40 bg-white px-3 py-1 text-[12px] font-semibold text-medha-accent shadow-sm hover:bg-medha-accent-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                  >
+                    ↓ {newCount} new {newCount === 1 ? "event" : "events"}
+                  </button>
+                ) : null}
+              </div>
+            </section>
+
+            {/* ---------- Right sidebar ---------- */}
+            <aside className="space-y-3" aria-label="Run details">
+              {/* Run status + phases from recorded stage events. */}
+              <section aria-label="Run status" className="medha-panel p-4">
+                <h2 className="text-[13px] font-semibold tracking-tight text-medha-text">Run status</h2>
+                {selected ? (
+                  <>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px]">
+                      <Badge tone={runStatusBadge(selected.status).tone}>{statusLabel}</Badge>
+                      {duration ? <span className="text-medha-tertiary">{duration}</span> : null}
+                    </div>
+                    <dl className="mt-2 space-y-1 text-[12px]">
+                      {startStamp ? (
+                        <div className="flex gap-2">
+                          <dt className="shrink-0 text-medha-tertiary">Start</dt>
+                          <dd className="text-medha-secondary">{startStamp}</dd>
+                        </div>
+                      ) : null}
+                      <div className="flex gap-2">
+                        <dt className="shrink-0 text-medha-tertiary">Stage</dt>
+                        <dd className="text-medha-secondary">{selected.current_stage ?? "Unknown"}</dd>
+                      </div>
+                    </dl>
+                    {running && stages.length > 0 ? (
+                      <div className="mt-2" aria-label="Run progress">
+                        <div className="h-1.5 overflow-hidden rounded-full bg-medha-muted">
+                          <div
+                            className="h-full rounded-full bg-medha-accent transition-all"
+                            style={{ width: `${Math.round((doneStages / stages.length) * 100)}%` }}
+                          />
+                        </div>
+                        <p className="mt-1 text-[11px] text-medha-tertiary">
+                          {doneStages} of {stages.length} stages completed
+                        </p>
+                      </div>
+                    ) : null}
+                    {stages.length > 0 ? (
+                      <ul className="mt-2 space-y-1" aria-label="Pipeline phases">
+                        {stages.map((s) => (
+                          <li key={s.id} className="flex items-baseline justify-between gap-2 text-[12px]">
+                            <span className={cn("truncate", s.state === "idle" ? "text-medha-tertiary" : "text-medha-secondary")}>
+                              {s.label}
+                            </span>
+                            <span className="flex shrink-0 items-baseline gap-1.5">
+                              <span
+                                className={cn(
+                                  "text-[11.5px]",
+                                  s.state === "done" ? "text-medha-success-ink"
+                                    : s.state === "active" ? "text-medha-accent-hover"
+                                      : s.state === "blocked" ? "text-medha-danger" : "text-medha-tertiary",
+                                )}
+                              >
+                                {s.state === "blocked" && s.reason === "config" ? "Not configured" : STAGE_STATE_LABEL[s.state]}
+                              </span>
+                              {s.durationMs != null ? (
+                                <span className="medha-mono text-[10.5px] text-medha-tertiary">{formatDuration(s.durationMs)}</span>
+                              ) : null}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-[12px] text-medha-tertiary">No stage events recorded for this run.</p>
+                    )}
+                  </>
+                ) : null}
+              </section>
+
+              {/* Agents in this run — snapshot state only when a snapshot exists. */}
+              <section aria-label="Agents in this run" className="medha-panel p-4">
+                <h2 className="text-[13px] font-semibold tracking-tight text-medha-text">Agents in this run</h2>
+                {roster.length === 0 ? (
+                  <p className="mt-1.5 text-[12px] text-medha-tertiary">No agent activity recorded for this run.</p>
+                ) : (
+                  <ul className="mt-2 space-y-2" aria-label="Run agents">
+                    {roster.map((a, i) => {
+                      const skin = agentSkin(i);
+                      return (
+                        <li key={a.id} className="flex items-start gap-2">
+                          <span
+                            aria-hidden
+                            className={cn("mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold", skin.bg, skin.ink)}
+                          >
+                            {a.initials}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <p className="flex flex-wrap items-baseline gap-x-1.5 text-[12.5px] font-semibold text-medha-text">
+                              {a.label}
+                              {a.state ? (
+                                <span
+                                  className={cn(
+                                    "text-[11px] font-normal",
+                                    a.state === "done" ? "text-medha-success-ink"
+                                      : a.state === "active" ? "text-medha-accent-hover"
+                                        : a.state === "blocked" ? "text-medha-danger" : "text-medha-tertiary",
+                                  )}
+                                >
+                                  {AGENT_STATE_LABEL[a.state]}
+                                </span>
+                              ) : null}
+                            </p>
+                            {a.detail ? (
+                              <p className="mt-0.5 break-words text-[11.5px] leading-snug text-medha-tertiary">{a.detail}</p>
+                            ) : null}
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
-              </Panel>
-            </div>
-            <Panel title="Event log" eyebrow={`${hydration?.logs.length ?? 0} lines`} description="Newest last. Source, stage, and level come straight from stored backend events.">
-              {!hydration || hydrating ? <p className="text-[13px] text-medha-secondary">Loading…</p> : hydration.logs.length === 0 ? (
-                <p className="text-[13px] text-medha-secondary">No log lines stored for this run.</p>
-              ) : (
-                <details>
-                  <summary className="cursor-pointer text-[13px] font-semibold text-medha-accent">Expand {hydration.logs.length} lines</summary>
-                  <ol className="mt-2 max-h-80 space-y-1 overflow-y-auto">
-                    {hydration.logs.map((l, i) => (
-                      <li key={`${l.ts}-${i}`} className="flex items-start gap-2 rounded-lg border border-medha-border bg-white px-2.5 py-1.5 text-[12px]">
-                        <span className={cn("status-dot mt-1", l.level === "error" ? "bg-medha-danger" : l.level === "warning" ? "bg-medha-warning" : "bg-medha-run")} aria-hidden />
-                        <div className="min-w-0">
-                          <p className="text-medha-text">{l.message}</p>
-                          <p className="text-medha-tertiary">{l.source} · {l.stage ?? "—"} · {l.ts}</p>
-                        </div>
+              </section>
+
+              {/* Health comes from the observed probe only — run completion and
+                  application health stay independent facts. */}
+              {health ? (
+                <section aria-label="Application health" className="medha-panel p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                    <h2 className="text-[13px] font-semibold tracking-tight text-medha-text">Application health</h2>
+                    <Badge tone={healthTone(health.health_status)}>{healthLabel(health.health_status)}</Badge>
+                  </div>
+                  <p className="mt-1.5 break-words text-[12px] leading-snug text-medha-secondary">{healthReason(health)}</p>
+                  {health.container ? (
+                    <p className="medha-mono mt-1 break-all text-[11px] text-medha-tertiary">{health.container}</p>
+                  ) : null}
+                  {health.checked_at ? (
+                    <p className="mt-1 text-[11px] text-medha-tertiary">
+                      Checked {formatRunStamp(health.checked_at)}
+                    </p>
+                  ) : null}
+                  <Link
+                    href={`/projects/${projectId}#deployment-health`}
+                    className="mt-1.5 inline-block rounded text-[12px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                  >
+                    Health details →
+                  </Link>
+                </section>
+              ) : null}
+
+              {/* Raw stored events stay available but out of the way by default. */}
+              {rawLogs.length > 0 ? (
+                <details id="technical-details" className="medha-panel p-4">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent [&::-webkit-details-marker]:hidden">
+                    <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                      <span className="text-[13px] font-semibold tracking-tight text-medha-text">
+                        Technical details
+                      </span>
+                      <span className="text-[11.5px] text-medha-secondary">{rawLogs.length} raw events</span>
+                    </span>
+                    <ChevronDown className="h-4 w-4 shrink-0 text-medha-tertiary transition-transform" aria-hidden />
+                  </summary>
+                  <ol className="mt-3 max-h-72 space-y-1 overflow-y-auto">
+                    {rawLogs.map((l, i) => (
+                      <li
+                        key={`${l.ts}-${i}`}
+                        className="medha-mono flex flex-wrap gap-x-2 text-[11.5px] leading-5 text-medha-tertiary"
+                      >
+                        <span className="shrink-0">{l.ts}</span>
+                        <span
+                          className={cn(
+                            "shrink-0 font-semibold",
+                            l.level === "error" ? "text-medha-danger" : l.level === "warning" ? "text-medha-warning" : "",
+                          )}
+                        >
+                          {l.level}
+                        </span>
+                        <span className="shrink-0">{l.type}</span>
+                        <span className="shrink-0">{l.source}</span>
+                        {l.status ? <span className="shrink-0">{l.status}</span> : null}
+                        {l.is_demo ? <span className="shrink-0">demo</span> : null}
+                        <span className="min-w-0 flex-1 break-words text-medha-secondary">{l.message}</span>
                       </li>
                     ))}
                   </ol>
                 </details>
-              )}
-            </Panel>
-          </>
+              ) : null}
+            </aside>
+          </div>
         )}
       </div>
     </AppShell>
@@ -390,7 +923,7 @@ export function ConstraintsView({ projectId }: { projectId: string }) {
     <AppShell>
       <div className="space-y-4">
         <PageHeader
-          title="Constraint negotiation"
+          title="Conflict Resolution"
           subtitle="Typed constraints from specialist agents and the bounded CNP outcome (max 3 rounds). Priority order: SECURITY › RESOURCE › DEPENDENCY › PREFERENCE."
           breadcrumbs={crumbs(projectId, name, "Constraints")}
           actions={selected ? <DemoBadge isDemo={selected.is_demo} /> : undefined}
@@ -460,7 +993,7 @@ export function ConstraintsView({ projectId }: { projectId: string }) {
 /* ================= VERIFICATION ================= */
 
 export function VerificationView({ projectId }: { projectId: string }) {
-  const { repo, name, runs, loading, error, backendReachable, selectedId, selectRun, hydration, hydrating, refresh } =
+  const { repo, runs, loading, error, backendReachable, selectedId, selectRun, hydration, hydrating, refresh } =
     useProjectData(projectId);
   const searchParams = useSearchParams();
   const runParam = searchParams.get("run");
@@ -479,15 +1012,44 @@ export function VerificationView({ projectId }: { projectId: string }) {
     breakdown?: Record<string, number>; summary?: string;
   } | null;
 
+  const runStamp = selected && !loading ? formatRunStamp(selected.updated_at, { year: true }) : null;
+  const criticMeta = (() => {
+    if (!critic) return null;
+    switch (critic.recommendation) {
+      case "PASS": return { label: "Recommended", tone: "success" as const };
+      case "WARN": return { label: "Review advised", tone: "warning" as const };
+      case "BLOCK": return { label: "Do not proceed", tone: "error" as const };
+      default: return { label: critic.recommendation ?? "—", tone: "neutral" as const };
+    }
+  })();
+  const BREAKDOWN_TEXT: Record<string, string> = {
+    security: "Security",
+    completeness: "Completeness",
+    constraints: "Constraint handling",
+    intentAlignment: "Matches the request",
+  };
+
   return (
     <AppShell>
-      <div className="space-y-4">
-        <PageHeader
-          title="Verification"
-          subtitle="Independent verification gate plus critic review. A failed gate blocks execution — nothing proceeds silently."
-          breadcrumbs={crumbs(projectId, name, "Verification")}
-          actions={selected ? <DemoBadge isDemo={selected.is_demo} /> : undefined}
-        />
+      <div className="mx-auto w-full max-w-[1120px] space-y-4">
+        {/* Compact header: what happened, when, and the one gate result. */}
+        <div>
+          <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-medha-text">Verification</h1>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            {loading ? null : runStamp ? (
+              <time dateTime={selected?.updated_at} className="text-[13px] text-medha-tertiary">
+                {runStamp}
+              </time>
+            ) : (
+              <span className="text-[13px] text-medha-tertiary">Run details</span>
+            )}
+            {summary?.passed === true ? <Badge tone="success">Passed</Badge> : null}
+            {summary?.passed === false ? <Badge tone="error">Failed</Badge> : null}
+            {selected?.is_demo ? (
+              <span className="text-[12px] font-semibold text-medha-tertiary">DEMO/MOCK</span>
+            ) : null}
+          </div>
+        </div>
         {!backendReachable && !loading ? <ErrorBox message={error ?? "Cannot reach MEDHA backend."} onRetry={() => refresh()} /> : null}
         {loading ? <LoadingGrid /> : !selected ? (
           <EmptyState title="No runs yet" body="Verification results appear once a run reaches the verify stage." />
@@ -495,83 +1057,157 @@ export function VerificationView({ projectId }: { projectId: string }) {
           <>
             <RunPicker
               projectId={projectId}
-              runIds={runs.map((r) => ({ id: r.deployment_id, label: `${r.deployment_id} · ${r.is_demo ? "DEMO" : "LIVE"}` }))}
+              runIds={runs.map((r) => ({
+                id: r.deployment_id,
+                label: formatRunStamp(r.updated_at) ?? "Run details",
+              }))}
               value={selected.deployment_id}
               onChange={selectRun}
-              statuses={Object.fromEntries(runs.map((r) => [r.deployment_id, r.status]))}
+              statuses={Object.fromEntries(runs.map((r) => [r.deployment_id, runStatusLabel(r.status)]))}
             />
-            {hydrating || !hydration ? <LoadingGrid /> : !summary ? (
-              <EmptyState title="No verification artifact" body="This run has no stored verification result — it likely ended before the verify stage. Pick another run above." />
-            ) : (
+            {hydrating || !hydration ? <LoadingGrid /> : (
               <>
-                <Panel
-                  title={summary.passed === true ? "Gate passed" : summary.passed === false ? "Gate failed" : "No conclusive result"}
-                  eyebrow={`${summary.total} checks${summary.score != null ? ` · score ${summary.score}` : ""}`}
-                >
-                  {summary.summary ? <p className="text-[13px] text-medha-secondary">{summary.summary}</p> : null}
-                  {summary.blocking.length > 0 ? (
-                    <ul className="mt-2 space-y-1">
-                      {summary.blocking.map((b) => (
-                        <li key={b} className="flex items-start gap-2 rounded-lg border border-medha-danger/25 bg-medha-danger-soft px-2.5 py-1.5 text-[13px] text-medha-danger">
-                          <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /> {b}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {(raw?.warnings ?? []).length > 0 ? (
-                    <ul className="mt-2 space-y-1">
-                      {(raw?.warnings ?? []).map((w) => (
-                        <li key={w} className="rounded-lg border border-medha-warning/30 bg-medha-warning-soft px-2.5 py-1.5 text-[13px] text-medha-warning">{w}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {(raw?.checks ?? []).length > 0 ? (
-                    <ul className="mt-3 space-y-1.5">
-                      {(raw?.checks ?? []).map((c, i) => (
-                        <li key={c.id ?? i} className="flex flex-wrap items-center gap-2 rounded-lg border border-medha-border bg-white px-2.5 py-1.5 text-[13px]">
-                          {checkBadge(c.status ?? "")}
-                          <span className="font-medium text-medha-text">{c.name ?? c.id ?? `check ${i + 1}`}</span>
-                          {c.message ? <span className="w-full text-medha-secondary">{c.message}</span> : null}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </Panel>
-                <Panel title="Critic review" eyebrow={critic ? `Recommendation: ${critic.recommendation ?? "—"}` : "No critic artifact"}>
-                  {!critic ? (
-                    <p className="text-[13px] text-medha-secondary">No critic result stored for this run.</p>
-                  ) : (
-                    <>
-                      <p className="flex items-center gap-1.5 text-[14px] font-semibold text-medha-text">
-                        {critic.recommendation === "PASS" ? <CheckCircle2 className="h-4 w-4 text-medha-success" aria-hidden /> : null}
-                        Score {critic.score ?? "—"} / 100
+                <ScoresPanel projectId={projectId} runId={selected.deployment_id} />
+
+                {/* Every check stays accessible behind one control; the summary
+                    row keeps the real result (including failures) visible. */}
+                <details id="checks" className="medha-panel p-4 sm:p-5">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent [&::-webkit-details-marker]:hidden">
+                    <span className="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+                      <span className="text-[17px] font-semibold leading-snug tracking-tight text-medha-text">
+                        Verification checks
+                      </span>
+                      {summary ? (
+                        <span className="text-[13px] text-medha-secondary">
+                          {summary.passedCount}/{summary.assessed} passed
+                          {summary.failed > 0 ? (
+                            <span className="text-medha-danger"> · {summary.failed} failed</span>
+                          ) : null}
+                          {summary.warnings > 0 ? (
+                            <span className="text-medha-warning"> · {summary.warnings} to review</span>
+                          ) : null}
+                          {summary.pending > 0 ? (
+                            <span className="text-medha-tertiary"> · {summary.pending} not run</span>
+                          ) : null}
+                        </span>
+                      ) : (
+                        <span className="text-[13px] text-medha-secondary">No result stored</span>
+                      )}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      <Link href={`/projects/${projectId}/runs/${selected.deployment_id}`} onClick={(e) => e.stopPropagation()} className="rounded text-[13px] font-semibold text-medha-accent hover:underline">
+                        Run details →
+                      </Link>
+                      <ChevronDown className="h-4 w-4 shrink-0 text-medha-tertiary transition-transform" aria-hidden />
+                    </span>
+                  </summary>
+                  <div className="mt-4">
+                    {summary?.blocking.length ? (
+                      <ul className="space-y-1">
+                        {summary.blocking.map((b) => (
+                          <li key={b} className="rounded-lg border border-medha-danger/25 bg-medha-danger-soft px-2.5 py-1.5 text-[13px] text-medha-danger">
+                            {b}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {(raw?.warnings ?? []).length > 0 ? (
+                      <ul className={cn("space-y-1", summary?.blocking.length ? "mt-2.5" : "")}>
+                        {(raw?.warnings ?? []).map((w) => (
+                          <li key={w} className="rounded-lg border border-medha-warning/30 bg-medha-warning-soft px-2.5 py-1.5 text-[13px] text-medha-warning">{w}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {(raw?.checks ?? []).length > 0 ? (
+                      <ul className={cn("divide-y divide-medha-border border-t border-medha-border", summary?.blocking.length || (raw?.warnings ?? []).length ? "mt-3" : "")}>
+                        {(raw?.checks ?? []).map((c, i) => {
+                          const meta = checkStatusMeta(c.status ?? "");
+                          return (
+                            <li key={c.id ?? i} className="flex flex-col gap-0.5 py-2">
+                              <div className="flex min-w-0 items-center gap-3">
+                                <span className={cn("w-20 shrink-0 text-[12.5px] font-semibold", meta.className)}>
+                                  {meta.label}
+                                </span>
+                                <span className="min-w-0 flex-1 text-[13.5px] font-medium text-medha-text">
+                                  {c.name ?? c.id ?? `check ${i + 1}`}
+                                </span>
+                              </div>
+                              {c.message ? (
+                                <p className="min-w-0 pl-[5.75rem] text-[12.5px] leading-4 text-medha-secondary">{c.message}</p>
+                              ) : null}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : summary ? (
+                      <p className="text-[13px] text-medha-tertiary">No individual checks were recorded.</p>
+                    ) : (
+                      <p className="text-[13.5px] text-medha-secondary">
+                        No verification result was stored for this run. It likely ended before the verify stage.
                       </p>
-                      {critic.breakdown ? (
-                        <dl className="mt-2 grid grid-cols-2 gap-1.5 text-[13px] sm:grid-cols-4">
-                          {Object.entries(critic.breakdown).map(([k, v]) => (
-                            <div key={k} className="rounded-lg border border-medha-border bg-white px-2.5 py-1.5">
-                              <dt className="text-medha-tertiary">{k}</dt>
-                              <dd className="font-semibold text-medha-text">{String(v)}</dd>
-                            </div>
+                    )}
+                    {(raw?.checks ?? []).some((c) => c.rule || c.category) ? (
+                      <details className="mt-3">
+                        <summary className="cursor-pointer rounded text-[13px] font-semibold text-medha-accent transition-colors hover:text-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
+                          Technical details
+                        </summary>
+                        <ul className="mt-2 space-y-1 text-[12.5px] text-medha-tertiary">
+                          {(raw?.checks ?? []).map((c, i) => (
+                            <li key={c.id ?? i} className="medha-mono">
+                              {c.id ?? c.name ?? `check ${i + 1}`}
+                              {c.rule ? ` · rule: ${c.rule}` : ""}
+                              {c.category ? ` · category: ${c.category}` : ""}
+                            </li>
                           ))}
-                        </dl>
-                      ) : null}
-                      {(critic.findings ?? []).length > 0 ? (
-                        <ul className="mt-2 list-inside list-disc space-y-1 text-[13px] text-medha-secondary">
-                          {(critic.findings ?? []).map((f) => <li key={f}>{f}</li>)}
                         </ul>
-                      ) : null}
-                      {critic.summary ? <p className="mt-2 text-[13px] text-medha-secondary">{critic.summary}</p> : null}
-                    </>
-                  )}
-                </Panel>
-                <Panel
-                  title="Evidence-backed scores"
-                  eyebrow="Versioned · reproducible from stored evidence"
-                  description="Code quality, security, verification confidence and deployment readiness, scored independently from stored checks. Missing evidence shows as unassessed — never as success."
-                >
-                  <ScoresPanel runId={selected.deployment_id} />
-                </Panel>
+                      </details>
+                    ) : null}
+                  </div>
+                </details>
+
+                {critic && criticMeta ? (
+                  <Panel title="AI review">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <Badge tone={criticMeta.tone}>{criticMeta.label}</Badge>
+                      <span className="text-[14px] font-semibold text-medha-text">
+                        AI score {critic.score ?? "—"}
+                        {typeof critic.score === "number" ? "/100" : ""}
+                      </span>
+                    </div>
+                    {(critic.findings ?? []).length > 0 ? (
+                      <ul className="mt-2 space-y-1">
+                        {(critic.findings ?? []).slice(0, 4).map((f) => (
+                          <li key={f} className="flex gap-1.5 text-[13px] leading-5 text-medha-secondary">
+                            <span aria-hidden className="text-medha-border-strong">·</span>
+                            <span className="min-w-0">{f}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-[13px] text-medha-tertiary">No findings recorded.</p>
+                    )}
+                    {critic.breakdown || critic.summary ? (
+                      <details className="mt-2.5">
+                        <summary className="cursor-pointer rounded text-[13px] font-semibold text-medha-accent transition-colors hover:text-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
+                          More about this review
+                        </summary>
+                        {critic.breakdown ? (
+                          <dl className="mt-2 grid grid-cols-2 gap-1.5 text-[13px] sm:grid-cols-4">
+                            {Object.entries(critic.breakdown).map(([k, v]) => (
+                              <div key={k} className="rounded-lg border border-medha-border bg-white px-2.5 py-1.5">
+                                <dt className="text-medha-tertiary">{BREAKDOWN_TEXT[k] ?? k}</dt>
+                                <dd className="font-semibold text-medha-text">{v}</dd>
+                              </div>
+                            ))}
+                          </dl>
+                        ) : null}
+                        {critic.summary ? (
+                          <p className="mt-2 text-[13px] text-medha-secondary">{critic.summary}</p>
+                        ) : null}
+                      </details>
+                    ) : null}
+                  </Panel>
+                ) : null}
               </>
             )}
           </>
@@ -597,7 +1233,7 @@ export function GraphsView({ projectId }: { projectId: string }) {
     <AppShell>
       <div className="space-y-4">
         <PageHeader
-          title="Graphs & Impact"
+          title="Architecture Explorer"
           subtitle="CEG (runtime execution causality) and CIG change impact are distinct graphs — shown separately with their own evidence."
           breadcrumbs={crumbs(projectId, name, "Graphs")}
           actions={selected ? <DemoBadge isDemo={selected.is_demo} /> : undefined}
@@ -812,7 +1448,7 @@ export function ProjectRuns({ projectId }: { projectId: string }) {
     <AppShell>
       <div className="space-y-4">
         <PageHeader
-          title="Runs & Executions"
+          title="Run History"
           subtitle={`Every recorded execution for this repository — newest first. Statuses, durations, and outcomes come from the backend.`}
           breadcrumbs={crumbs(projectId, name, "Runs")}
           actions={<Link href="/verify" className="inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white hover:bg-medha-accent-hover">New run</Link>}
@@ -935,7 +1571,7 @@ export function ProjectEvaluations({ projectId }: { projectId: string }) {
     <AppShell>
       <div className="space-y-4">
         <PageHeader
-          title="Evaluations"
+          title="Evaluation Results"
           subtitle="Project-level view: this repository's verification record plus the global measured CNP/CEG artifacts. Numbers come from backend runners — never hardcoded."
           breadcrumbs={crumbs(projectId, name, "Evaluations")}
         />
@@ -970,7 +1606,7 @@ export function ProjectEvaluations({ projectId }: { projectId: string }) {
               {evalLoading ? (
                 <p className="text-[13px] text-medha-secondary">Loading measured artifacts…</p>
               ) : !evalData || (!evalData.cnp && !evalData.ceg) ? (
-                <p className="text-[13px] text-medha-secondary">No evaluation artifacts generated yet. Run them from Research eval.</p>
+                <p className="text-[13px] text-medha-secondary">No evaluation artifacts generated yet. Run them from Research Results.</p>
               ) : (
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <div className="rounded-lg border border-medha-border bg-white p-3 text-[13px]">
@@ -1243,7 +1879,7 @@ export function ProjectSettings({ projectId }: { projectId: string }) {
             <Panel title="Navigate" eyebrow="Project scope">
               <div className="flex flex-wrap gap-2">
                 <Link href={`/projects/${projectId}/runs`} className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">Runs & Executions</Link>
-                <Link href="/verify" className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">New analysis</Link>
+                <Link href="/verify" className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">New run</Link>
                 <Link href="/projects" className="rounded-lg border border-medha-border bg-white px-3 py-2 text-sm font-medium text-medha-text hover:bg-medha-muted/60">All projects</Link>
               </div>
             </Panel>

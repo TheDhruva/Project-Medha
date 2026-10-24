@@ -16,6 +16,7 @@ const { pathnameMock, paramsMock, projectsState, pushMock } = vi.hoisted(() => {
     repoOwner: "example",
     repoName: "alpha",
     branch: "main",
+    summary: null,
     totalRuns: 0,
     latest: null,
     lastActivity: null,
@@ -100,17 +101,17 @@ beforeEach(() => {
 });
 
 describe("AppShell workspace sidebar", () => {
-  it("shows only Projects, All runs, and Workspace settings on the projects home", () => {
+  it("shows only Projects, Run History, and Workspace settings on the projects home", () => {
     setRoute("/projects");
     renderShell();
 
     const links = within(nav("Workspace")).getAllByRole("link");
     expect(links.map((link) => link.textContent)).toEqual([
-      "Projects",
-      "All runs",
+      "Project Hub",
+      "Run History",
       "Workspace settings",
     ]);
-    expect(activeLabels()).toEqual(["Projects"]);
+    expect(activeLabels()).toEqual(["Project Hub"]);
     expect(screen.queryByRole("navigation", { name: "Project" })).toBeNull();
     expect(screen.queryByText("Current project")).toBeNull();
     expect(screen.queryByLabelText("Active project")).toBeNull();
@@ -119,8 +120,8 @@ describe("AppShell workspace sidebar", () => {
   });
 
   it.each([
-    ["/runs/dep_1", "All runs"],
-    ["/runs/", "All runs"],
+    ["/runs/dep_1", "Run History"],
+    ["/runs/", "Run History"],
     ["/settings/team", "Workspace settings"],
   ])("marks %s as %s", (pathname, expected) => {
     setRoute(pathname);
@@ -130,7 +131,7 @@ describe("AppShell workspace sidebar", () => {
 });
 
 describe("AppShell project sidebar", () => {
-  it("shows compact project identity and project navigation", () => {
+  it("keeps only project navigation in the sidebar and shows identity in the header", () => {
     setRoute("/projects/prj_alpha", "prj_alpha");
     projectsState.projects = [
       project({
@@ -139,8 +140,9 @@ describe("AppShell project sidebar", () => {
     ];
     renderShell();
 
+    // Identity lives in the global header; the sidebar no longer repeats it.
     expect(screen.getByText("Alpha App")).toBeInTheDocument();
-    expect(screen.getByText("example/alpha")).toBeInTheDocument();
+    expect(screen.queryByText("example/alpha")).toBeNull();
     expect(screen.getByRole("link", { name: "All projects" })).toHaveAttribute(
       "href",
       "/projects",
@@ -149,23 +151,23 @@ describe("AppShell project sidebar", () => {
     const projectLinks = within(nav("Project")).getAllByRole("link");
     expect(projectLinks.map((link) => link.textContent)).toEqual([
       "Overview",
+      "Verification",
       "Runs",
-      "Architecture",
-      "Deployments",
+      "Architecture Explorer",
       "Settings",
     ]);
     expect(projectLinks.map((link) => link.getAttribute("href"))).toEqual([
       "/projects/prj_alpha",
+      "/projects/prj_alpha/verification",
       "/projects/prj_alpha/runs",
       "/projects/prj_alpha/graphs",
-      "/projects/prj_alpha/runs/dep_latest",
       "/projects/prj_alpha/settings",
     ]);
     expect(activeLabels()).toEqual(["Overview"]);
 
     const workspaceLinks = within(nav("Workspace")).getAllByRole("link");
     expect(workspaceLinks.map((link) => link.textContent)).toEqual([
-      "All runs",
+      "Run History",
       "Workspace settings",
     ]);
     expect(screen.queryByText("Project overview")).toBeNull();
@@ -173,30 +175,14 @@ describe("AppShell project sidebar", () => {
     expect(screen.queryByText("Project settings")).toBeNull();
   });
 
-  it("keeps the current deployment link on a run detail page", () => {
-    setRoute("/projects/prj_alpha/runs/dep_old", "prj_alpha");
-    projectsState.projects = [
-      project({ latest: { deployment_id: "dep_latest" } as RunSummary }),
-    ];
-    renderShell();
-
-    const deployments = within(nav("Project")).getByRole("link", {
-      name: "Deployments",
-    });
-    expect(deployments).toHaveAttribute(
-      "href",
-      "/projects/prj_alpha/runs/dep_old",
-    );
-    expect(activeLabels()).toEqual(["Deployments"]);
-  });
-
   it.each([
     ["/projects/prj_alpha", "Overview"],
+    ["/projects/prj_alpha/verification", "Verification"],
+    ["/projects/prj_alpha/verification/", "Verification"],
     ["/projects/prj_alpha/runs", "Runs"],
     ["/projects/prj_alpha/runs/", "Runs"],
-    ["/projects/prj_alpha/graphs", "Architecture"],
-    ["/projects/prj_alpha/graphs/", "Architecture"],
-    ["/projects/prj_alpha/runs/dep_1", "Deployments"],
+    ["/projects/prj_alpha/graphs", "Architecture Explorer"],
+    ["/projects/prj_alpha/graphs/", "Architecture Explorer"],
     ["/projects/prj_alpha/settings", "Settings"],
     ["/projects/prj_alpha/settings/access", "Settings"],
   ])("marks %s as %s", (pathname, expected) => {
@@ -254,9 +240,7 @@ describe("AppShell project sidebar", () => {
       </AppShell>,
     );
     expect(screen.getByText("Beta Service")).toBeInTheDocument();
-    expect(screen.getByText("example/beta")).toBeInTheDocument();
     expect(screen.queryByText("Alpha App")).toBeNull();
-    expect(screen.queryByText("example/alpha")).toBeNull();
     expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute(
       "href",
       "/projects/prj_beta",
@@ -275,12 +259,13 @@ describe("AppShell project sidebar", () => {
     expect(screen.queryByText("Project unavailable")).toBeNull();
   });
 
-  it("shows unavailable identity honestly when a project cannot be resolved", () => {
+  it("shows no stale identity when a project cannot be resolved", () => {
     projectsState.loading = false;
     setRoute("/projects/prj_missing", "prj_missing");
     renderShell();
 
-    expect(screen.getByText("Project unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Project unavailable")).toBeNull();
+    expect(screen.queryByText("Alpha App")).toBeNull();
     expect(screen.getByRole("link", { name: "All projects" })).toHaveAttribute(
       "href",
       "/projects",
@@ -296,8 +281,9 @@ describe("AppShell project sidebar", () => {
     const sidebar = screen.getByRole("complementary", {
       name: "Workspace navigation",
     });
-    expect(within(sidebar).getByText("legacy-app")).toBeInTheDocument();
-    expect(within(sidebar).getByText("example/legacy-app")).toBeInTheDocument();
+    // The short name surfaces in the header; the sidebar carries no identity.
+    expect(screen.getByText("legacy-app")).toBeInTheDocument();
+    expect(within(sidebar).queryByText("legacy-app")).toBeNull();
     expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute(
       "href",
       `/projects/${id}`,
@@ -306,7 +292,6 @@ describe("AppShell project sidebar", () => {
 
   it("truncates long names and exposes their full values", () => {
     const longName = `A very long project name ${"x".repeat(80)}`;
-    const longRepo = `the-very-long-owner-name/${"repository-".repeat(10)}app`;
     projectsState.projects = [
       project({
         name: longName,
@@ -318,11 +303,8 @@ describe("AppShell project sidebar", () => {
     renderShell();
 
     const name = screen.getByText(longName);
-    const repo = screen.getByText(longRepo);
     expect(name).toHaveAttribute("title", longName);
     expect(name.className).toContain("truncate");
-    expect(repo).toHaveAttribute("title", longRepo);
-    expect(repo.className).toContain("truncate");
     expect(screen.getByRole("navigation", { name: "Project" })).toBeInTheDocument();
   });
 

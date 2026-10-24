@@ -66,7 +66,7 @@ export default function ProposalsPage() {
       <div className="space-y-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-medha-text">
-            Approval proposals
+            Approvals
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-medha-secondary">
             Push-triggered plans waiting for a human decision. Nothing executes

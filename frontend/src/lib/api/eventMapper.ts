@@ -31,7 +31,7 @@ function formatClock(isoOrClock: string): string {
   return date.toISOString().slice(11, 19);
 }
 
-function toneForEvent(type: string, level: string): TraceEvent["tone"] {
+export function toneForEvent(type: string, level: string): TraceEvent["tone"] {
   if (type.includes("failed") || level === "error") return "error";
   if (type.includes("conflict") || level === "warning" || type.includes("replan"))
     return "warning";

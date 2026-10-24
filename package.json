@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k --kill-others-on-fail --names \"backend,frontend\" --prefix-colors \"blue,magenta\" \"npm:dev:backend\" \"npm:dev:frontend\"",
     "dev:backend": "node scripts/run-backend.mjs",
-    "dev:frontend": "node scripts/ensure-next-manifest.mjs && npm --prefix frontend run dev"
+    "dev:frontend": "node scripts/run-frontend.mjs"
   },
   "engines": {
     "node": ">=18"

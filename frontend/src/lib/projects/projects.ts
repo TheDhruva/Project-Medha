@@ -8,6 +8,7 @@ import {
   type Project,
   type RunSummary,
 } from "@/lib/api/client";
+import { selectRepositorySummary } from "@/lib/projects/repositorySummary";
 
 /* ------------------------------------------------------------------ */
 /* Project identity                                                     */
@@ -35,6 +36,8 @@ export interface ProjectSummary {
   repoName: string | null;
   /** Watched branch (canonical projects); null for legacy groups. */
   branch: string | null;
+  /** Short grounded repository description from recorded run evidence. */
+  summary: string | null;
   totalRuns: number;
   latest: RunSummary | null;
   lastActivity: string | null;
@@ -167,6 +170,26 @@ export function summarizeRunFailure(
   return redundant ? detail : `${prefix}: ${detail}`;
 }
 
+/**
+ * Turn the recorded repository summary into one compact card sentence.
+ * Fallback text that only reports missing manifests/README is not a
+ * description, so it is omitted rather than shown as filler.
+ */
+export function conciseRepositorySummary(
+  text: string | null | undefined,
+  maxWords = 14,
+): string | null {
+  const clean = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!clean) return null;
+  if (/no (?:readme|application manifests)|undocumented repository/i.test(clean)) {
+    return null;
+  }
+  const first = clean.split(/(?<=[.!?])\s+/)[0] ?? clean;
+  const words = first.split(" ").filter(Boolean);
+  if (words.length <= maxWords) return first;
+  return `${words.slice(0, maxWords).join(" ").replace(/[.,;:!?]+$/, "")}…`;
+}
+
 function summarize(
   id: string,
   repositoryUrl: string,
@@ -198,6 +221,7 @@ function summarize(
     attention.push(`${failedRecent} failed runs on record`);
   }
   void TERMINAL_OK;
+  const recordedSummary = selectRepositorySummary(sorted).summary;
   return {
     id,
     projectId: extra?.projectId ?? null,
@@ -208,6 +232,7 @@ function summarize(
     repoOwner: extra?.repoOwner ?? null,
     repoName: extra?.repoName ?? null,
     branch: extra?.branch ?? null,
+    summary: conciseRepositorySummary(recordedSummary?.text),
     totalRuns: sorted.length,
     latest,
     lastActivity: latest?.updated_at ?? null,
@@ -545,6 +570,36 @@ export function formatActivity(iso: string | null): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+  });
+}
+
+/**
+ * Compact local activity stamp for dense card layouts. Time only for today,
+ * date-only for older days so the stamp never crowds the status badge.
+ * Returns null for missing/invalid timestamps so callers never invent a date.
+ */
+export function formatActivityCompact(
+  iso: string | null,
+  now: Date = new Date(),
+): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const dayStart = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const days = Math.round(
+    (dayStart(now).getTime() - dayStart(date).getTime()) / 86_400_000,
+  );
+  if (days === 0) {
+    return date.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+  if (days === 1) return "Yesterday";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
   });
 }
 

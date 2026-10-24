@@ -261,7 +261,7 @@ export function LatestCommitCard({
   );
 }
 
-/* ========================= REPOSITORY INTELLIGENCE ========================= */
+/* ========================= Codebase Insights ========================= */
 
 function useRepoIntel(runId: string | null): { intel: RepositoryIntelResponse | null; loading: boolean; missing: boolean } {
   const [intel, setIntel] = useState<RepositoryIntelResponse | null>(null);
@@ -311,7 +311,7 @@ export function RepoIntelCard({ runId, detailHref }: { runId: string | null; det
 
   return (
     <Panel
-      title="Repository intelligence"
+      title="Codebase Insights"
       eyebrow={intel ? `Analyzed ${shortSha(str(r?.commit_sha))}` : "Detected facts"}
       action={<Link href={detailHref} className="rounded text-[13px] font-semibold text-medha-accent hover:underline">Full analysis →</Link>}
     >
@@ -371,7 +371,7 @@ export function RepoIntelCard({ runId, detailHref }: { runId: string | null; det
   );
 }
 
-/* ============================= DEPLOYMENT HEALTH ============================= */
+/* ============================= Deployment Status ============================= */
 
 export type DeployState = "healthy" | "unhealthy" | "unverified" | "not-deployed" | "unknown";
 
@@ -403,7 +403,7 @@ export function DeployHealthCard({
 
   return (
     <Panel
-      title="Deployment health"
+      title="Deployment Status"
       eyebrow="Observed evidence only"
       action={<Link href={detailHref} className="rounded text-[13px] font-semibold text-medha-accent hover:underline">Deployments →</Link>}
     >

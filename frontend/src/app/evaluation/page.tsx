@@ -54,7 +54,7 @@ export default function EvaluationPage() {
     <AppShell>
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-medha-text">Evaluation</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-medha-text">Research Results</h1>
           <p className="mt-1 max-w-2xl text-sm leading-relaxed text-medha-secondary">
             What Medha contributes, and how it was measured. Numbers come from
             backend runners — never hardcoded in the UI.

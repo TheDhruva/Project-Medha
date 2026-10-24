@@ -5,11 +5,10 @@ import { useParams, usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft, FolderKanban, GitBranch, LayoutDashboard, Menu, PlayCircle,
-  Rocket, Settings, X,
+  Rocket, Settings, ShieldCheck, X,
 } from "lucide-react";
 import { Header } from "@/components/layout/Header";
 import {
-  canonicalRepoKey,
   repoForProjectId,
   shortNameForRepo,
   useProjects,
@@ -29,29 +28,19 @@ function isPathOrChild(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-/* Workspace-wide destinations. `/runs` lists runs across all projects and
+/* Workspace-wide destinations. `/projects` lists projects,
+   `/runs` lists runs across all projects,
    `/settings` configures the local product — both distinct from the
    project-scoped destinations below, so both navigations are retained. */
 const WORKSPACE_ITEMS = [
-  { href: "/projects", label: "Projects", icon: FolderKanban },
-  { href: "/runs", label: "All runs", icon: PlayCircle },
+  { href: "/projects", label: "Project Hub", icon: FolderKanban },
+  { href: "/runs", label: "Run History", icon: PlayCircle },
   { href: "/settings", label: "Workspace settings", icon: Settings },
 ];
 
 function workspaceActive(pathname: string, href: string): boolean {
   if (href === "/projects") return pathname === "/projects";
   return isPathOrChild(pathname, href);
-}
-
-function projectRepo(summary: {
-  repoOwner: string | null;
-  repoName: string | null;
-  repositoryUrl: string;
-}): string | null {
-  if (summary.repoOwner && summary.repoName) {
-    return `${summary.repoOwner}/${summary.repoName}`;
-  }
-  return canonicalRepoKey(summary.repositoryUrl) ?? summary.repositoryUrl ?? null;
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -70,11 +59,6 @@ export function AppShell({ children }: { children: ReactNode }) {
       ? repoForProjectId(activeId)
       : null;
   const identityName = activeProject?.name ?? (legacyRepo ? shortNameForRepo(legacyRepo) : null);
-  const identityRepo = activeProject
-    ? projectRepo(activeProject)
-    : legacyRepo
-      ? canonicalRepoKey(legacyRepo) ?? legacyRepo
-      : null;
   const identityPending = inProject && !identityName && loading;
 
   // The drawer is route chrome: close it on navigation and on Escape.
@@ -108,6 +92,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           active: pathname === projectBase,
         },
         {
+          href: `${projectBase}/verification`,
+          label: "Verification",
+          icon: ShieldCheck,
+          active: isPathOrChild(pathname, `${projectBase}/verification`),
+        },
+        {
           href: `${projectBase}/runs`,
           label: "Runs",
           icon: PlayCircle,
@@ -115,15 +105,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         },
         {
           href: `${projectBase}/graphs`,
-          label: "Architecture",
+          label: "Architecture Explorer",
           icon: GitBranch,
           active: isPathOrChild(pathname, `${projectBase}/graphs`),
-        },
-        {
-          href: deploymentsHref,
-          label: "Deployments",
-          icon: Rocket,
-          active: pathname.startsWith(runDetailPrefix),
         },
         {
           href: `${projectBase}/settings`,
@@ -149,25 +133,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             <ArrowLeft className="h-3.5 w-3.5 shrink-0" aria-hidden />
             All projects
           </Link>
-          <div className="mt-1 min-w-0 px-2">
-            <p
-              className={cn(
-                "truncate text-[14.5px] font-semibold leading-5 text-medha-text",
-                identityPending && "text-medha-secondary",
-              )}
-              title={identityName ?? undefined}
-            >
-              {identityName ?? (identityPending ? "Loading project…" : "Project unavailable")}
-            </p>
-            {identityRepo ? (
-              <p
-                className="medha-mono truncate text-[12px] leading-4 text-medha-tertiary"
-                title={identityRepo}
-              >
-                {identityRepo}
-              </p>
-            ) : null}
-          </div>
         </div>
       ) : null}
 
@@ -228,16 +193,16 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="min-h-screen bg-medha-bg text-medha-text">
-      <Header />
+      <Header projectName={identityName} pending={identityPending} />
       <div className="mx-auto flex w-full max-w-[1600px] items-start">
         <aside
           id="workspace-navigation"
           aria-label="Workspace navigation"
           className={cn(
             "shrink-0 border-r border-medha-border bg-medha-sidebar p-3",
-            "md:sticky md:top-16 md:flex md:h-[calc(100svh-4rem)] md:w-60 md:flex-col",
+            "md:sticky md:top-14 md:flex md:h-[calc(100svh-3.5rem)] md:w-52 md:flex-col",
             mobileNavOpen
-              ? "fixed inset-y-0 left-0 top-16 z-40 flex w-72 max-w-[85vw] flex-col shadow-medha"
+              ? "fixed inset-y-0 left-0 top-14 z-40 flex w-72 max-w-[85vw] flex-col shadow-medha"
               : "hidden",
           )}
         >

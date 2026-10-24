@@ -3,24 +3,17 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle,
-  ArrowRight,
   Check,
-  CheckCircle2,
-  CircleDashed,
-  Clock3,
   Copy,
   Filter,
   FolderGit2,
   FolderKanban,
   GitBranch,
-  Loader2,
   MoreHorizontal,
   Plus,
   RefreshCw,
   Search,
   X,
-  XCircle,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { ConnectRepoDialog } from "@/components/workspace/ConnectRepoDialog";
@@ -32,19 +25,20 @@ import {
 } from "@/lib/api/client";
 import {
   PROJECT_CARD_STATUS_META,
+  canonicalRepoKey,
   filterProjectsByStatus,
-  formatActivity,
+  formatActivityCompact,
   isRunningStatus,
   projectCardStatus,
   sortProjects,
-  summarizeRunFailure,
   useProjects,
   type ProjectCardStatus,
   type ProjectSort,
   type ProjectSummary,
 } from "@/lib/projects/projects";
 
-/* Uses the shared MEDHA design tokens: text, secondary, tertiary, accent,\n   success, warning, danger, and their soft variants. */
+/* Uses the shared MEDHA design tokens: text, secondary, tertiary, accent,
+   success, warning, danger, and their soft variants. */
 
 const SORT_OPTIONS: { id: ProjectSort; label: string }[] = [
   { id: "recent", label: "Recently active" },
@@ -57,41 +51,40 @@ type DisplayTone = "danger" | "warning" | "info" | "neutral";
 function projectStatusDisplay(project: ProjectSummary): {
   label: string;
   tone: DisplayTone;
-  icon: typeof AlertTriangle;
 } {
   const latest = project.latest;
   if (latest && isRunningStatus(latest.status)) {
-    return { label: "Running", tone: "info", icon: Loader2 };
+    return { label: "Running", tone: "info" };
   }
   if (latest?.status === "failed") {
-    return { label: "Failed", tone: "danger", icon: XCircle };
+    return { label: "Failed", tone: "danger" };
   }
   if (latest?.status === "awaiting_approval") {
-    return { label: "Awaiting approval", tone: "warning", icon: Clock3 };
+    return { label: "Awaiting approval", tone: "warning" };
   }
   if (latest?.status === "partial_recovery") {
-    return { label: "Partially recovered", tone: "warning", icon: AlertTriangle };
+    return { label: "Partial recovery", tone: "warning" };
   }
   if (latest?.status === "cancelled") {
-    return { label: "Cancelled", tone: "warning", icon: XCircle };
+    return { label: "Cancelled", tone: "warning" };
   }
   if (!latest || project.totalRuns === 0) {
     if (project.connectionStatus === "failed") {
-      return { label: "Connection failed", tone: "warning", icon: AlertTriangle };
+      return { label: "Connection failed", tone: "warning" };
     }
     if (project.connectionStatus === "disconnected") {
-      return { label: "Disconnected", tone: "neutral", icon: CircleDashed };
+      return { label: "Disconnected", tone: "neutral" };
     }
     if (project.connectionStatus === "pending") {
-      return { label: "Connection pending", tone: "neutral", icon: CircleDashed };
+      return { label: "Pending", tone: "neutral" };
     }
-    return { label: "No runs yet", tone: "neutral", icon: CircleDashed };
+    return { label: "No runs yet", tone: "neutral" };
   }
   if (project.attention.length > 0) {
-    return { label: "Needs attention", tone: "warning", icon: AlertTriangle };
+    return { label: "Needs attention", tone: "warning" };
   }
   // Completion is not health: keep this state neutral unless evidence says otherwise.
-  return { label: "Analysis complete", tone: "neutral", icon: CheckCircle2 };
+  return { label: "Completed", tone: "neutral" };
 }
 
 const BADGE_TONE: Record<DisplayTone, string> = {
@@ -103,173 +96,20 @@ const BADGE_TONE: Record<DisplayTone, string> = {
 
 function StatusBadge({
   display,
-  className,
 }: {
   display: ReturnType<typeof projectStatusDisplay>;
-  className?: string;
 }) {
-  const Icon = display.icon;
   return (
     <span
-      className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px] font-semibold whitespace-nowrap ${BADGE_TONE[display.tone]}`}
+      className={`inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11.5px] font-semibold whitespace-nowrap ${BADGE_TONE[display.tone]}`}
     >
-      <Icon
-        className={`h-3.5 w-3.5 shrink-0 ${display.label === "Running" ? "motion-safe:animate-spin" : ""}`}
+      <span
         aria-hidden
+        className={`h-1.5 w-1.5 shrink-0 rounded-full bg-current ${display.label === "Running" ? "motion-safe:animate-pulse" : ""}`}
       />
       {display.label}
     </span>
   );
-}
-
-type IssueTone = "danger" | "warning" | "info" | "neutral";
-
-interface ProjectIssue {
-  tone: IssueTone;
-  text: string;
-  action?: { label: string; href?: string; onClick?: () => void; disabled?: boolean };
-}
-
-const ISSUE_TONE: Record<IssueTone, string> = {
-  danger: "border-medha-danger/25 bg-medha-danger-soft/60",
-  warning: "border-medha-warning/30 bg-medha-warning-soft/70",
-  info: "border-medha-accent/25 bg-medha-accent-soft/60",
-  neutral: "border-medha-border bg-medha-canvas",
-};
-
-const ISSUE_ICON: Record<IssueTone, typeof AlertTriangle> = {
-  danger: XCircle,
-  warning: AlertTriangle,
-  info: Loader2,
-  neutral: CheckCircle2,
-};
-
-const ISSUE_ICON_COLOR: Record<IssueTone, string> = {
-  danger: "text-medha-danger",
-  warning: "text-medha-warning",
-  info: "text-medha-accent",
-  neutral: "text-medha-tertiary",
-};
-
-const TARGET_ERROR_CODES = new Set([
-  "MULTIPLE_APPS_REQUIRE_TARGET",
-  "INVALID_DEPLOYMENT_TARGET",
-  "AMBIGUOUS_DEPLOY_TARGET",
-  "DEPLOYMENT_UNSUPPORTED",
-  "NO_TARGET_CANDIDATES",
-]);
-
-function failureAction(
-  project: ProjectSummary,
-  errorCode: string | null | undefined,
-): { label: string; href: string } {
-  const base = `/projects/${project.id}`;
-  if (errorCode === "EXECUTION_NOT_CONFIGURED") {
-    return { label: "Check execution settings", href: "/settings" };
-  }
-  if (errorCode && TARGET_ERROR_CODES.has(errorCode)) {
-    return { label: "Choose deployment target", href: `${base}/settings` };
-  }
-  if (errorCode === "VERIFICATION_FAILED" || errorCode === "POLICY_VIOLATION") {
-    return { label: "Review verification", href: `${base}/verification` };
-  }
-  return {
-    label: "View run details",
-    href: project.latest ? `${base}/runs/${project.latest.deployment_id}` : `${base}/runs`,
-  };
-}
-
-function projectIssue(project: ProjectSummary, actions: CardActions): ProjectIssue {
-  const latest = project.latest;
-  const base = `/projects/${project.id}`;
-  const runHref = latest ? `${base}/runs/${latest.deployment_id}` : `${base}/runs`;
-  const canonical = !project.legacy && project.projectId != null;
-  const busy = actions.acting != null && actions.acting.startsWith(`${project.id}:`);
-
-  if (latest && isRunningStatus(latest.status)) {
-    const stage = (latest.current_stage ?? "").trim();
-
-    return {
-      tone: "info",
-      text: stage ? `Analysis is running at the ${stage} stage.` : "Analysis is running.",
-      action: { label: "View live analysis", href: runHref },
-    };
-  }
-  if (latest?.status === "failed") {
-    return {
-      tone: "danger",
-      text: summarizeRunFailure(latest),
-      action: failureAction(project, latest.error_code),
-    };
-  }
-  if (latest?.status === "awaiting_approval") {
-    return {
-      tone: "warning",
-      text: "Analysis is waiting for approval before execution.",
-      action: { label: "Review plan", href: `${base}/changes` },
-    };
-  }
-  if (latest?.status === "partial_recovery") {
-    return {
-      tone: "warning",
-      text: "Analysis recovered with a scoped rollback.",
-      action: { label: "Inspect recovery", href: `${base}/recovery` },
-    };
-  }
-  if (latest?.status === "cancelled") {
-    return {
-      tone: "warning",
-      text: "Analysis was cancelled before it finished.",
-      action: { label: "View run details", href: runHref },
-    };
-  }
-  if (project.attention.length > 0) {
-    return {
-      tone: "warning",
-      text: project.attention[0] ?? "This project needs review before it can continue.",
-      action: { label: "Open project", href: base },
-    };
-  }
-  if (latest?.status === "completed") {
-    return {
-      tone: "neutral",
-      text: "Latest analysis completed. No failure was recorded.",
-      action: { label: "View findings", href: base },
-    };
-  }
-
-  const settingsAction = canonical ? { label: "Review connection", href: `${base}/settings` } : undefined;
-  if (project.connectionStatus === "failed") {
-    return {
-      tone: "warning",
-      text: "Repository verification failed during connect. Review the connection before analyzing.",
-      action: settingsAction,
-    };
-  }
-  if (project.connectionStatus === "disconnected") {
-    return {
-      tone: "warning",
-      text: "This repository is disconnected. New analyses will not start until it is reconnected.",
-      action: settingsAction,
-    };
-  }
-  if (project.connectionStatus === "pending") {
-    return {
-      tone: "neutral",
-      text: "Connection verification is pending. Analysis becomes available once it completes.",
-    };
-  }
-  if (project.legacy) {
-    return { tone: "neutral", text: "Legacy URL group with no recorded analysis." };
-  }
-  return {
-    tone: "neutral",
-    text: "No analysis has run yet.",
-    action: {
-      label: busy ? "Starting…" : "Run analysis",
-      onClick: () => actions.onReanalyze(project),
-    },
-  };
 }
 
 interface CardActions {
@@ -302,7 +142,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
       document.removeEventListener("pointerdown", onPointer);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open ]);
+  }, [open]);
 
   async function copyUrl() {
     try {
@@ -315,7 +155,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
   }
 
   const itemCls =
-    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13.5px] text-medha-secondary hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-medha-accent disabled:cursor-not-allowed disabled:opacity-50";
+    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-medha-secondary hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-medha-accent disabled:cursor-not-allowed disabled:opacity-50";
   const busy = actions.acting != null && actions.acting.startsWith(`${project.id}:`);
   // Legacy URL groups are read-only compatibility rows: only actions that
   // genuinely work are shown (never a dead menu item).
@@ -344,6 +184,22 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
           aria-label={`Actions for ${project.name}`}
           className="absolute right-0 top-full z-30 mt-1 w-52 rounded-lg border border-medha-border bg-white p-1 shadow-[0_8px_24px_rgba(17,24,39,0.12)]"
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const items = Array.from(
+              e.currentTarget.querySelectorAll<HTMLElement>(
+                '[role="menuitem"]:not([disabled])',
+              ),
+            );
+            if (items.length === 0) return;
+            const index = items.indexOf(document.activeElement as HTMLElement);
+            const next =
+              e.key === "ArrowDown"
+                ? (index + 1) % items.length
+                : (index - 1 + items.length) % items.length;
+            items[next]?.focus();
+          }}
         >
           <Link
             role="menuitem"
@@ -395,6 +251,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
             )}
             {copied ? "Copied URL" : "Copy repository URL"}
           </button>
+          {canonical ? <div role="separator" className="my-1 h-px bg-medha-border" /> : null}
           {canonical && project.connectionStatus !== "disconnected" ? (
             <button
               type="button"
@@ -429,138 +286,77 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
   );
 }
 
-function IssueBlock({ issue }: { issue: ProjectIssue }) {
-  const Icon = ISSUE_ICON[issue.tone];
-  const action = issue.action;
-
-  return (
-    <div
-      className={`mt-3 flex gap-2 rounded-md border px-3 py-2 ${ISSUE_TONE[issue.tone]}`}
-    >
-      <Icon className={`h-3.5 w-3.5 shrink-0 ${ISSUE_ICON_COLOR[issue.tone]}`} aria-hidden />
-      <div className="min-w-0 flex-1">
-        <p className="text-[13px] leading-5 text-medha-text">{issue.text}</p>
-        {action ? (
-          <p className="mt-2 flex items-center gap-1.5">
-            {action.href ? (
-              <Link
-                href={action.href}
-                className="inline-flex items-center gap-1 rounded text-[12.5px] font-semibold text-medha-accent hover:text-medha-accent-hover hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
-              >
-                {action.label}
-                <ArrowRight className="h-3 w-3" aria-hidden />
-              </Link>
-            ) : (
-              <button
-                type="button"
-                disabled={action.disabled}
-                className="inline-flex items-center gap-1 rounded text-[12.5px] font-semibold text-medha-accent hover:text-medha-accent-hover hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={action.onClick}
-              >
-                {action.label}
-              </button>
-            )}
-          </p>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function StatChip({
-  id,
-  label,
-  active,
-  onClick,
-}: {
-  id: string;
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="button"
-      aria-pressed={active}
-      aria-label={label}
-      onClick={onClick}
-      className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent ${active ? "border-medha-accent bg-medha-accent-soft text-medha-accent-hover" : "border-medha-border bg-white text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text"}`}
-    >
-      {active ? (
-        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-white" aria-hidden />
-      ) : null}
-      {label}
-    </button>
-  );
-}
-
 function ProjectCard({ project, actions }: { project: ProjectSummary; actions: CardActions }) {
   const display = projectStatusDisplay(project);
-  const issue = projectIssue(project, actions);
-  const latest = project.latest;
-  const running = latest != null && isRunningStatus(latest.status);
   const identity =
     project.repoOwner && project.repoName
       ? `${project.repoOwner}/${project.repoName}`
-      : project.repositoryUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
-  const activity = latest ? formatActivity(project.lastActivity) : project.connectionStatus;
+      : canonicalRepoKey(project.repositoryUrl) ??
+        project.repositoryUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+  const activity = formatActivityCompact(project.lastActivity);
+  const activityTitle = project.lastActivity
+    ? new Date(project.lastActivity).toLocaleString()
+    : undefined;
   const base = `/projects/${project.id}`;
 
   return (
     <article
       aria-label={project.name}
-      className="flex h-full flex-col rounded-lg border border-medha-border bg-white p-4 shadow-[0_1px_2px_rgba(17,24,39,0.06)] transition-shadow hover:shadow-[0_4px_16px_rgba(17,24,39,0.08)]"
+      className="group relative flex h-full flex-col rounded-lg border border-medha-border bg-white p-4 shadow-[0_1px_2px_rgba(17,24,39,0.06)] transition-colors hover:border-medha-border-strong focus-within:border-medha-accent focus-within:ring-2 focus-within:ring-medha-accent/20 lg:aspect-square lg:h-auto lg:self-start"
     >
       <div className="flex items-start justify-between gap-2">
         <span
           aria-hidden
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-medha-accent-soft text-medha-accent"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-medha-accent-soft text-medha-accent"
         >
-          <FolderGit2 className="h-5 w-5" />
+          <FolderGit2 className="h-4 w-4" />
         </span>
-        <CardMenu project={project} actions={actions} />
+        <div className="relative z-20">
+          <CardMenu project={project} actions={actions} />
+        </div>
       </div>
 
-      <div className="mt-2 min-w-0">
+      <h2 className="mt-3 min-w-0 text-[17px] font-semibold leading-snug tracking-tight text-medha-text">
         <Link
           href={base}
           title={project.name}
-          className="block min-w-0 break-words text-[18px] font-semibold leading-snug tracking-tight text-medha-text line-clamp-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+          className="block outline-none after:absolute after:inset-0 after:z-[1] after:rounded-lg after:content-['']"
         >
-          {project.name}
+          <span className="line-clamp-2">{project.name}</span>
         </Link>
-        <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-medha-secondary">
-          <span className="truncate font-mono">{identity}</span>
-          {project.branch ? (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-medha-border bg-medha-canvas px-1.5 py-0.5 font-mono text-[11.5px] text-medha-tertiary">
-              <GitBranch className="h-3 w-3" aria-hidden /> {project.branch}
-            </span>
-          ) : null}
-        </div>
-        <StatusBadge display={display} className="mt-2" />
-      </div>
+      </h2>
+      <p className="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-medha-secondary">
+        <span className="min-w-0 truncate font-mono" title={identity}>
+          {identity}
+        </span>
+        {project.branch ? (
+          <span
+            className="inline-flex min-w-0 max-w-[45%] shrink-0 items-center gap-1 text-medha-tertiary"
+            title={`Branch ${project.branch}`}
+          >
+            <GitBranch className="h-3 w-3 shrink-0" aria-hidden />
+            <span className="truncate font-mono">{project.branch}</span>
+          </span>
+        ) : null}
+      </p>
 
-      {issue ? <IssueBlock issue={issue} /> : null}
-
-      <div className="mt-auto pt-3 border-t border-medha-border">
-        <p className="min-w-0 truncate text-[12.5px] text-medha-secondary" title={activity ?? ""}>
-          {running && latest ? (
-            <>
-              Latest run <span className="font-medium text-medha-text">{activity}</span>
-            </>
-          ) : latest ? (
-            <>
-              Latest run <span className="font-medium text-medha-text">{activity}</span>
-              <span className="text-medha-tertiary">·</span>{" "}
-              {project.totalRuns} run{project.totalRuns === 1 ? "" : "s"}
-            </>
-          ) : (
-            <>
-              {project.totalRuns === 0 ? "No runs" : `${project.totalRuns} run(s)`}
-            </>
-          )}
+      {project.summary ? (
+        <p className="mt-3 line-clamp-2 text-[13px] leading-5 text-medha-secondary">
+          {project.summary}
         </p>
+      ) : null}
+
+      <div className="mt-auto flex min-w-0 items-center justify-between gap-2 pt-3">
+        <StatusBadge display={display} />
+        {activity ? (
+          <time
+            dateTime={project.lastActivity ?? undefined}
+            title={activityTitle}
+            className="min-w-0 truncate text-[11.5px] tabular-nums text-medha-tertiary"
+          >
+            {activity}
+          </time>
+        ) : null}
       </div>
     </article>
   );
@@ -571,12 +367,12 @@ function SkeletonGrid() {
     <div
       aria-label="Loading projects"
       role="status"
-      className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+      className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
     >
-      {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+      {[0, 1, 2, 3, 4, 5].map((i) => (
         <div
           key={i}
-          className="flex h-full flex-col rounded-lg border border-medha-border bg-white p-4"
+          className="flex h-full flex-col rounded-lg border border-medha-border bg-white p-4 lg:aspect-square lg:h-auto lg:self-start"
         >
           <div className="flex items-start justify-between">
             <div className="h-8 w-8 rounded-md bg-medha-surface-muted" />
@@ -584,9 +380,11 @@ function SkeletonGrid() {
           </div>
           <div className="mt-3 h-4 w-3/4 rounded bg-medha-surface-muted" />
           <div className="mt-2 h-3 w-1/2 rounded bg-medha-surface-muted" />
-          <div className="mt-3 h-5 w-24 rounded-full bg-medha-surface-muted" />
-          <div className="mt-auto pt-3">
-            <div className="h-4 w-28 rounded bg-medha-surface-muted" />
+          <div className="mt-3 h-3 w-full rounded bg-medha-surface-muted" />
+          <div className="mt-1 h-3 w-2/3 rounded bg-medha-surface-muted" />
+          <div className="mt-auto flex items-center justify-between gap-2 pt-3">
+            <div className="h-5 w-24 rounded-full bg-medha-surface-muted" />
+            <div className="h-3 w-20 rounded bg-medha-surface-muted" />
           </div>
         </div>
       ))}
@@ -601,7 +399,7 @@ type ConfirmState =
 export function ProjectHub() {
   const { projects, loading, error, backendReachable, refresh } = useProjects();
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState<ProjectCardStatus[]>([]);
+  const [statusFilter, setStatusFilter] = useState<ProjectCardStatus | "all">("all");
   const [sort, setSort] = useState<ProjectSort>("recent");
   const [filterOpen, setFilterOpen] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -611,7 +409,11 @@ export function ProjectHub() {
   const filterWrapRef = useRef<HTMLDivElement>(null);
   const filterButtonRef = useRef<HTMLButtonElement>(null);
 
-  const activeSet = useMemo(() => new Set(active), [active]);
+  const activeSet = useMemo(
+    () =>
+      new Set<ProjectCardStatus>(statusFilter === "all" ? [] : [statusFilter]),
+    [statusFilter],
+  );
 
   const visible = useMemo(
     () => sortProjects(filterProjectsByStatus(projects, query, activeSet), sort),
@@ -619,14 +421,14 @@ export function ProjectHub() {
   );
 
   const counts = useMemo(() => {
-    let attention = 0;
-    let noRuns = 0;
-    for (const p of projects) {
-      const s = projectCardStatus(p);
-      if (s === "attention") attention += 1;
-      if (s === "no_runs") noRuns += 1;
-    }
-    return { total: projects.length, attention, noRuns };
+    const byStatus: Record<ProjectCardStatus, number> = {
+      attention: 0,
+      running: 0,
+      completed: 0,
+      no_runs: 0,
+    };
+    for (const p of projects) byStatus[projectCardStatus(p)] += 1;
+    return { total: projects.length, byStatus };
   }, [projects]);
 
   useEffect(() => {
@@ -650,13 +452,9 @@ export function ProjectHub() {
     };
   }, [filterOpen]);
 
-  function toggleStatus(id: ProjectCardStatus) {
-    setActive((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
-  }
-
   function clearAll() {
     setQuery("");
-    setActive([]);
+    setStatusFilter("all");
   }
 
   async function reanalyze(project: ProjectSummary) {
@@ -673,7 +471,9 @@ export function ProjectHub() {
           ? "Another analysis is already running (V1 runs one at a time). Try again once it finishes."
           : code === "PROJECT_NOT_CONNECTED"
             ? `“${project.name}” is not connected, so no analysis can start. Verify or reconnect it first.`
-            : err instanceof Error ? err.message : "Could not start a new analysis.",
+            : err instanceof Error
+              ? err.message
+              : "Could not start a new analysis.",
       );
     } finally {
       setActing(null);
@@ -698,7 +498,9 @@ export function ProjectHub() {
       setActionError(
         code === "ACTIVE_RUNS"
           ? `“${project.name}” has a run still in flight, so deletion was refused to protect it. Disconnect instead, or retry once the run finishes.`
-          : err instanceof Error ? err.message : `Could not ${kind} this project.`,
+          : err instanceof Error
+            ? err.message
+            : `Could not ${kind} this project.`,
       );
       setConfirm(null);
     } finally {
@@ -731,71 +533,40 @@ export function ProjectHub() {
   return (
     <AppShell>
       {/* Full-bleed bright workspace inside AppShell's padded main. */}
-      <div className="-m-4 min-h-[calc(100svh-64px)] bg-medha-canvas p-4 sm:-m-6 sm:p-6 lg:-m-8 lg:p-8">
+      <div className="-m-4 min-h-[calc(100svh-3.5rem)] bg-medha-canvas p-4 sm:-m-6 sm:p-6 lg:-m-8 lg:p-8">
         <div className="mx-auto w-full max-w-[1400px]">
           {/* Header */}
-          <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
-              <h1 className="text-[28px] font-semibold leading-tight tracking-tight text-medha-text">
-                Projects
+              <h1 className="text-[22px] font-semibold leading-tight tracking-tight text-medha-text">
+                Project Hub
               </h1>
-              <p className="mt-1 max-w-2xl text-[14px] leading-relaxed text-medha-secondary">
-                Your repositories at a glance.
-              </p>
             </div>
             <button
               type="button"
               onClick={() => setConnecting(true)}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white shadow-[0_1px_2px_rgba(37,99,235,0.4)] transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-medha-accent px-3.5 py-2 text-sm font-semibold text-white shadow-[0_1px_2px_rgba(37,99,235,0.4)] transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
             >
               <Plus className="h-4 w-4" aria-hidden /> New project
             </button>
           </div>
 
-          {/* Compact stat filters: clicking a chip scopes the grid below. */}
-          {!loading && !failed ? (
-            <div
-              className="mt-3 flex flex-wrap gap-2"
-              role="group"
-              aria-label="Project status filters"
-            >
-              <StatChip
-                id="all"
-                label={`All projects (${counts.total})`}
-                active={active.length === 0 && query.trim() === ""}
-                onClick={clearAll}
-              />
-              <StatChip
-                id="attention"
-                label={`Need attention (${counts.attention})`}
-                active={active.length === 1 && active[0] === "attention" && query.trim() === ""}
-                onClick={() => setActive(["attention"])}
-              />
-              <StatChip
-                id="no-runs"
-                label={`No runs yet (${counts.noRuns})`}
-                active={active.length === 1 && active[0] === "no_runs" && query.trim() === ""}
-                onClick={() => setActive(["no_runs"])}
-              />
-            </div>
-          ) : null}
-
-          {/* Toolbar */}
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-            <div className="relative flex-1">
+          {/* Compact toolbar: search, status filter menu, and sorting. */}
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <div className="relative w-full sm:w-[360px]">
               <Search
                 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-medha-tertiary"
                 aria-hidden
               />
               <label htmlFor="projects-search" className="sr-only">
-                Search repositories
+                Search projects
               </label>
               <input
                 id="projects-search"
                 type="search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search repositories..."
+                placeholder="Search projects..."
                 autoComplete="off"
                 className="w-full rounded-lg border border-medha-border bg-white py-2 pl-9 pr-8 text-sm text-medha-text shadow-[0_1px_2px_rgba(17,24,39,0.05)] placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent/25"
               />
@@ -821,70 +592,47 @@ export function ProjectHub() {
                   aria-controls="projects-filter-popover"
                   onClick={() => setFilterOpen((v) => !v)}
                   className={`inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent ${
-                    active.length > 0
+                    statusFilter !== "all"
                       ? "border-medha-accent bg-medha-accent-soft text-medha-accent-hover"
                       : "border-medha-border bg-white text-medha-secondary hover:bg-medha-surface-muted"
                   }`}
                 >
                   <Filter className="h-4 w-4" aria-hidden />
                   Filter
-                  {active.length > 0 ? (
-                    <span
-                      aria-label={`${active.length} status filters active`}
-                      className="inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-medha-accent px-1.5 text-[11.5px] font-bold text-white"
-                    >
-                      {active.length}
-                    </span>
-                  ) : null}
                 </button>
 
                 {filterOpen ? (
                   <div
                     id="projects-filter-popover"
                     role="dialog"
-                    aria-label="Filter and sort projects"
-                    className="absolute left-0 top-full z-40 mt-2 max-w-[calc(100vw-2rem)] rounded-lg border border-medha-border bg-white p-4 shadow-[0_8px_24px_rgba(17,24,39,0.12)]"
+                    aria-label="Filter projects"
+                    className="absolute left-0 top-full z-40 mt-2 w-60 max-w-[calc(100vw-2rem)] rounded-lg border border-medha-border bg-white p-4 shadow-[0_8px_24px_rgba(17,24,39,0.12)]"
                   >
                     <fieldset>
-                      <legend className="medha-label">
-                        Status
-                      </legend>
-                      <div className="mt-2 space-y-1.5">
-                        {PROJECT_CARD_STATUS_META.map((s) => (
+                      <legend className="medha-label">Status</legend>
+                      <div className="mt-2 space-y-0.5">
+                        {[
+                          { id: "all" as const, label: "All projects", count: counts.total },
+                          ...PROJECT_CARD_STATUS_META.map((s) => ({
+                            ...s,
+                            count: counts.byStatus[s.id],
+                          })),
+                        ].map((option) => (
                           <label
-                            key={s.id}
-                            className="flex cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1.5 text-[13.5px] text-medha-secondary hover:bg-medha-canvas focus-within:outline focus-within:outline-2 focus-within:outline-medha-accent"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={active.includes(s.id)}
-                              onChange={() => toggleStatus(s.id)}
-                              className="h-4 w-4 shrink-0 rounded border-medha-border-strong accent-medha-accent"
-                            />
-                            {s.label}
-                          </label>
-                        ))}
-                      </div>
-                    </fieldset>
-
-                    <fieldset className="mt-3 border-t border-medha-border pt-3">
-                      <legend className="medha-label">
-                        Sort by
-                      </legend>
-                      <div className="mt-2 space-y-1.5">
-                        {SORT_OPTIONS.map((o) => (
-                          <label
-                            key={o.id}
-                            className="flex cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1.5 text-[13.5px] text-medha-secondary hover:bg-medha-canvas focus-within:outline focus-within:outline-2 focus-within:outline-medha-accent"
+                            key={option.id}
+                            className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] text-medha-secondary hover:bg-medha-canvas focus-within:outline focus-within:outline-2 focus-within:outline-medha-accent"
                           >
                             <input
                               type="radio"
-                              name="projects-sort"
-                              checked={sort === o.id}
-                              onChange={() => setSort(o.id)}
-                              className="h-4 w-4 shrink-0 border-medha-border-strong accent-medha-accent"
+                              name="projects-status"
+                              checked={statusFilter === option.id}
+                              onChange={() => setStatusFilter(option.id)}
+                              className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-medha-accent"
                             />
-                            {o.label}
+                            <span className="flex-1">{option.label}</span>
+                            <span className="text-[12px] tabular-nums text-medha-tertiary">
+                              {option.count}
+                            </span>
                           </label>
                         ))}
                       </div>
@@ -894,10 +642,10 @@ export function ProjectHub() {
                       <button
                         type="button"
                         onClick={() => {
-                          setActive([]);
+                          setStatusFilter("all");
                           setSort("recent");
                         }}
-                        disabled={active.length === 0 && sort === "recent"}
+                        disabled={statusFilter === "all" && sort === "recent"}
                         className="rounded-md px-2 py-1 text-[13px] font-medium text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
                       >
                         Reset
@@ -921,7 +669,7 @@ export function ProjectHub() {
                 id="projects-sort"
                 value={sort}
                 onChange={(e) => setSort(e.target.value as ProjectSort)}
-                className="max-w-[160px] truncate rounded-lg border border-medha-border bg-white px-3 py-2 text-sm text-medha-secondary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent/25"
+                className="w-[170px] truncate rounded-lg border border-medha-border bg-white px-3 py-2 text-sm text-medha-secondary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent/25"
               >
                 {SORT_OPTIONS.map((o) => (
                   <option key={o.id} value={o.id}>
@@ -1045,7 +793,7 @@ export function ProjectHub() {
             ) : (
               <div
                 aria-label="Projects"
-                className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+                className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
               >
                 {visible.map((p) => (
                   <ProjectCard key={p.id} project={p} actions={actions} />
@@ -1053,59 +801,45 @@ export function ProjectHub() {
               </div>
             )}
           </div>
-
-          <p className="mt-5 border-t border-medha-border pt-3 text-[12px] leading-relaxed text-medha-tertiary">
-            Project status reflects recorded backend runs only. A finished run is
-            reported as completed — never as healthy without observed health-check
-            evidence. Analysis is not a deployment: MEDHA analyzes locally and
-            reports verification honestly.
-          </p>
         </div>
-      </div>
-      {connecting ? (
-        <ConnectRepoDialog onClose={() => setConnecting(false)} onDone={() => void refresh()} />
-      ) : null}
-      {confirm ? (
-        <Dialog
-          title={confirm.kind === "disconnect" ? "Disconnect repository?" : "Delete project?"}
-          danger={confirm.kind === "delete"}
-          confirmLabel={
-            acting
-              ? confirm.kind === "disconnect" ? "Disconnecting…" : "Deleting…"
-              : confirm.kind === "disconnect" ? "Disconnect" : "Delete project"
-          }
-          confirmDisabled={acting != null}
-          onConfirm={() => void confirmAction()}
-          onCancel={() => setConfirm(null)}
-          body={
-            <div className="space-y-2">
-              <p>
-                {confirm.kind === "disconnect" ? (
-                  <>
-                    Disconnect <span className="font-semibold text-medha-text">{confirm.project.name}</span>?
-                    Recorded runs stay inspectable, but new pushes stop routing here and
-                    analyses can no longer start until it is reconnected.
-                  </>
-                ) : (
-                  <>
-                    Delete <span className="font-semibold text-medha-text">{confirm.project.name}</span> from
-                    this workspace? Recorded run history is preserved in the backend, but
-                    the connection mapping is removed.
-                  </>
-                )}
-              </p>
-              {confirm.kind === "delete" &&
-              confirm.project.latest != null &&
-              isRunningStatus(confirm.project.latest.status) ? (
-                <p role="note" className="rounded-lg border border-medha-warning/30 bg-medha-warning-soft px-3 py-2 text-[13px] text-medha-warning">
-                  A run is currently in flight — deletion will be refused until it
-                  finishes. Disconnect instead, or wait and retry.
+        {connecting ? (
+          <ConnectRepoDialog onClose={() => setConnecting(false)} onDone={() => void refresh()} />
+        ) : null}
+        {confirm ? (
+          <Dialog
+            title={confirm.kind === "disconnect" ? "Disconnect repository?" : "Delete project?"}
+            danger={confirm.kind === "delete"}
+            confirmLabel={
+              acting
+                ? confirm.kind === "disconnect" ? "Disconnecting…" : "Deleting…"
+                : confirm.kind === "disconnect" ? "Disconnect" : "Delete project"
+            }
+            confirmDisabled={acting != null}
+            onConfirm={() => void confirmAction()}
+            onCancel={() => setConfirm(null)}
+            body={
+              <div className="space-y-2">
+                <p>
+                  {confirm.kind === "disconnect" ? (
+                    <>
+                      Disconnect <span className="font-semibold text-medha-text">{confirm.project.name}</span>? Recorded runs stay inspectable, but new pushes stop routing here and analyses can no longer start until it is reconnected.
+                    </>
+                  ) : (
+                    <>
+                      Delete <span className="font-semibold text-medha-text">{confirm.project.name}</span> from this workspace? Recorded run history is preserved in the backend, but the connection mapping is removed.
+                    </>
+                  )}
                 </p>
-              ) : null}
-            </div>
-          }
-        />
-      ) : null}
+                {confirm.kind === "delete" && confirm.project.latest != null && isRunningStatus(confirm.project.latest.status) ? (
+                  <p role="note" className="rounded-lg border border-medha-warning/30 bg-medha-warning-soft px-3 py-2 text-[13px] text-medha-warning">
+                    A run is currently in flight — deletion will be refused until it finishes. Disconnect instead, or wait and retry.
+                  </p>
+                ) : null}
+              </div>
+            }
+          />
+        ) : null}
+      </div>
     </AppShell>
   );
 }

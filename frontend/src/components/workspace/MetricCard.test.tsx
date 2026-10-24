@@ -38,17 +38,28 @@ function metric(overrides: Partial<ScorecardMetric> = {}): ScorecardMetric {
 }
 
 describe("MetricCard", () => {
-  it("shows the real score, status, explanation, coverage and findings link", () => {
+  it("shows the real score, status and findings link on a compact card", () => {
     render(<MetricCard metric={metric()} />);
     expect(screen.getByText("Security Posture")).toBeInTheDocument();
     expect(screen.getByText("72/100")).toBeInTheDocument();
     expect(screen.getByText("Needs attention")).toBeInTheDocument();
-    expect(screen.getByText("1 high-severity finding")).toBeInTheDocument();
-    expect(screen.getByText("Assessment coverage: 8/10 checks")).toBeInTheDocument();
     expect(screen.getByText(/View findings/)).toBeInTheDocument();
-    expect(screen.getByRole("link")).toHaveAttribute(
-      "href",
-      "/projects/prj_1/verification?run=dep_1",
+
+    // Compact card: no prose, coverage or revision lines as visible text.
+    expect(screen.queryByText("1 high-severity finding")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Checks completed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/deadbeef/)).not.toBeInTheDocument();
+
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "/projects/prj_1/verification?run=dep_1");
+    // Evidence, coverage and assessment context stay accessible to screen readers.
+    expect(link).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("1 high-severity finding"),
+    );
+    expect(link).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("Checks completed: 8/10 checks"),
     );
   });
 
@@ -66,7 +77,12 @@ describe("MetricCard", () => {
     );
     expect(screen.getAllByText("Not assessed").length).toBeGreaterThan(0);
     expect(screen.queryByText("100/100")).not.toBeInTheDocument();
-    expect(screen.getByText(/no security scanner completed/)).toBeInTheDocument();
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("data-status", "not_assessed");
+    expect(link).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("no security scanner completed"),
+    );
   });
 
   it("marks stale results and demo runs visibly", () => {
@@ -77,6 +93,6 @@ describe("MetricCard", () => {
     );
     expect(screen.getByText("DEMO")).toBeInTheDocument();
     expect(screen.getByText("Stale assessment")).toBeInTheDocument();
-    expect(screen.getByText(/not current revision/)).toBeInTheDocument();
+    expect(screen.getByRole("link")).toHaveAttribute("data-status", "stale");
   });
 });

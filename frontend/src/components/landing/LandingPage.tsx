@@ -85,8 +85,8 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
           </p>
           <nav aria-label="Product" className="hidden items-center gap-1 md:flex">
             {[
-              { href: "/projects", label: "Projects" },
-              { href: "/runs", label: "Runs" },
+              { href: "/projects", label: "Project Hub" },
+              { href: "/runs", label: "Run History" },
               { href: "/settings", label: "Settings" },
             ].map((l) => (
               <Link key={l.href} href={l.href} className="lp-nav-link">

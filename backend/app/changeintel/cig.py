@@ -12,9 +12,15 @@ surfaced instead of guessed.
 
 from __future__ import annotations
 
+from pathlib import Path
+from enum import Enum
+from collections import deque
+
 from app.changeintel.dep_index import (
     DependencyIndex,
     compute_dependency_edges,
+    EdgeCandidate,
+    _config_edges,
     is_config_file,
     is_test_file,
 )
@@ -207,6 +213,28 @@ def build_cig(
         seen_edges.add(key)
         edges.append(edge)
 
+    # Config dependency edges: heuristic references from config files
+    # to artifacts they reference (e.g., service names, database paths).
+    config_candidates: list[EdgeCandidate] = []
+    for path in sorted(index.files):
+        if is_config_file(path):
+            _config_edges(path, index, config_candidates)
+    for ce in config_candidates:
+        key = (ce.source, ce.target, ce.relationship.value)
+        if key not in seen_edges:
+            seen_edges.add(key)
+            edges.append(
+                ImpactEdge(
+                    id=new_edge(),
+                    source=ce.source,
+                    target=ce.target,
+                    relationship=ce.relationship,
+                    confidence=ce.confidence,
+                    evidence=ce.evidence,
+                    direct=False,
+                )
+            )
+
     # Symbol-level edges: a changed symbol depends on the same targets as its file.
     symbol_by_path: dict[str, list[str]] = {}
     for cs in changed_symbols:
@@ -254,7 +282,7 @@ def _synthetic_module_symbol(path: str, language: Language) -> Symbol:
     return Symbol(
         symbol_id=f"{path}::module",
         name=name,
-        fqn=path.rsplit(".", 1)[0].replace("/", "."),
+        fqn=path.rsplit(".", 1)[0].replace(".", "."),
         kind=SymbolKind.MODULE,
         path=path,
         line=1,
@@ -264,8 +292,6 @@ def _synthetic_module_symbol(path: str, language: Language) -> Symbol:
 
 
 def _remap_path(symbol: Symbol, new_path: str) -> Symbol:
-    from pathlib import Path
-
     # A file rename renames the module, not the functions/classes it holds.
     if symbol.kind == SymbolKind.MODULE:
         name = Path(new_path).stem or symbol.name
@@ -318,8 +344,6 @@ def _reverse_reach(
     max_depth: int,
 ) -> dict[str, int]:
     """Bounded BFS over reverse edges. Returns node -> distance (1..max_depth)."""
-    from collections import deque
-
     visited: dict[str, int] = {}
     queue: deque[tuple[str, int]] = deque((s, 0) for s in sorted(seeds))
     for s in seeds:
@@ -330,10 +354,6 @@ def _reverse_reach(
             continue
         for depend, _rel, _conf, _evidence in dependents.get(current, []):
             if depend in visited:
-                continue
-            if is_test_file(depend) or is_config_file(depend):
-                # still mark so test/config coverage is surfaced
-                visited.setdefault(depend, depth + 1)
                 continue
             visited[depend] = depth + 1
             queue.append((depend, depth + 1))
@@ -352,7 +372,6 @@ def _traversal_stats(
     cycles: list[tuple[str, str]] = []
     seen_back: set[tuple[str, str]] = set()
     for seed in sorted(seeds):
-        stack_visited: set[str] = set()
         visiting: list[str] = []
 
         def dfs(node: str) -> None:

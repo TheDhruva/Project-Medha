@@ -177,7 +177,7 @@ function Flow() {
       </button>
 
       <h1 className="mt-3 text-2xl font-bold tracking-tight text-medha-text">
-        New analysis
+        New Run
       </h1>
       <p className="mt-1 text-sm text-medha-secondary">
         {projectId
