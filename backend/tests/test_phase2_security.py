@@ -35,6 +35,24 @@ def test_redact_strips_tokens_and_url_creds():
     assert f"{REDACTED}@" in cleaned["note"]
 
 
+def test_redact_matches_prefixed_secret_variable_names():
+    # A leading \b sits between two word chars in db_password/user_token and
+    # used to skip them entirely; the value must still be redacted.
+    for line in ("db_password=synthpass1234", "user_token: synthtok99",
+                 "APP_SECRET = 'synthsecret'"):
+        out = redact_text(line)
+        assert REDACTED in out, f"{line!r} was not redacted"
+        assert "synthpass1234" not in out
+        assert "synthtok99" not in out
+        assert "synthsecret" not in out
+
+
+def test_redact_strips_google_api_keys():
+    key = "AIza" + "Sy" + "D" + "-" + "a" * 30   # realistic AIza… shape
+    assert redact_text(f"key={key}") == f"key={REDACTED}"
+    assert key not in redact_text(f"found {key} in config")
+
+
 def test_repo_url_blocks_metadata_and_private():
     for bad in ("https://169.254.169.254/latest", "https://metadata.google.internal/x", "https://user:pw@github.com/o/r.git"):
         try:

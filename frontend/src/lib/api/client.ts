@@ -623,10 +623,55 @@ export interface RunSummary {
    * EXECUTION_NOT_CONFIGURED, MULTIPLE_APPS_REQUIRE_TARGET); null otherwise. */
   error_code?: string | null;
   error_summary: string | null;
+  /** Backend-persisted analysis outcome (completed/partial/failed); null on
+   * older records. Authoritative — never inferred from the run status. */
+  analysis_status?: string | null;
+  /** Backend-persisted deployment outcome (e.g. blocked); null when no
+   * deployment outcome was recorded. */
+  deployment_status?: string | null;
+  /** Pull request number attached to this run's assessment; null when none. */
+  pr_number?: number | null;
+  /** Scan coverage recorded with this run's analysis; null on older runs. */
+  analysis_coverage?: {
+    security_scan: string | null;
+    scan_mode: string | null;
+    gaps: number;
+    finding_count: number | null;
+    commit_sha: string | null;
+  } | null;
   ai_outcome?: string | null;
   ai_provider?: string | null;
+  /** Structured failure diagnostics (category/operation/exit_code/stderr
+   * tail) from the persisted result; null on older or successful records. */
+  failure?: RunFailureInfo | null;
+  /** Authoritative terminal phase snapshot (completed/failed/blocked/
+   * skipped + reasons); null on older or successful records. */
+  phases?: RunPhaseState[] | null;
   /** Additive: revision-scoped repository summary for the overview header. */
   repository_summary?: RepositorySummary;
+}
+
+/** Persisted failure record — separate from raw logs, never free-form. */
+export interface RunFailureInfo {
+  code?: string | null;
+  /** Coarse category: timeout | filesystem | disk | network | auth |
+   * not_found | unavailable | unknown. */
+  category?: string | null;
+  stage?: string | null;
+  /** Failing git/pipeline operation (clone/fetch/checkout/...). */
+  operation?: string | null;
+  failed_stage?: string | null;
+  exit_code?: number | null;
+  duration_seconds?: number | null;
+  stderr_tail?: string | null;
+  stdout_tail?: string | null;
+}
+
+/** Terminal phase snapshot entry from the backend's stage tracker. */
+export interface RunPhaseState {
+  id: string;
+  status: "completed" | "failed" | "blocked" | "skipped" | "running" | "pending";
+  reason?: string | null;
 }
 
 export interface RunsListResponse {
@@ -800,9 +845,35 @@ export async function fetchConstraintsArtifact(
   return { constraints: body.constraints, negotiation: body.negotiation ?? null };
 }
 
+/** Normalized coverage strip for the verification gate (counts + per-check rows). */
+export interface VerificationCoverage {
+  counts: {
+    assessed: number;
+    applicable: number;
+    /** 0..1 ratio of assessed over applicable checks. */
+    ratio: number;
+    passed: number;
+    failed: number;
+    warnings: number;
+    skipped: number;
+    not_assessed: number;
+    not_applicable: number;
+  };
+  normalized: Array<{
+    id: string;
+    title: string;
+    status: "passed" | "failed" | "warning" | "skipped" | "not_assessed";
+    required: boolean;
+    finding: string;
+  }>;
+  reason: string | null;
+}
+
 export interface VerificationArtifact {
   verification: Record<string, unknown> | null;
   critic: Record<string, unknown> | null;
+  /** Coverage strip; null when the backend recorded none (older runs). */
+  coverage?: VerificationCoverage | null;
 }
 
 export async function fetchVerificationArtifact(
@@ -811,10 +882,21 @@ export async function fetchVerificationArtifact(
   const body = await cachedGetOrNull<{
     verification?: Record<string, unknown> | null;
     critic?: Record<string, unknown> | null;
+    coverage?: VerificationCoverage | null;
   }>(`/api/deploy/${encodeURIComponent(deploymentId)}/verification`);
-  if (body?.verification == null && body?.critic == null) return null;
   if (!body) return null;
-  return { verification: body.verification ?? null, critic: body.critic ?? null };
+  if (
+    body.verification == null &&
+    body.critic == null &&
+    body.coverage == null
+  ) {
+    return null;
+  }
+  return {
+    verification: body.verification ?? null,
+    critic: body.critic ?? null,
+    coverage: body.coverage ?? null,
+  };
 }
 
 export interface GraphArtifact {
@@ -1219,8 +1301,10 @@ export async function createProjectRun(
     target_host?: string;
     target_port?: number;
     deployment_target?: string;
+    /** Prior run this attempt retries — traceability only, never mutates it. */
+    retry_of?: string;
   },
-): Promise<DeployApiResponse & { project_id: string }> {
+): Promise<DeployApiResponse & { project_id: string; retry_of?: string | null }> {
   const response = await apiFetch(
     `/api/projects/${encodeURIComponent(projectId)}/runs`,
     {
@@ -1235,5 +1319,202 @@ export async function createProjectRun(
   clearApiCache("/api/projects");
   clearApiCache("/api/deploys");
   clearApiCache("/api/proposals");
+  return response.json();
+}
+
+// --- Assessment, merge readiness, and findings (project-scoped read models) ---
+
+export interface FindingView {
+  finding_id: string;
+  severity: string;
+  status: string;
+  category: string;
+  rule_id: string;
+  source: string;
+  confidence: string;
+  path: string | null;
+  line: number | null;
+  message: string;
+  explanation: string | null;
+  remediation: string | null;
+  verification_status: string;
+  first_seen_sha: string | null;
+  last_seen_sha: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  is_new_since_baseline: boolean;
+  blocks_merge: boolean;
+  evidence: unknown[];
+  history: unknown[];
+  is_demo: boolean;
+}
+
+export interface MergeDecision {
+  policy_version: string;
+  outcome: "approved" | "blocked" | "pending" | "assessment_incomplete";
+  advisory: true;
+  assessed: {
+    base_sha: string | null;
+    head_sha: string | null;
+    baseline_sha: string | null;
+    run_id: string | null;
+    run_status: string | null;
+    analysis_status: string | null;
+    assessed_at: string | null;
+  };
+  reasons: Array<{ code: string; message: string; kind: "blocking" | "pending" | "info" }>;
+  blocking_findings: FindingView[];
+  required_checks: { failed: string[]; not_run: string[]; passed: number; total_required: number };
+  inherited_findings: FindingView[];
+  accepted_risks: FindingView[];
+  next_actions: string[];
+  generated_at: string;
+  pull_request: { number: number; base_ref: string | null; head_ref: string | null } | null;
+  github_status?: { published: boolean; reason?: string; detail?: string; state?: string };
+}
+
+export interface AssessmentSummary {
+  project_id: string;
+  repository: string;
+  branch: string;
+  status: "completed" | "partial" | "failed" | "running" | "never_assessed" | "unknown";
+  baseline: { sha: string; at: string } | null;
+  last_full_scan_at: string | null;
+  latest_assessment: {
+    deployment_id: string;
+    commit_sha: string | null;
+    base_sha: string | null;
+    run_status: string;
+    analysis_status: string | null;
+    assessed_at: string;
+    created_at: string;
+    is_demo: boolean;
+    label: string | null;
+    pr_number: number | null;
+    coverage: {
+      security_scan: string | null;
+      scan_mode: string | null;
+      scanner_scope: string | null;
+      gaps: string[];
+    };
+    finding_count: number;
+  } | null;
+  last_successful_assessment: { deployment_id: string; commit_sha: string | null; at: string } | null;
+  active_run_id: string | null;
+  findings: {
+    total: number;
+    new_since_baseline: number;
+    unresolved: number;
+    fixed: number;
+    reopened: number;
+    accepted_risk: number;
+    by_severity: { critical: number; high: number; medium: number; low: number };
+  };
+  blocking_findings: FindingView[];
+  verification: {
+    value: number | null;
+    coverage: {
+      assessed: number;
+      applicable: number;
+      ratio: number;
+      passed: number;
+      failed: number;
+      warnings: number;
+      skipped: number;
+      not_assessed: number;
+      not_applicable: number;
+    } | null;
+    reason: string | null;
+    required: { failed: string[]; not_run: string[]; passed: number; total_required: number };
+    checks: unknown[];
+  } | null;
+  merge: MergeDecision | null;
+  merge_source: "pull_request" | "computed" | null;
+  pull_request: {
+    number: number;
+    base_ref: string | null;
+    base_sha: string | null;
+    head_ref: string | null;
+    head_sha: string | null;
+    state: string;
+    updated_at: string;
+    decision: MergeDecision | null;
+  } | null;
+  setup: {
+    webhook_secret_configured: boolean;
+    github_app_configured: boolean;
+    status_checks: "configured" | "setup_required";
+    note: string;
+  };
+}
+
+export interface ProjectFindingsResponse {
+  findings: FindingView[];
+  status_counts: Record<string, number>;
+  severity_counts: Record<string, number>;
+  lifecycle_states: string[];
+  baseline_sha: string | null;
+  filters: { status: string | null; severity: string | null; sort: string };
+  total: number;
+  blocking_rule: { severities: string[]; statuses: string[] };
+}
+
+export async function fetchAssessmentSummary(projectId: string): Promise<AssessmentSummary> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/assessment-summary`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export async function fetchMergeReadiness(
+  projectId: string,
+  params?: { base?: string; head?: string },
+): Promise<MergeDecision> {
+  const query = new URLSearchParams();
+  if (params?.base) query.set("base", params.base);
+  if (params?.head) query.set("head", params.head);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/merge-readiness${suffix}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export interface ProjectFindingsParams {
+  status?: string;
+  severity?: string;
+  sort?: string;
+  limit?: number;
+}
+
+/** Query-string builder for the findings read model (server-side filtering). */
+export function projectFindingsQuery(params?: ProjectFindingsParams): string {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.severity) query.set("severity", params.severity);
+  if (params?.sort) query.set("sort", params.sort);
+  if (params?.limit != null) query.set("limit", String(params.limit));
+  return query.toString() ? `?${query.toString()}` : "";
+}
+
+export async function fetchProjectFindings(
+  projectId: string,
+  params?: ProjectFindingsParams,
+): Promise<ProjectFindingsResponse> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/findings${projectFindingsQuery(params)}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
   return response.json();
 }

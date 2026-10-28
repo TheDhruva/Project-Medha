@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -45,8 +46,9 @@ class DeploymentRepository:
                     explain_simple, explain_technical, error_summary,
                     result_json, constraints_json, negotiation_json,
                     verification_json, critic_json, graph_json, rollback_json,
-                    change_intel_json, ai_json, owner_sub, project_id, is_demo, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    change_intel_json, ai_json, owner_sub, project_id, pr_number,
+                    is_demo, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.deployment_id,
@@ -76,6 +78,7 @@ class DeploymentRepository:
                     json.dumps(record.ai) if record.ai is not None else None,
                     record.owner_sub,
                     record.project_id,
+                    record.pr_number,
                     1 if record.is_demo else 0,
                     record.created_at,
                     record.updated_at,
@@ -159,7 +162,7 @@ class DeploymentRepository:
                         status, current_stage,
                         explain_simple, explain_technical, error_summary,
                         result_json, ai_json, change_intel_json,
-                        owner_sub, project_id, is_demo,
+                        owner_sub, project_id, pr_number, is_demo,
                         created_at, updated_at
                     FROM deployments{clause}
                     ORDER BY rowid DESC
@@ -491,6 +494,7 @@ class DeploymentRepository:
             ai=_loads(row["ai_json"], None) if "ai_json" in keys else None,
             owner_sub=row["owner_sub"] if "owner_sub" in keys else None,
             project_id=row["project_id"] if "project_id" in keys else None,
+            pr_number=row["pr_number"] if "pr_number" in keys else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             is_demo=bool(row["is_demo"]),
@@ -985,6 +989,44 @@ class ProjectRepository:
             except (TypeError, ValueError):
                 return False
 
+    def update_scan_state(
+        self,
+        project_id: str,
+        *,
+        baseline_sha: str | None = None,
+        baseline_at: str | None = None,
+        full_scan: bool = False,
+        at: str,
+    ) -> None:
+        """Record baseline / full-scan progress. Never regresses a baseline.
+
+        The baseline is set exactly once — by the first completed assessment
+        of the repository. Later runs only advance ``last_full_scan_at``.
+        """
+        current = self.get(project_id)
+        if current is None:
+            return
+        set_baseline = baseline_sha and not current.baseline_sha
+        with get_connection(self.db_path) as conn:
+            if set_baseline:
+                conn.execute(
+                    "UPDATE projects SET baseline_sha=?, baseline_at=?,"
+                    " updated_at=? WHERE project_id=?",
+                    (baseline_sha, baseline_at or at, at, project_id),
+                )
+            if full_scan:
+                conn.execute(
+                    "UPDATE projects SET last_full_scan_at=?, updated_at=?"
+                    " WHERE project_id=?",
+                    (at, at, project_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE projects SET updated_at=? WHERE project_id=?",
+                    (at, project_id),
+                )
+            conn.commit()
+
     @staticmethod
     def _row_to_project(row: Any) -> ProjectRecord:
         keys = set(row.keys())
@@ -1001,6 +1043,11 @@ class ProjectRepository:
             visibility=row["visibility"],
             connection_status=row["connection_status"],
             deploy_target=row["deploy_target"] if "deploy_target" in keys else None,
+            baseline_sha=row["baseline_sha"] if "baseline_sha" in keys else None,
+            baseline_at=row["baseline_at"] if "baseline_at" in keys else None,
+            last_full_scan_at=(
+                row["last_full_scan_at"] if "last_full_scan_at" in keys else None
+            ),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -1351,3 +1398,500 @@ class AnalysisCacheRepository:
                  json.dumps(payload)),
             )
             conn.commit()
+
+
+# --- Finding ledger -------------------------------------------------------
+# Lifecycle states for persisted findings (see schema.sql `findings`).
+FINDING_STATUSES = (
+    "detected",
+    "under_investigation",
+    "confirmed",
+    "rejected",
+    "accepted_risk",
+    "fixed_unverified",
+    "resolved",
+    "reopened",
+)
+
+# Allowed state machine. Resolution requires re-verification of the actual
+# condition (fixed_unverified -> resolved); a file merely changing never
+# resolves a finding, because disappearance without a re-run is not evidence.
+FINDING_TRANSITIONS: dict[str, frozenset[str]] = {
+    "detected": frozenset({
+        "under_investigation", "confirmed", "rejected", "accepted_risk",
+        "fixed_unverified",
+    }),
+    "reopened": frozenset({
+        "under_investigation", "confirmed", "rejected", "accepted_risk",
+        "fixed_unverified",
+    }),
+    "under_investigation": frozenset({
+        "confirmed", "rejected", "accepted_risk", "fixed_unverified",
+    }),
+    "confirmed": frozenset({
+        "under_investigation", "rejected", "accepted_risk",
+        "fixed_unverified", "resolved",
+    }),
+    "rejected": frozenset({"under_investigation", "reopened"}),
+    "accepted_risk": frozenset({"under_investigation", "confirmed", "reopened"}),
+    "fixed_unverified": frozenset({"confirmed", "resolved", "reopened"}),
+    "resolved": frozenset({"reopened"}),
+}
+
+# Transitions that assert a verified conclusion and therefore require at
+# least one evidence reference — disagreement is never settled by assertion.
+_VERIFIED_TRANSITIONS = frozenset({"confirmed", "rejected", "resolved"})
+
+_VERIFICATION_BY_STATUS = {
+    "confirmed": "verified",
+    "resolved": "verified",
+    "rejected": "refuted",
+}
+
+# Statuses that return to "still present" when a re-scan reports them again.
+_REOPEN_ON_REDETECT = frozenset({"resolved", "rejected", "fixed_unverified"})
+
+_MAX_OBSERVATIONS = 50
+_MAX_HISTORY = 100
+
+
+def finding_fingerprint(source: str, rule_id: str, path: str, message: str) -> str:
+    """Stable cross-scan identity for a finding.
+
+    Line numbers are deliberately excluded: they shift between commits while
+    the same underlying condition persists. Identity is the originating
+    check, rule, file and normalized message.
+    """
+    canonical = "|".join((
+        str(source or ""),
+        str(rule_id or ""),
+        str(path or "").replace("\\", "/"),
+        " ".join(str(message or "").split()),
+    ))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class FindingRepository:
+    """Cross-run finding ledger: stable identity, dedup, explicit lifecycle."""
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path
+
+    # -- read ------------------------------------------------------------
+    def get(self, finding_id: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM findings WHERE finding_id=?", (finding_id,)
+            ).fetchone()
+        return self._row_to_item(row) if row is not None else None
+
+    def list(self, *, project_id: str | None = None, repository: str | None = None,
+             deployment_id: str | None = None, status: str | None = None,
+             limit: int = 200) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id=?")
+            params.append(project_id)
+        if repository is not None:
+            clauses.append("repository=?")
+            params.append(repository)
+        if deployment_id is not None:
+            clauses.append("deployment_id=?")
+            params.append(deployment_id)
+        if status is not None:
+            clauses.append("status=?")
+            params.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with get_connection(self.db_path) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM findings{where}"
+                " ORDER BY last_seen_at DESC, finding_id ASC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._row_to_item(row) for row in rows]
+
+    # -- lifecycle -------------------------------------------------------
+    def transition(self, finding_id: str, to_status: str, *, reason: str,
+                   at: str, evidence: list[dict[str, Any]] | list[str] | None = None,
+                   deployment_id: str | None = None) -> dict[str, Any] | None:
+        """Move a finding through its lifecycle, enforcing the state machine.
+
+        Raises ValueError for unknown states, illegal transitions, a missing
+        reason, or a verified conclusion without evidence. Returns None when
+        the finding does not exist.
+        """
+        if to_status not in FINDING_STATUSES:
+            raise ValueError(f"unknown finding status '{to_status}'")
+        if not str(reason or "").strip():
+            raise ValueError("a reason is required for every transition")
+        evidence = list(evidence or [])
+        if to_status in _VERIFIED_TRANSITIONS and not evidence:
+            raise ValueError(
+                f"evidence references are required to move a finding to '{to_status}'"
+            )
+        row = self.get(finding_id)
+        if row is None:
+            return None
+        current = str(row["status"])
+        if to_status == current:
+            return row
+        allowed = FINDING_TRANSITIONS.get(current, frozenset())
+        if to_status not in allowed:
+            raise ValueError(f"invalid transition '{current}' -> '{to_status}'")
+        history = list(row.get("history") or [])
+        history.append({
+            "from": current,
+            "to": to_status,
+            "reason": reason,
+            "evidence": evidence,
+            "at": at,
+            "deployment_id": deployment_id or row.get("deployment_id"),
+        })
+        history = history[-_MAX_HISTORY:]
+        verification = _VERIFICATION_BY_STATUS.get(to_status, row["verification_status"])
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                "UPDATE findings SET status=?, verification_status=?,"
+                " history_json=?, last_seen_at=? WHERE finding_id=?",
+                (to_status, verification, json.dumps(history), at, finding_id),
+            )
+            conn.commit()
+        return self.get(finding_id)
+
+    # -- scan ingestion --------------------------------------------------
+    def sync_scan(self, *, project_id: str, repository: str, deployment_id: str,
+                   commit_sha: str | None, findings: list[dict[str, Any]],
+                   active_sources: set[str], scanned_at: str,
+                   is_demo: bool = False) -> dict[str, int]:
+        """Upsert one scan's findings into the ledger without duplication.
+
+        - New conditions become ``detected``; re-detections update the row
+          (``resolved``/``rejected``/``fixed_unverified`` rows reopen, because
+          the condition is present again).
+        - Conditions whose originating check actually ran (``active_sources``)
+          but were NOT reported move to ``fixed_unverified`` — the check
+          re-ran, but nobody has verified the fix, so never ``resolved``.
+          Findings from a check that did not run keep their state untouched.
+        """
+        summary = {"inserted": 0, "updated": 0, "reopened": 0, "marked_absent": 0}
+        seen: set[str] = set()
+        for item in findings if isinstance(findings, list) else []:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or item.get("scanner") or "unknown")
+            fp = finding_fingerprint(
+                source,
+                str(item.get("rule_id") or ""),
+                str(item.get("path") or ""),
+                str(item.get("message") or ""),
+            )
+            seen.add(fp)
+            observation = {
+                "at": scanned_at,
+                "deployment_id": deployment_id,
+                "commit_sha": commit_sha,
+                "source": source,
+                "rule_id": str(item.get("rule_id") or ""),
+                "path": str(item.get("path") or ""),
+                "line": item.get("line"),
+            }
+            existing = self._get_scoped(project_id, repository, fp)
+            if existing is None:
+                self._insert(
+                    project_id=project_id, repository=repository,
+                    deployment_id=deployment_id, fingerprint=fp,
+                    item=item, source=source, commit_sha=commit_sha,
+                    scanned_at=scanned_at, observation=observation,
+                    is_demo=is_demo,
+                )
+                summary["inserted"] += 1
+                continue
+            stale = self._observe(
+                existing, deployment_id=deployment_id, commit_sha=commit_sha,
+                scanned_at=scanned_at, item=item,
+                observation=observation, is_demo=is_demo,
+            )
+            summary["updated"] += 1
+            if stale:
+                # Out-of-order delivery: this observation is older than the
+                # stored last-seen state; it must not reopen or regress it.
+                continue
+            if str(existing["status"]) in _REOPEN_ON_REDETECT:
+                self._force_history(
+                    existing, to_status="reopened", at=scanned_at,
+                    deployment_id=deployment_id,
+                    reason=(
+                        f"re-detected by {source} at "
+                        f"{commit_sha or 'an unversioned revision'}"
+                    ),
+                    evidence=[observation],
+                )
+                summary["reopened"] += 1
+
+        # Verified absence: only for checks that actually ran in this scan.
+        if active_sources:
+            with get_connection(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT * FROM findings WHERE project_id=? AND repository=?",
+                    (project_id, repository),
+                ).fetchall()
+            for row in rows:
+                item = self._row_to_item(row)
+                if item["fingerprint"] in seen:
+                    continue
+                if item["source"] not in active_sources:
+                    continue
+                if str(item.get("last_seen_at") or "") > str(scanned_at):
+                    # A newer observation already exists: an out-of-order
+                    # (older) scan's silence is not evidence of a fix.
+                    continue
+                if item["status"] not in {
+                    "detected", "reopened", "under_investigation", "confirmed",
+                    "accepted_risk",
+                }:
+                    continue
+                self._force_history(
+                    item, to_status="fixed_unverified", at=scanned_at,
+                    deployment_id=deployment_id,
+                    reason=(
+                        f"not reported by {item['source']} during a completed"
+                        f" re-scan at {commit_sha or 'an unversioned revision'};"
+                        " awaiting fix verification"
+                    ),
+                    evidence=[],
+                )
+                summary["marked_absent"] += 1
+        return summary
+
+    # -- internals -------------------------------------------------------
+    def _get_scoped(self, project_id: str, repository: str,
+                    fingerprint: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM findings WHERE project_id=? AND repository=?"
+                " AND fingerprint=?",
+                (project_id, repository, fingerprint),
+            ).fetchone()
+        return self._row_to_item(row) if row is not None else None
+
+    def _insert(self, *, project_id: str, repository: str, deployment_id: str,
+                fingerprint: str, item: dict[str, Any], source: str,
+                commit_sha: str | None, scanned_at: str,
+                observation: dict[str, Any], is_demo: bool) -> None:
+        finding_id = "fnd_" + hashlib.sha256(
+            "|".join((project_id, repository, fingerprint)).encode("utf-8")
+        ).hexdigest()[:16]
+        history = [{
+            "from": None,
+            "to": "detected",
+            "reason": f"reported by {source} at "
+                      f"{commit_sha or 'an unversioned revision'}",
+            "evidence": [observation],
+            "at": scanned_at,
+            "deployment_id": deployment_id,
+        }]
+        try:
+            with get_connection(self.db_path) as conn:
+                conn.execute(
+                    """INSERT INTO findings (
+                        finding_id, fingerprint, project_id, repository,
+                        deployment_id, source, rule_id, category, severity,
+                        confidence, path, line, message, explanation,
+                        remediation, status, verification_status,
+                        first_seen_sha, last_seen_sha, first_seen_at,
+                        last_seen_at, evidence_json, history_json, is_demo
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              'detected', 'unverified', ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        finding_id, fingerprint, project_id, repository,
+                        deployment_id, source,
+                        str(item.get("rule_id") or ""),
+                        str(item.get("category") or "unknown"),
+                        str(item.get("severity") or "medium"),
+                        str(item.get("confidence") or "medium"),
+                        str(item.get("path") or "") or None,
+                        item.get("line"),
+                        str(item.get("message") or ""),
+                        str(item.get("explanation") or item.get("message") or "") or None,
+                        str(item.get("remediation") or "") or None,
+                        commit_sha, commit_sha, scanned_at, scanned_at,
+                        json.dumps([observation]), json.dumps(history),
+                        1 if is_demo else 0,
+                    ),
+                )
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001 - concurrent insert race
+            if not _is_unique_violation(exc):
+                raise
+            existing = self._get_scoped(project_id, repository, fingerprint)
+            if existing is not None:
+                self._observe(
+                    existing, deployment_id=deployment_id,
+                    commit_sha=commit_sha, scanned_at=scanned_at, item=item,
+                    observation=observation, is_demo=is_demo,
+                )
+
+    def _observe(self, existing: dict[str, Any], *, deployment_id: str,
+                 commit_sha: str | None, scanned_at: str,
+                 item: dict[str, Any],
+                 observation: dict[str, Any], is_demo: bool) -> bool:
+        """Record an observation of an already-known finding.
+
+        Returns True when the observation is STALE (older than the stored
+        last-seen state): the evidence is still appended, but last-seen
+        fields and mutable attributes are left untouched so an out-of-order
+        delivery can never regress newer state.
+        """
+        stale = bool(
+            existing.get("last_seen_at")
+            and str(existing["last_seen_at"]) > str(scanned_at)
+        )
+        evidence = list(existing.get("evidence") or [])
+        evidence.append(observation)
+        evidence = evidence[-_MAX_OBSERVATIONS:]
+        if stale:
+            with get_connection(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE findings SET evidence_json=? WHERE finding_id=?",
+                    (json.dumps(evidence), existing["finding_id"]),
+                )
+                conn.commit()
+            return True
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                "UPDATE findings SET deployment_id=?, last_seen_sha=?,"
+                " last_seen_at=?, line=?, path=?, severity=?, confidence=?,"
+                " message=?, explanation=?, remediation=?, evidence_json=?,"
+                " is_demo=? WHERE finding_id=?",
+                (
+                    deployment_id, commit_sha, scanned_at,
+                    item.get("line"),
+                    str(item.get("path") or "") or None,
+                    str(item.get("severity") or "medium"),
+                    str(item.get("confidence") or "medium"),
+                    str(item.get("message") or ""),
+                    str(item.get("explanation") or item.get("message") or "") or None,
+                    str(item.get("remediation") or "") or None,
+                    json.dumps(evidence),
+                    1 if (is_demo or existing.get("is_demo")) else 0,
+                    existing["finding_id"],
+                ),
+            )
+            conn.commit()
+        return False
+
+    def _force_history(self, item: dict[str, Any], *, to_status: str, at: str,
+                       deployment_id: str, reason: str,
+                       evidence: list[dict[str, Any]]) -> None:
+        history = list(item.get("history") or [])
+        history.append({
+            "from": item["status"],
+            "to": to_status,
+            "reason": reason,
+            "evidence": evidence,
+            "at": at,
+            "deployment_id": deployment_id,
+        })
+        history = history[-_MAX_HISTORY:]
+        verification = _VERIFICATION_BY_STATUS.get(
+            to_status, item.get("verification_status") or "unverified")
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                "UPDATE findings SET status=?, verification_status=?,"
+                " history_json=? WHERE finding_id=?",
+                (to_status, verification, json.dumps(history), item["finding_id"]),
+            )
+            conn.commit()
+
+    @staticmethod
+    def _row_to_item(row: Any) -> dict[str, Any]:
+        item = dict(row)
+        item.pop("seq", None)
+        item["evidence"] = _loads(item.pop("evidence_json", "[]"), [])
+        item["history"] = _loads(item.pop("history_json", "[]"), [])
+        item["is_demo"] = bool(item.get("is_demo"))
+        item.setdefault("explanation", None)
+        item.setdefault("remediation", None)
+        return item
+
+
+class PullRequestRepository:
+    """Webhook-maintained PR state + the latest server-side merge decision.
+
+    A decision is written only for the head SHA it was computed against: a
+    stale analysis finishing late can never overwrite a newer PR state.
+    """
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path
+
+    def upsert(self, *, project_id: str, repository: str, number: int,
+               base_ref: str | None, base_sha: str | None,
+               head_ref: str | None, head_sha: str | None,
+               state: str = "open", at: str) -> dict[str, Any]:
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO pull_requests (
+                    project_id, repository, number, base_ref, base_sha,
+                    head_ref, head_sha, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (project_id, repository, number) DO UPDATE SET
+                    base_ref=excluded.base_ref,
+                    base_sha=excluded.base_sha,
+                    head_ref=excluded.head_ref,
+                    head_sha=excluded.head_sha,
+                    state=excluded.state,
+                    updated_at=excluded.updated_at
+                """,
+                (project_id, repository, number, base_ref, base_sha,
+                 head_ref, head_sha, state, at, at),
+            )
+            conn.commit()
+        return self.get(project_id=project_id, repository=repository, number=number) or {}
+
+    def get(self, *, project_id: str, repository: str,
+            number: int) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM pull_requests WHERE project_id=? AND repository=?"
+                " AND number=?",
+                (project_id, repository, number),
+            ).fetchone()
+        return self._row_to_item(row) if row is not None else None
+
+    def list_for_project(self, project_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        with get_connection(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM pull_requests WHERE project_id=?"
+                " ORDER BY updated_at DESC LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+        return [self._row_to_item(row) for row in rows]
+
+    def save_decision(self, *, project_id: str, repository: str, number: int,
+                      head_sha: str | None, decision: dict[str, Any],
+                      at: str) -> bool:
+        """Persist the newest decision for this exact head. False when stale."""
+        with get_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE pull_requests SET last_decision_json=?, updated_at=?"
+                " WHERE project_id=? AND repository=? AND number=?"
+                " AND (head_sha=? OR head_sha IS NULL)",
+                (json.dumps(decision), at, project_id, repository, number, head_sha),
+            )
+            conn.commit()
+            try:
+                return int(cursor.rowcount or 0) > 0
+            except (TypeError, ValueError):
+                return False
+
+    @staticmethod
+    def _row_to_item(row: Any) -> dict[str, Any]:
+        item = dict(row)
+        item.pop("seq", None)
+        item["number"] = int(item["number"])
+        item["decision"] = _loads(item.pop("last_decision_json", None), None)
+        return item

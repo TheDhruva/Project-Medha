@@ -73,8 +73,16 @@ def test_reconcile_fails_orphans_and_preserves_ready(tmp_path, monkeypatch):
     assert result["proposals"] == 2
     assert result["events"] == 2
 
-    assert repo.get("dep_running").status == DeploymentStatus.FAILED
-    assert "restart" in (repo.get("dep_running").error_summary or "")
+    running = repo.get("dep_running")
+    assert running.status == DeploymentStatus.FAILED
+    assert "restart" in (running.error_summary or "")
+    # Status, stage, and explanation are set consistently — the same
+    # terminal shape the pipeline's failure path records.
+    from app.services.recovery import INTERRUPTED_ERROR
+
+    assert running.current_stage == "COMPLETE"
+    assert running.explain_simple == INTERRUPTED_ERROR
+    assert running.explain_technical == "recovery=startup_reconcile"
     assert repo.get("dep_started").status == DeploymentStatus.FAILED
     # Stable wait state preserved with its plan intact.
     assert repo.get("dep_waiting").status == DeploymentStatus.AWAITING_APPROVAL

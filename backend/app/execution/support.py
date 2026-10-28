@@ -145,10 +145,41 @@ def assess_plan_support(
         return SupportDecision(
             supported=True, message="Static-site plan supported (nginx profile)"
         )
-    if len(service_names) >= 1 and stack.confidence >= 0.55:
+    if (
+        candidates
+        and len(service_names) >= 1
+        and stack.confidence >= 0.55
+    ):
+        # An inferred service plan requires a discovered application
+        # candidate (or a valid explicit target resolved above). Dependency
+        # manifests alone — a library, framework, or CLI package — never
+        # pass this gate.
         return SupportDecision(
             supported=True,
             message="Inferred service plan accepted with moderate confidence",
+        )
+
+    manifests = set(stack.manifests_examined or [])
+    if not candidates and manifests & {
+        "requirements.txt",
+        "pyproject.toml",
+        "package.json",
+    }:
+        # Analysis is complete and valid; only deployment is not applicable:
+        # the repository has dependency manifests but no web application.
+        return SupportDecision(
+            supported=False,
+            code="NO_DEPLOYABLE_APP",
+            message=(
+                "Analysis completed, but this repository does not contain a "
+                "deployable web application — dependency manifests alone are "
+                "not a web application. Your repository analysis and findings "
+                "are still available."
+            ),
+            details={
+                "reason": "no application candidate discovered from manifests",
+                "next_actions": ["reanalyze"],
+            },
         )
 
     return SupportDecision(

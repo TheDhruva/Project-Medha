@@ -630,3 +630,119 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
   score. Verification confidence uses the 9 required verifier checks; the
   optional `change_impact` check does not affect it.
 - **Status:** Accepted
+
+## ADR-044 — Analysis outcome is authoritative and separate from deployment (`scores-v3`)
+
+- **Context:** A successfully analyzed framework/library repository (e.g.
+  FastAPI) was shown as an overall `Failed` run with a fabricated
+  `25/100` "Critical findings" Deployment Readiness score. The 25 came from
+  scoring deployment *ineligibility* (`NO_DEPLOYABLE_APP`) against
+  readiness criteria: the target-support check failed critically, the caps
+  fired (critical blocker → 25), and the frontend mapped <60 → "Critical".
+- **Decision:**
+  1. Run summaries expose additive backend-persisted `analysis_status`
+     (`completed`/`partial`/`failed`) and `deployment_status` (e.g.
+     `blocked`) fields; `run.status` keeps its existing values (a blocked
+     run stays `failed`) so older clients and records are unaffected.
+  2. `deployment_readiness` is **not applicable** (value `null`,
+     `evidence.applicable=false`, plain-English `reason`) when the support
+     gate reports no deployable application (`NO_DEPLOYABLE_APP`,
+     `NO_TARGET_CANDIDATES`). Deployment ineligibility is never scored as a
+     defect. Other blocked-target codes keep the documented capped formula.
+  3. The frontend derives run outcomes from those fields (falling back to
+     the structured `error_code` semantics for older runs): primary status
+     describes analysis (`Analysis complete/partially complete/failed`),
+     deployment is a separate secondary label (`Deployment not
+     applicable/blocked/completed/...`). Scorecard states add
+     `not_applicable` and `partial` ("Partially assessed").
+- **Why:** Analysis completion and deployment eligibility are independent
+  facts. The backend already persists both; the missing piece was exposing
+  them and refusing to fabricate a score when the criteria do not apply.
+- **Consequences:** Score version bumps to `scores-v3`, which invalidates
+  stale stored `scores-v2` snapshots (they recompute on next fetch). No
+  schema migration. Run rows remain backward compatible; older records
+  without the new fields render honest fallbacks (`Run failed`,
+  `Not assessed`) instead of invented outcomes.
+- **Status:** Accepted
+
+## ADR-045 — Baseline policy checks + cross-run finding ledger
+
+- **Context:** External scanners (semgrep/gitleaks/trivy) are optional and
+  frequently absent on a low-end/local machine, so repositories could get no
+  security coverage at all — or worse, a scan where semgrep was invoked
+  without `--config`, i.e. with no ruleset. Nothing persisted findings across
+  runs: identity was re-derived per analysis, and there was no lifecycle
+  (triage, confirmation, re-detection) anywhere in the system. Scanner
+  finding messages were stored as-is, so a secret echoed by a tool could land
+  in the database.
+- **Decision:**
+  1. A deterministic, bounded, read-only policy module (`security:builtin`)
+     always runs with scanning: `SEC-*` (shell=True, yaml.load, pickle,
+     f-string SQL, weak hash), `CFG-*` (committed `.env` reported by path
+     only, CORS wildcard, debug=True, verify=False) and the aggregate
+     `AUTH-001` observation. Every result is `verification_status="unverified"`
+     with confidence stated — a pattern match is evidence to investigate,
+     never a confirmed exploit.
+  2. A `findings` table (schema v11) is the cross-run ledger. Identity is
+     `sha256(source|rule_id|path|normalized message)` — line numbers excluded
+     so reformatting never duplicates a condition. The lifecycle state machine
+     (`detected → under_investigation → confirmed|rejected|accepted_risk`,
+     `fixed_unverified → resolved`, `reopened` on re-detection) is enforced
+     server-side, and `confirmed`/`rejected`/`resolved` require evidence
+     references.
+  3. A disappearing finding becomes `fixed_unverified` — never `resolved` —
+     and only when its originating check actually re-ran in that scan.
+     Checks that did not run leave state untouched.
+  4. `GET/POST /api/deploy/{id}/findings[/{finding_id}]` expose the ledger
+     (§20 API_CONTRACT). semgrep now runs with `--config auto`, and all
+     scanner finding messages pass through the existing redaction helper
+     before storage.
+  5. The builtin task is excluded from the external `security_scan` coverage
+     calculation: baseline coverage must never soften the honest
+     "no external security scanner executed" gap.
+- **Why:** Coverage that always exists (offline-safe) plus a durable,
+  deduplicated lifecycle is what makes findings actionable across commits;
+  and the honesty rules are what keep it from becoming decorative.
+- **Consequences:** One idempotent schema migration (SQLite `user_version`
+  11 + `_V11_TABLES_SQL`, mirrored in `schema_pg.sql`). `semgrep --config
+  auto` needs registry access — offline it fails honestly (`failed` status),
+  which is surfaced as a coverage gap rather than a silent clean scan. The
+  builtin checks are advisory input to scoring, never auto-confirmed findings.
+- **Status:** Accepted
+
+## ADR-046 — Honest scoring (`scores-v4`) + revision-keyed inventory reuse
+
+- **Context:** `performance` defaulted to 80 and `optimization` to 100 even
+  when no performance or optimization evidence existed at all — a number
+  without evidence misrepresents unassessed areas as healthy. Runs whose
+  clone failed still reported `target_support = SUPPORTED`. The
+  `analysis_cache` table existed but was never written. A task-level
+  cancellation (`asyncio.CancelledError`) bypassed every failure handler, so
+  a run could stay `running` forever — a false active dashboard state.
+- **Decision:**
+  1. `performance` returns `null` (+ reason) unless change-risk evidence or a
+     measured benchmark exists; `optimization` returns `null` unless
+     verification checks or change requirements were actually recorded.
+  2. Security evidence always carries `security_failures` (failed security
+     check count) and `scan_completeness` (`analysis_status`,
+     `security_scan`, `gaps`), so "scan ran without coverage" is never read
+     as a pass.
+  3. `target_support = SUPPORTED` requires a successful repository analysis
+     (or a previously analyzed revision with a supported mode); a failed
+     clone yields `not_assessed`.
+  4. Repository inventories are reused via `analysis_cache` keyed on
+     `commit + selected target + scanner configuration + installed-tool
+     binary signature` (path/mtime/size). Results without an immutable commit
+     are never cached; failed payloads are never stored; any cache problem
+     degrades to a fresh analysis, never to a failed run.
+  5. `CancelledError` in the planning pipeline persists a terminal
+     `PIPELINE_CANCELLED` failure (dropped when the cancel endpoint already
+     recorded `CANCELLED` — cancellation always wins) and re-raises.
+- **Why:** Every one of these was a path where the system claimed knowledge
+  it did not have, or claimed activity that was not happening.
+- **Consequences:** Score version bumps to `scores-v4`, invalidating stale
+  `scores-v3` snapshots (recompute on next fetch). No schema migration beyond
+  v11's `findings` (ADR-045); `analysis_cache` was already present. The
+  frontend already renders `value: null` as "not assessed", so no UI contract
+  changed.
+- **Status:** Accepted

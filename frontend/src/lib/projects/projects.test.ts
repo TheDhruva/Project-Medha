@@ -13,6 +13,7 @@ import {
   projectHealth,
   projectIdForRepo,
   repoForProjectId,
+  runOutcome,
   shortNameForRepo,
   shortSha,
   sortProjects,
@@ -442,6 +443,38 @@ describe("derivePipeline", () => {
     expect(byId.execute).toBe("idle");
   });
 
+  it("never infers Analyze as the failed stage without backend evidence", () => {
+    const observed = [
+      {
+        ts: "2026-01-01T00:00:01.000Z",
+        level: "info",
+        source: "system",
+        message: "PREFLIGHT completed",
+        type: "stage.completed",
+        stage: "PREFLIGHT",
+        status: "success",
+        is_demo: false,
+      },
+      {
+        ts: "2026-01-01T00:00:02.000Z",
+        level: "info",
+        source: "system",
+        message: "ANALYZE completed",
+        type: "stage.completed",
+        stage: "ANALYZE",
+        status: "success",
+        is_demo: false,
+      },
+    ];
+    // Failed run whose current stage is already COMPLETE and no error code:
+    // Analyze is the furthest observed stage but must not be blamed.
+    const stages = derivePipeline(observed, "COMPLETE", "failed", null);
+    const byId = Object.fromEntries(stages.map((s) => [s.id, s.state]));
+    expect(byId.analyze).toBe("done");
+    expect(byId.plan).toBe("idle");
+    expect(stages.every((s) => s.state !== "blocked")).toBe(true);
+  });
+
   it("blocks the execute gate (not upstream) when execution was never configured", () => {
     const stages = derivePipeline(
       ["PREFLIGHT", "ANALYZE", "PLAN", "AGENTS", "NEGOTIATE", "VERIFY"].map((stage) => ({
@@ -535,5 +568,90 @@ describe("summarizeRunFailure", () => {
     expect(
       summarizeRunFailure({ error_code: "BUILD_FAILED", error_summary: "Build failed at Dockerfile line 4" }),
     ).toBe("Build failed at Dockerfile line 4");
+  });
+});
+
+describe("runOutcome", () => {
+  it("reports analysis complete + deployment not applicable for a framework repo", () => {
+    const outcome = runOutcome(
+      run({
+        deployment_id: "dep_1",
+        status: "failed",
+        error_code: "NO_DEPLOYABLE_APP",
+        analysis_status: "completed",
+        deployment_status: "blocked",
+        error_summary: "Analysis completed, but this repository has no deployable web application.",
+      }),
+    );
+    expect(outcome.analysis.label).toBe("Analysis complete");
+    expect(outcome.deployment?.label).toBe("Deployment not applicable");
+  });
+
+  it("falls back to the blocked-code semantics for older runs without analysis_status", () => {
+    const outcome = runOutcome(
+      run({
+        deployment_id: "dep_2",
+        status: "failed",
+        error_code: "MULTIPLE_APPS_REQUIRE_TARGET",
+        analysis_status: null,
+      }),
+    );
+    expect(outcome.analysis.label).toBe("Analysis complete");
+    expect(outcome.deployment?.label).toBe("Deployment blocked");
+  });
+
+  it("keeps config-blocked runs' analysis complete with execution not configured", () => {
+    const outcome = runOutcome(
+      run({
+        deployment_id: "dep_3",
+        status: "failed",
+        error_code: "EXECUTION_NOT_CONFIGURED",
+        analysis_status: null,
+      }),
+    );
+    expect(outcome.analysis.label).toBe("Analysis complete");
+    expect(outcome.deployment?.label).toBe("Execution not configured");
+  });
+
+  it("never blames analysis for a genuine failure without evidence", () => {
+    const outcome = runOutcome(
+      run({ deployment_id: "dep_4", status: "failed", error_code: null }),
+    );
+    expect(outcome.analysis.label).toBe("Run failed");
+    expect(outcome.deployment).toBeNull();
+  });
+
+  it("reports a persisted analysis failure as analysis failed", () => {
+    const outcome = runOutcome(
+      run({
+        deployment_id: "dep_5",
+        status: "failed",
+        error_code: "ANALYSIS_TIMED_OUT",
+        analysis_status: "failed",
+      }),
+    );
+    expect(outcome.analysis.label).toBe("Analysis failed");
+  });
+
+  it("reports partial analysis distinctly", () => {
+    const outcome = runOutcome(
+      run({ deployment_id: "dep_6", status: "failed", analysis_status: "partial" }),
+    );
+    expect(outcome.analysis.label).toBe("Analysis partially complete");
+  });
+
+  it("reports completed runs with a deployment outcome", () => {
+    const outcome = runOutcome(run({ deployment_id: "dep_7", status: "completed" }));
+    expect(outcome.analysis.label).toBe("Analysis complete");
+    expect(outcome.deployment?.label).toBe("Deployment completed");
+  });
+
+  it("reports running and queued runs without claiming completion", () => {
+    expect(
+      runOutcome(run({ deployment_id: "dep_8", status: "running" })).analysis,
+    ).toEqual({ label: "Analyzing", tone: "info" });
+    expect(
+      runOutcome(run({ deployment_id: "dep_9", status: "queued" })).analysis.label,
+    ).toBe("Queued");
   });
 });

@@ -10,12 +10,14 @@ import {
   subscribeDeploymentEventsShared,
   authReady,
   type AgentSnapshotRow,
+  type BackendSystemEvent,
   type Project,
   type Proposal,
   type RunHealth,
   type RunLogLine,
   type RunSummary,
   type RuntimeLogsResponse,
+  type VerificationCoverage,
 } from "@/lib/api/client";
 import { toneForEvent } from "@/lib/api/eventMapper";
 import type {
@@ -26,7 +28,12 @@ import type {
   NegotiationView,
   RollbackSummary,
 } from "@/lib/demo/types";
-import { canonicalRepoKey, repoForProjectId, shortNameForRepo } from "./projects";
+import { canonicalRepoKey, repoForProjectId, shortNameForRepo, CONFIG_BLOCK_CODES, isRunningStatus } from "./projects";
+// Block-code sets live in projects.ts (single source; avoids an import cycle).
+export {
+  CONFIG_BLOCK_CODES,
+  DEPLOYMENT_BLOCKED_CODES,
+} from "./projects";
 
 export interface RunHydration {
   logs: RunLogLine[];
@@ -38,6 +45,8 @@ export interface RunHydration {
   negotiation: NegotiationView | null;
   verification: Record<string, unknown> | null;
   critic: Record<string, unknown> | null;
+  /** Normalized verification coverage strip; null when none was recorded. */
+  coverage: VerificationCoverage | null;
   graph: { nodes: CegNode[]; edges: CegEdge[] };
   rollback: RollbackSummary | null;
   changeImpact: ChangeIntelAnalysis | null;
@@ -64,6 +73,8 @@ export interface ProjectData {
   selectRun: (id: string) => void;
   hydration: RunHydration | null;
   hydrating: boolean;
+  /** Activity Center feed: REST logs for the selected run plus live SSE appends. */
+  feed: FeedEntry[];
   proposals: Proposal[];
   proposalsLoading: boolean;
   refresh: () => void;
@@ -77,6 +88,7 @@ const EMPTY_HYDRATION: RunHydration = {
   negotiation: null,
   verification: null,
   critic: null,
+  coverage: null,
   graph: { nodes: [], edges: [] },
   rollback: null,
   changeImpact: null,
@@ -218,6 +230,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
           negotiation: h.constraints?.negotiation ?? null,
           verification: (h.verification?.verification as Record<string, unknown> | null) ?? null,
           critic: (h.verification?.critic as Record<string, unknown> | null) ?? null,
+          coverage: h.verification?.coverage ?? null,
           graph: h.graph?.graph ?? { nodes: [], edges: [] },
           rollback: h.graph?.rollback ?? null,
           changeImpact: h.changeImpact?.analysis ?? null,
@@ -237,6 +250,26 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
       cancelled = true;
     };
   }, [selectedId]);
+
+  /* Activity Center feed: REST logs for the selected run are authoritative;
+     live SSE events append below (deduped by event key, so the stream's
+     replay of already-loaded entries is skipped). */
+  const [feed, setFeed] = useState<FeedEntry[]>([]);
+  useEffect(() => {
+    setFeed(hydration ? buildRunFeed(hydration.logs, hydration.agents) : []);
+  }, [hydration]);
+
+  // Subscribe only after the REST snapshot loaded: the stream replays from
+  // the beginning, and dedup keeps entries already present out of the feed.
+  useEffect(() => {
+    if (!selectedId || !hydration) return;
+    const sub = subscribeDeploymentEventsShared(selectedId, {
+      onEvent: (event) => setFeed((prev) => appendEventToFeed(prev, event)),
+    });
+    return () => {
+      sub.close();
+    };
+  }, [selectedId, hydration]);
 
   const latest = useMemo(() => runs[0] ?? null, [runs]);
 
@@ -276,6 +309,25 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
     setSelectedId(id);
   }, []);
 
+  // Fallback sync: SSE is primary, but a stream that dies before the
+  // terminal event would leave the board stale. Poll lightweight run
+  // summaries while the tracked run is active; stop on terminal; refetch
+  // when the tab returns to foreground. No fabricated progress — REST is
+  // authoritative and each response replaces the row.
+  const runActive = latest != null && isRunningStatus(latest.status);
+  useEffect(() => {
+    if (!runActive) return;
+    const poll = setInterval(() => void loadRef.current(), 8000);
+    const refetchIfHiddenFlip = () => {
+      if (!document.hidden) void loadRef.current();
+    };
+    document.addEventListener("visibilitychange", refetchIfHiddenFlip);
+    return () => {
+      clearInterval(poll);
+      document.removeEventListener("visibilitychange", refetchIfHiddenFlip);
+    };
+  }, [runActive]);
+
   return {
     projectId,
     project,
@@ -290,6 +342,7 @@ export function useProjectData(projectId: string, initialRunId?: string | null):
     selectRun,
     hydration,
     hydrating,
+    feed,
     proposals,
     proposalsLoading,
     refresh: load,
@@ -477,14 +530,8 @@ const STAGE_MATCH: Record<string, string[]> = {
 };
 
 /** Failure codes meaning "execution was never configured/available" — the
- * blocked stage is the execute gate itself; upstream stages remain done. */
-export const CONFIG_BLOCK_CODES = new Set([
-  "EXECUTION_NOT_CONFIGURED",
-  "EXECUTION_DISABLED",
-  "EXECUTION_DISABLED_HOSTED",
-  "REAL_EXECUTION_NOT_ENABLED",
-  "REAL_BUILDER_UNAVAILABLE",
-]);
+ * blocked stage is the execute gate itself; upstream stages remain done.
+ * (Defined in projects.ts; re-exported above for existing importers.) */
 
 export interface PipelineStage {
   id: string;
@@ -514,9 +561,11 @@ function parseTs(ts: string): number {
 /**
  * Pipeline stepper from observed stage events + current stage. Honest about
  * gaps: a stage never observed stays idle. On failure the blocked stage is
- * backend evidence — the reported current stage, else the configured-block
- * target (execute), else the furthest observed stage (remediation/rollback
- * excluded — it runs after the failure point).
+ * backend evidence only — the reported current stage, else the configured-
+ * block target (execute). Without reliable failure-stage evidence no stage
+ * is marked blocked: the run "stopped before the failing stage was
+ * recorded" — Analyze is never blamed merely for being the furthest
+ * observed phase.
  */
 /* ================= Activity Center conversation feed ================= */
 
@@ -549,6 +598,173 @@ export interface FeedEntry {
   error: string | null;
   /** Recorded dependency edges whose completion precedes this agent's start. */
   handoffs: FeedHandoff[];
+  /** Badge classification of the recorded event (see kindForEvent). */
+  kind: FeedKind;
+  /** True when the message needs a details toggle (>160 chars or multiline). */
+  longMessage: boolean;
+  /** Recorded metadata.technical line when the event carried one; null otherwise. */
+  technical: string | null;
+  /** Cross-source dedup key (ts|type|message) shared with live SSE appends. */
+  eventKey: string;
+}
+
+/** Activity Center badge classification for one recorded backend event. */
+export type FeedKind =
+  | "hypothesis"
+  | "challenge"
+  | "agent_activity"
+  | "verification_started"
+  | "verification_check"
+  | "verification_passed"
+  | "verification_failed"
+  | "coordinator_decision"
+  | "final_decision"
+  | "merge_decision"
+  | "finding_submitted"
+  | "note";
+
+const asText = (value: unknown): string => (typeof value === "string" ? value : "");
+
+/**
+ * Map REAL backend event types to a feed badge kind. This table only
+ * classifies events the backend actually emits — messages are never
+ * invented here:
+ *
+ *   constraint.published                      → hypothesis
+ *   constraint.conflict                       → challenge
+ *   agent.started, agent.completed            → agent_activity
+ *   verification.started                      → verification_started
+ *   verification.check                        → verification_check
+ *   verification.passed                       → verification_passed
+ *   verification.failed                       → verification_failed
+ *   negotiation.resolved, critic.completed    → coordinator_decision
+ *   deployment.completed|failed|cancelled     → final_decision
+ *   system.message + metadata.merge_decision  → merge_decision
+ *   system.message mentioning "finding" (message / metadata.simple /
+ *     metadata.technical, case-insensitive)   → finding_submitted
+ *   system.message otherwise, stage.*, any
+ *   other type                                → note
+ */
+export function kindForEvent(event: {
+  type: string;
+  message: string;
+  data?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}): FeedKind {
+  switch (event.type) {
+    case "constraint.published":
+      return "hypothesis";
+    case "constraint.conflict":
+      return "challenge";
+    case "agent.started":
+    case "agent.completed":
+      return "agent_activity";
+    case "verification.started":
+      return "verification_started";
+    case "verification.check":
+      return "verification_check";
+    case "verification.passed":
+      return "verification_passed";
+    case "verification.failed":
+      return "verification_failed";
+    case "negotiation.resolved":
+    case "critic.completed":
+      return "coordinator_decision";
+    case "deployment.completed":
+    case "deployment.failed":
+    case "deployment.cancelled":
+      return "final_decision";
+    case "system.message": {
+      const metadata = event.metadata ?? event.data ?? {};
+      if ("merge_decision" in metadata) return "merge_decision";
+      const text = [event.message, asText(metadata.simple), asText(metadata.technical)].join(" ");
+      return /finding/i.test(text) ? "finding_submitted" : "note";
+    }
+    default:
+      return "note";
+  }
+}
+
+/**
+ * Cross-source dedup key for one recorded event. REST log lines and SSE
+ * payloads carry the same ts/type/message (SSE additionally has event_id,
+ * which REST lines lack — so identity is derived from these three fields).
+ * shortcut: two distinct events identical in all three would collide —
+ * backend timestamps make that negligible, and buildRunFeed already
+ * deduplicates REST lines the same way.
+ */
+function eventKeyOf(ts: string, type: string, message: string): string {
+  return `${ts}|${type}|${message}`;
+}
+
+function messageNeedsTruncation(message: string): boolean {
+  return message.length > 160 || message.includes("\n");
+}
+
+/**
+ * Append one live backend event to an Activity Center feed. Returns the
+ * same array when the event is already present (stream replay, reconnect,
+ * or an entry loaded from REST logs) so appends are idempotent.
+ */
+export function appendEventToFeed(
+  feed: FeedEntry[],
+  event: BackendSystemEvent,
+): FeedEntry[] {
+  const eventKey = eventKeyOf(event.ts, event.type, event.message);
+  if (feed.some((entry) => entry.eventKey === eventKey)) return feed;
+  // The SSE serializer labels event metadata `data` (backend publishes
+  // metadata=... into data); kindForEvent accepts either name.
+  const metadata = event.data ?? {};
+
+  let actor = "MEDHA";
+  let isAgent = false;
+  let agentId: string | null = null;
+  if (event.type === "agent.started") {
+    const text = event.message.trim();
+    const id = text.endsWith(AGENT_STARTED_SUFFIX) ? text.slice(0, -AGENT_STARTED_SUFFIX.length) : "";
+    if (id && SNAPSHOT_LABELS[id]) {
+      isAgent = true;
+      agentId = id;
+      actor = SNAPSHOT_LABELS[id] ?? id;
+    }
+  } else if (event.type === "agent.completed") {
+    // No snapshot row here, so attribution stays honestly generic —
+    // a hydration rebuild attributes it from recorded evidence.
+    isAgent = true;
+    actor = "Agent";
+  }
+
+  const tone = toneForEvent(event.type, event.level);
+  const outcome: FeedEntry["outcome"] =
+    event.level === "error" || event.status === "failed" || tone === "error"
+      ? "error"
+      : event.level === "warning" || event.status === "warning" || tone === "warning"
+        ? "warning"
+        : tone === "success"
+          ? "success"
+          : null;
+
+  return [
+    ...feed,
+    {
+      key: `${event.ts}-live-${feed.length}`,
+      ts: event.ts,
+      timeLabel: formatFeedTime(event.ts),
+      actor,
+      isAgent,
+      agentId,
+      type: event.type,
+      message: event.message,
+      outcome,
+      durationMs: null,
+      error: null,
+      handoffs: [],
+      kind: kindForEvent(event),
+      longMessage: messageNeedsTruncation(event.message),
+      technical: asText(metadata.technical) || null,
+      eventKey,
+    },
+  ];
 }
 
 const AGENT_STARTED_SUFFIX = " started";
@@ -666,6 +882,14 @@ export function buildRunFeed(
       durationMs,
       error,
       handoffs,
+      kind: kindForEvent({ type: line.type, message: line.message }),
+      longMessage: messageNeedsTruncation(message),
+      // REST log lines carry no metadata; the technical line is only shown
+      // for live SSE events that recorded one.
+      technical: null,
+      // Key from the ORIGINAL recorded message (agent.started is rewritten
+      // to "Started." for display) so live SSE appends dedup against it.
+      eventKey: eventKeyOf(line.ts, line.type, line.message),
     };
   });
 }
@@ -794,17 +1018,32 @@ export function derivePipeline(
   const matches = (stage: string, value: string) =>
     (STAGE_MATCH[stage] ?? [stage]).some((m) => value.includes(m));
   const observedFor = (stage: string) => seenList.some((s) => matches(stage, s));
+  // Completion evidence, not mere presence: a stage that emitted
+  // stage.started but never stage.completed on a failed run is the
+  // failure point — never "done".
+  const completedFor = (stage: string) =>
+    logs.some(
+      (l) => l.type === "stage.completed" && matches(stage, (l.stage ?? "").toLowerCase()),
+    );
+  const startedFor = (stage: string) =>
+    logs.some(
+      (l) => l.type === "stage.started" && matches(stage, (l.stage ?? "").toLowerCase()),
+    );
 
   // Failure point (first match wins): current stage evidence, then the
-  // configuration gate target, then the furthest observed pre-remediation stage.
+  // first stage that started but never completed (the backend resets
+  // current_stage to COMPLETE on failure, erasing the failing stage),
+  // then the configuration gate target. Never the furthest observed
+  // stage — that would falsely blame Analyze for runs that stopped later.
   let blockedId: string | null = null;
   let blockedReason: "config" | "failure" = "failure";
   if (failed) {
     const currentId =
       current && current !== "complete" ? STAGE_ORDER.find((s) => matches(s, current)) ?? null : null;
     const configBlocked = errorCode != null && CONFIG_BLOCK_CODES.has(errorCode);
-    const observed = STAGE_ORDER.filter((s) => s !== "recover" && observedFor(s));
-    blockedId = currentId ?? (configBlocked ? "execute" : null) ?? observed[observed.length - 1] ?? null;
+    const unfinishedId =
+      STAGE_ORDER.find((s) => startedFor(s) && !completedFor(s)) ?? null;
+    blockedId = currentId ?? unfinishedId ?? (configBlocked ? "execute" : null);
     blockedReason = configBlocked && blockedId === "execute" ? "config" : "failure";
   }
 
@@ -812,6 +1051,9 @@ export function derivePipeline(
     const observed = observedFor(stage);
     const isCurrent = current ? matches(stage, current) : false;
     let state: PipelineStage["state"] = observed ? "done" : "idle";
+    // On a failed run, started-without-completed is honest "idle" (or the
+    // blocked failure point below) — never "done".
+    if (failed && !completedFor(stage)) state = "idle";
     if (running && isCurrent) state = "active";
     if (failed && stage === blockedId) state = "blocked";
 

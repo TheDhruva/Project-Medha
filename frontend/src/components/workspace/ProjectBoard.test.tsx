@@ -107,6 +107,7 @@ vi.mock("@/lib/api/client", async (importOriginal) => {
     ...original,
     fetchScores: vi.fn(() => new Promise(() => undefined)),
     fetchConfigStatus: vi.fn(() => new Promise(() => undefined)),
+    fetchAssessmentSummary: vi.fn(() => new Promise(() => undefined)),
   };
 });
 
@@ -188,5 +189,34 @@ describe("ProjectBoard header", () => {
 
     expect(screen.getByText("Execution overview")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Back to overview" })).not.toBeInTheDocument();
+  });
+});
+
+describe("ProjectBoard simplified overview", () => {
+  it("shows the four scorecards and collapses technical detail by default", () => {
+    render(<ProjectBoard projectId="prj_test" />);
+
+    // Section B: the four semicircular scorecards stay primary.
+    expect(screen.getByLabelText("Run scorecards")).toBeInTheDocument();
+
+    // Section D: recent activity with a link out to the full run history.
+    const viewAll = screen.getByRole("link", { name: "View all activity →" });
+    expect(viewAll).toHaveAttribute("href", "/projects/prj_test/runs");
+
+    // Timeline/logs/repo-intel/deploy-health are moved into a collapsed
+    // "Technical details" disclosure, not dropped from the page.
+    const details = screen.getByText("Technical details").closest("details");
+    expect(details).toBeInTheDocument();
+    expect(details).not.toHaveAttribute("open");
+  });
+
+  it("keeps the technical timeline reachable after expanding details", () => {
+    render(<ProjectBoard projectId="prj_test" />);
+    const details = screen.getByText("Technical details").closest("details") as HTMLDetailsElement;
+
+    fireEvent.click(screen.getByText("Technical details"));
+    expect(details.open).toBe(true);
+    // The pipeline timeline is still rendered (and its phase list queryable).
+    expect(screen.getByRole("list", { name: "Run Timeline phases" })).toBeInTheDocument();
   });
 });

@@ -181,7 +181,7 @@ def test_webhook_short_sha_ignored(client, monkeypatch):
 def test_scores_deterministic_and_missing_is_none():
     from app.scores.compute import VERSION, compute_all
 
-    assert VERSION == "scores-v2"
+    assert VERSION == "scores-v4"
     kwargs = dict(verification={"checks": []}, critic=None, change_intel=None)
     first = compute_all(**kwargs)
     second = compute_all(**kwargs)
@@ -229,7 +229,7 @@ def test_scores_api_and_history(client):
         "deployment_readiness", "performance", "optimization",
     }
     for entry in body["scores"].values():
-        assert entry["version"] == "scores-v2"
+        assert entry["version"] == "scores-v4"
         assert entry["computed_at"]
         assert entry["inputs_hash"]
     for name in ("code_quality", "security", "verification_confidence",

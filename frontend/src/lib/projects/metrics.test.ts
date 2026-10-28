@@ -116,8 +116,21 @@ describe("deriveScorecards", () => {
     });
     for (const card of cards) {
       expect(card.value).toBeNull();
-      expect(card.status).toBe("not_assessed");
+      // The run failed before these assessments could run at all.
+      expect(card.status).toBe("unavailable");
+      expect(card.evidence).toContain("failed before");
       expect(card.evidence.length).toBeGreaterThan(0);
+    }
+    // A non-failed run with no snapshot stays "not assessed" — the
+    // assessment simply has not produced evidence yet.
+    const pending = deriveScorecards({
+      run: run({ status: "running" }),
+      scores: null,
+      projectId: "prj_1",
+    });
+    for (const card of pending) {
+      expect(card.value).toBeNull();
+      expect(card.status).toBe("not_assessed");
     }
   });
 
@@ -284,5 +297,58 @@ describe("deriveFindings", () => {
     const ids = findings.map((f) => f.id);
     expect(ids).toContain("security-failures");
     expect(ids).toContain("pending-approvals");
+  });
+});
+
+describe("deriveScorecards — honest unavailable states", () => {
+  it("renders a backend-marked non-applicable readiness score as Not applicable", () => {
+    const cards = deriveScorecards({
+      run: run({ status: "failed", error_code: "NO_DEPLOYABLE_APP" }),
+      scores: {
+        ...scoresResponse(),
+        scores: {
+          code_quality: productScore({ value: null, evidence: {} }),
+          security: productScore({ value: null, evidence: {} }),
+          verification_confidence: productScore({ value: null, evidence: {} }),
+          deployment_readiness: productScore({
+            value: null,
+            evidence: {
+              applicable: false,
+              reason:
+                "this repository has no deployable web application (framework, library, or CLI-only project), so deployment readiness is not applicable",
+              coverage: { assessed: 0, applicable: 1 },
+            },
+          }),
+        },
+      } as ScoresResponse,
+      projectId: "prj_1",
+    });
+    const readiness = cards.find((c) => c.id === "readiness")!;
+    expect(readiness.value).toBeNull();
+    expect(readiness.status).toBe("not_applicable");
+    expect(readiness.statusLabel).toBe("Not applicable");
+    expect(readiness.evidence).toContain("no deployable web application");
+  });
+
+  it("marks partial coverage as partially assessed, never a clean pass", () => {
+    const cards = deriveScorecards({
+      run: run({ status: "completed" }),
+      scores: {
+        ...scoresResponse(),
+        scores: {
+          code_quality: productScore({ value: null, evidence: {} }),
+          security: productScore({
+            value: 100,
+            evidence: { coverage: { assessed: 1, applicable: 3 }, checks: [] },
+          }),
+          verification_confidence: productScore({ value: null, evidence: {} }),
+          deployment_readiness: productScore({ value: null, evidence: {} }),
+        },
+      } as ScoresResponse,
+      projectId: "prj_1",
+    });
+    const security = cards.find((c) => c.id === "security")!;
+    expect(security.status).toBe("partial");
+    expect(security.statusLabel).toBe("Partially assessed");
   });
 });

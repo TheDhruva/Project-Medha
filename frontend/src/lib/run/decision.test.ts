@@ -156,6 +156,36 @@ describe("getDecision", () => {
     expect(d.score).toBeNull();
   });
 
+  it("names a clone failure as a repository checkout failure, not a deployment block", () => {
+    const d = getDecision(
+      base({
+        runStatus: "failed",
+        result: {
+          kind: "failed",
+          title: "FAILED",
+          message: "fatal: cannot create directory at 'test/…': Filename too long",
+          durationLabel: "84s",
+          servicesLabel: "n/a",
+          verificationScore: null,
+          constraintsResolved: 0,
+          rollbackScope: null,
+          code: "GIT.CHECKOUT_FAILED",
+          failure: {
+            code: "GIT.CHECKOUT_FAILED",
+            category: "filesystem",
+            operation: "clone",
+            exit_code: 128,
+          },
+        },
+      }),
+    );
+    expect(d.title).toBe("Repository checkout failed");
+    expect(d.kind).toBe("blocked");
+    expect(d.score).toBeNull();
+    expect(d.body).toContain("Filename too long");
+    expect(d.body).not.toContain("deployment decision");
+  });
+
   it("marks partial recovery runs as recovered", () => {
     const d = getDecision(
       base({

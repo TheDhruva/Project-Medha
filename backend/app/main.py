@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.api.change_impact import router as change_intel_router
+from app.api.assessment import router as assessment_router
 from app.api.deploy import router as deploy_router
 from app.api.evaluation import router as evaluation_router
 from app.api.health import router as health_router
@@ -176,6 +177,7 @@ def create_app() -> FastAPI:
     application.include_router(change_intel_router)
     application.include_router(ai_router)
     application.include_router(projects_router)
+    application.include_router(assessment_router)
     application.include_router(scores_router)
     application.include_router(webhooks_router)
     return application

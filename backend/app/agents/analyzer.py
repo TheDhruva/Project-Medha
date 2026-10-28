@@ -54,12 +54,22 @@ def build_repository_intelligence(
         ] or ["index.html at checkout root"]
     elif language == "node" or "npm" in (stack.package_managers or []):
         approach, approach_evidence = "node", ["package.json with start script"]
-    elif language == "python" or any(
-        m in ("requirements.txt", "pyproject.toml") for m in (stack.manifests_examined or [])
+    elif language == "python" and any(
+        ep.endswith(".py") for ep in (stack.entry_points or [])
     ):
         approach, approach_evidence = "python", [
             *(stack.entry_points or []),
             *[m for m in (stack.manifests_examined or []) if m in ("requirements.txt", "pyproject.toml")],
+        ]
+    elif language == "python" or any(
+        m in ("requirements.txt", "pyproject.toml") for m in (stack.manifests_examined or [])
+    ):
+        # Dependency manifests without a web entrypoint are not a
+        # deployable application — no python approach is proposed.
+        approach, approach_evidence = "undecided", [
+            *(stack.entry_points or []),
+            *[m for m in (stack.manifests_examined or []) if m in ("requirements.txt", "pyproject.toml")],
+            "dependency manifests only — no web entrypoint detected",
         ]
     elif stack.has_dockerfile or stack.has_compose:
         approach, approach_evidence = "undecided-containerized", list(stack.manifests_examined or [])
@@ -264,12 +274,28 @@ def analyze_repository(
             examined.append("pyproject.toml")
             package_managers.append("pip")
         language = language or "python"
-        if not any(s.role in {"api", "backend"} for s in services) and not has_compose:
+        # Python package manifests are language/dependency evidence only: a
+        # deployable backend requires an actual web entrypoint module (the
+        # runtime spec enforces the same rule as defense-in-depth).
+        python_web_entry = _python_web_entry(effective)
+        if (
+            python_web_entry
+            and not any(s.role in {"api", "backend"} for s in services)
+            and not has_compose
+        ):
             services.append(
                 ServiceHint(
                     name="backend",
                     role="api",
-                    evidence_paths=[p for p in ["requirements.txt", "pyproject.toml"] if (effective / p).exists()],
+                    evidence_paths=[
+                        p
+                        for p in (
+                            "requirements.txt",
+                            "pyproject.toml",
+                            python_web_entry,
+                        )
+                        if p and (effective / p).exists()
+                    ],
                     suggested_port=target_port,
                 )
             )
@@ -298,6 +324,10 @@ def analyze_repository(
         )
     for hint in evidence.get("perf_notes", []):
         notes.append(hint)
+    for cli in evidence.get("cli_evidence", []):
+        notes.append(
+            f"CLI script declared ({cli}) — CLI evidence, not a web entrypoint."
+        )
     if evidence.get("ci_configs"):
         notes.append(f"CI configuration: {', '.join(evidence['ci_configs'][:3])}.")
     if evidence.get("test_suites"):
@@ -447,6 +477,20 @@ def _node_package_manager_notes(
         return managers or ["npm"], notes
     except Exception:  # noqa: BLE001 - evidence only, never block analysis
         return ["npm"], ["Package-manager evidence unreadable; assuming npm."]
+
+
+def _python_web_entry(root: Path) -> str | None:
+    """Web-entrypoint evidence for a Python checkout (relative file path).
+
+    A dependency manifest alone never names a web application; only an
+    actual entrypoint module (app/main/wsgi/asgi/server, including nested
+    ``app/main.py`` / ``src/main.py`` layouts) does. Returns the relative
+    path (e.g. ``app/main.py``) for evidence, or None.
+    """
+    from app.core.app_discovery import find_python_web_entry
+
+    entry = find_python_web_entry(root)
+    return entry.path if entry else None
 
 
 def _find_first(root: Path, names: list[str]) -> Path | None:
@@ -642,6 +686,7 @@ def _gather_evidence(root: Path, examined: list[str]) -> dict:
     req_text = _read_text(root / "requirements.txt")
     pyproject_text = _read_text(root / "pyproject.toml")
     combined_py = f"{req_text}\n{pyproject_text}".lower()
+    cli_evidence: list[str] = []
     if req_text or pyproject_text:
         found = [name for name in ("fastapi", "django", "flask") if name in combined_py]
         if len(found) == 1:
@@ -649,6 +694,13 @@ def _gather_evidence(root: Path, examined: list[str]) -> dict:
             framework_source = "requirements.txt/pyproject.toml"
         elif len(found) > 1:
             framework_conflict = ", ".join(sorted(found))
+        from app.core.app_discovery import find_python_web_entry as _py_entry
+
+        py_entry = _py_entry(root)
+        if py_entry:
+            # Web-entrypoint evidence — the same rule the runtime spec
+            # validates before execution.
+            entry_points.append(py_entry.path)
         try:
             import re as _re
 
@@ -657,7 +709,12 @@ def _gather_evidence(root: Path, examined: list[str]) -> dict:
             for block in scripts:
                 for line in block.splitlines():
                     if "=" in line and not line.strip().startswith("#"):
-                        entry_points.append(f"pyproject:[project.scripts] {line.strip()[:120]}")
+                        # [project.scripts] declares CLI commands, not a
+                        # web-server entrypoint — never positive deploy
+                        # confidence.
+                        cli_evidence.append(
+                            f"pyproject:[project.scripts] {line.strip()[:120]}"
+                        )
         except (OSError, ValueError):
             pass
 
@@ -790,6 +847,7 @@ def _gather_evidence(root: Path, examined: list[str]) -> dict:
     return {
         "lockfiles": lockfiles,
         "entry_points": entry_points,
+        "cli_evidence": cli_evidence[:10],
         "env_names": env_names,
         "health_hints": health_hints,
         "framework": framework,

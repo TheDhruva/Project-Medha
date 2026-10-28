@@ -34,7 +34,10 @@ const STATUS_ICONS = {
   healthy: CheckCircle2,
   warning: AlertTriangle,
   critical: XCircle,
+  partial: AlertTriangle,
   not_assessed: MinusCircle,
+  not_applicable: MinusCircle,
+  unavailable: MinusCircle,
   stale: Clock3,
 } as const;
 
@@ -42,7 +45,10 @@ const STATUS_CLASSES: Record<ScorecardStatus, string> = {
   healthy: "text-medha-success-ink",
   warning: "text-medha-warning",
   critical: "text-medha-danger",
+  partial: "text-medha-warning",
   not_assessed: "text-medha-tertiary",
+  not_applicable: "text-medha-tertiary",
+  unavailable: "text-medha-tertiary",
   stale: "text-medha-warning",
 };
 
@@ -156,6 +162,15 @@ export function MetricCard({ metric }: { metric: ScorecardMetric }) {
     .filter(Boolean)
     .join(" · ");
 
+  const valueLabel =
+    metric.value == null
+      ? metric.status === "not_applicable"
+        ? "Not applicable"
+        : metric.status === "unavailable"
+          ? "Unavailable"
+          : "Not assessed"
+      : `${metric.value}/100`;
+
   return (
     <Link
       href={metric.href}
@@ -163,15 +178,18 @@ export function MetricCard({ metric }: { metric: ScorecardMetric }) {
          Coverage, timestamp and revision stay available to assistive tech
          here and in full on the linked detail views. */
       aria-label={`${metric.title}: ${
-        metric.value == null ? "not assessed" : `${metric.value} of 100`
+        metric.value == null ? valueLabel.toLowerCase() : `${metric.value} of 100`
       }, ${metric.statusLabel}. ${metric.evidence}${coverage ? `. ${coverage}` : ""}. ${revisionNote}`}
       data-status={metric.status}
       className={cn(
         "group flex h-full flex-col rounded-lg border bg-medha-surface p-3.5 text-left transition hover:border-medha-accent/50 hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent",
         metric.status === "not_assessed" && "border-dashed border-medha-border-strong",
+        metric.status === "not_applicable" && "border-dashed border-medha-border-strong",
+        metric.status === "unavailable" && "border-dashed border-medha-border-strong",
         metric.status === "stale" && "border-medha-warning/40",
+        metric.status === "partial" && "border-medha-warning/40",
         metric.status === "critical" && "border-medha-danger/30",
-        metric.status !== "not_assessed" && metric.status !== "stale" && metric.status !== "critical" && "border-medha-border",
+        !["not_assessed", "not_applicable", "unavailable", "stale", "partial", "critical"].includes(metric.status) && "border-medha-border",
       )}
     >
       <div className="flex items-start gap-2">
@@ -187,7 +205,7 @@ export function MetricCard({ metric }: { metric: ScorecardMetric }) {
       </div>
 
       <p className={cn("text-center text-[14px] font-semibold leading-5", toneText)}>
-        {metric.value == null ? "Not assessed" : `${metric.value}/100`}
+        {valueLabel}
       </p>
 
       {/* Status and action share one bottom row; status truncates so the

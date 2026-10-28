@@ -15,7 +15,7 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _SCHEMA_PG_PATH = Path(__file__).with_name("schema_pg.sql")
 
 # Bump when schema.sql or migration steps change. Tracked via PRAGMA user_version.
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 12
 
 _ARTIFACT_COLUMNS = (
     "result_json",
@@ -462,6 +462,47 @@ def _ensure_v8_tables(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_V11_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS findings (
+        finding_id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        project_id TEXT NOT NULL DEFAULT '',
+        repository TEXT NOT NULL DEFAULT '',
+        deployment_id TEXT,
+        source TEXT NOT NULL,
+        rule_id TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'unknown',
+        severity TEXT NOT NULL DEFAULT 'medium',
+        confidence TEXT NOT NULL DEFAULT 'medium',
+        path TEXT,
+        line INTEGER,
+        message TEXT NOT NULL DEFAULT '',
+        explanation TEXT,
+        remediation TEXT,
+        status TEXT NOT NULL DEFAULT 'detected',
+        verification_status TEXT NOT NULL DEFAULT 'unverified',
+        first_seen_sha TEXT,
+        last_seen_sha TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        history_json TEXT NOT NULL DEFAULT '[]',
+        is_demo INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (project_id, repository, fingerprint)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_findings_project_status"
+    " ON findings (project_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_findings_deployment"
+    " ON findings (deployment_id)",
+)
+
+
+def _ensure_v11_tables(conn: sqlite3.Connection) -> None:
+    """Finding ledger with stable identity + lifecycle (v11). Idempotent."""
+    for statement in _V11_TABLES_SQL:
+        conn.execute(statement)
+
+
 def _ensure_v6_columns(conn: sqlite3.Connection) -> None:
     """Project-scoped connections (v6): projects table + link columns."""
     for statement in _NEW_TABLES_SQL:
@@ -520,6 +561,27 @@ def _ensure_commit_summary_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE commits ADD COLUMN {column} {ddl}")
 
 
+def _ensure_v12_columns(conn: sqlite3.Connection) -> None:
+    """Baseline + incremental-scan state and PR linkage (v12). Idempotent.
+
+    Existing rows keep NULL baseline/full-scan values (displayed as
+    "never assessed", never fabricated).
+    """
+    try:
+        project_cols = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+    except Exception:
+        return
+    for column in ("baseline_sha", "baseline_at", "last_full_scan_at"):
+        if column not in project_cols:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {column} TEXT")
+    try:
+        deploy_cols = {row[1] for row in conn.execute("PRAGMA table_info(deployments)")}
+    except Exception:
+        return
+    if "pr_number" not in deploy_cols:
+        conn.execute("ALTER TABLE deployments ADD COLUMN pr_number INTEGER")
+
+
 def _ensure_perf_indexes(conn: sqlite3.Connection) -> None:
     """Indexes on columns added by later migrations (project_id on the
     deployments table). Runs AFTER _ensure_v6_columns so legacy databases
@@ -561,8 +623,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _ensure_v5_tables(conn)
     _ensure_v6_columns(conn)
     _ensure_v8_tables(conn)
+    _ensure_v11_tables(conn)
     _ensure_deploy_target_column(conn)
     _ensure_commit_summary_columns(conn)
+    _ensure_v12_columns(conn)
     _ensure_perf_indexes(conn)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
@@ -619,6 +683,11 @@ def _init_postgres() -> str:
             ("proposals", "project_id", "TEXT"),
             ("proposals", "push_json", "TEXT"),
             ("projects", "deploy_target", "TEXT"),
+            # Baseline + incremental-scan state (v12) and PR linkage.
+            ("projects", "baseline_sha", "TEXT"),
+            ("projects", "baseline_at", "TEXT"),
+            ("projects", "last_full_scan_at", "TEXT"),
+            ("deployments", "pr_number", "INTEGER"),
             # Deterministic commit summaries + diff evidence.
             ("commits", "summary", "TEXT"),
             ("commits", "files_json", "TEXT"),

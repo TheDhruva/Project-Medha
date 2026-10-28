@@ -17,7 +17,15 @@ import { isRunningStatus } from "./projects";
 
 /* ------------------------------- scorecards -------------------------------- */
 
-export type ScorecardStatus = "healthy" | "warning" | "critical" | "not_assessed" | "stale";
+export type ScorecardStatus =
+  | "healthy"
+  | "warning"
+  | "critical"
+  | "partial"
+  | "not_assessed"
+  | "not_applicable"
+  | "unavailable"
+  | "stale";
 
 export interface ScorecardMetric {
   id: "code-quality" | "security" | "verification" | "readiness";
@@ -55,7 +63,10 @@ const STATUS_LABELS: Record<ScorecardStatus, string> = {
   healthy: "Assessed",
   warning: "Needs attention",
   critical: "Critical findings",
+  partial: "Partially assessed",
   not_assessed: "Not assessed",
+  not_applicable: "Not applicable",
+  unavailable: "Unavailable",
   stale: "Stale assessment",
 };
 
@@ -89,6 +100,11 @@ function coverageOf(evidence: Record<string, unknown> | null): { assessed: numbe
 function evidenceLine(score: ProductScore | undefined): string {
   if (!score) return "No score snapshot recorded for this run.";
   const ev = asRecord(score.evidence) ?? {};
+  if (ev.applicable === false) {
+    return typeof ev.reason === "string" && ev.reason.trim()
+      ? ev.reason
+      : "This score does not apply to this repository.";
+  }
   if (score.value == null) {
     const reason = typeof ev.reason === "string" ? ev.reason : "no assessment evidence";
     return `Not assessed: ${reason}.`;
@@ -113,12 +129,19 @@ function statusOf(
   stale: boolean,
 ): ScorecardStatus {
   if (stale) return "stale";
+  // Backend-marked non-applicable (e.g. deployment readiness for a
+  // framework/library repo) — never rendered as a low score or "critical".
+  if (asRecord(evidence)?.applicable === false) return "not_applicable";
   if (value == null) return "not_assessed";
   const checks = assessedChecks(evidence);
   const highFailure = checks.some(
     (c) => checkStatus(c.status) === "failed" && severityRank(c.severity) >= 4,
   );
   if (highFailure || value < 60) return "critical";
+  // Partial coverage: some checks ran, but not all — never presented as a
+  // complete assessment.
+  const coverage = coverageOf(evidence);
+  if (coverage && coverage.assessed < coverage.applicable) return "partial";
   if (value < 85 || checks.some((c) => checkStatus(c.status) !== "passed")) return "warning";
   return "healthy";
 }
@@ -171,12 +194,18 @@ export function deriveScorecards(input: {
       (scores != null && scores.deployment_id !== run.deployment_id) ||
       !revisionsMatch(score?.target_sha, run.target_revision);
     const value = score?.value ?? null;
-    const status = statusOf(value, evidence, stale);
+    // A failed run that never produced this score: the assessment could not
+    // run at all — distinct from "ran but not assessed".
+    const unavailable =
+      value == null && run.status === "failed" && !score && !stale;
+    const status: ScorecardStatus = unavailable ? "unavailable" : statusOf(value, evidence, stale);
     return {
       id,
       title,
       value,
-      evidence: evidenceLine(score),
+      evidence: unavailable
+        ? "This run failed before this assessment could complete."
+        : evidenceLine(score),
       status,
       statusLabel: STATUS_LABELS[status],
       coverage: coverageOf(evidence),
@@ -258,6 +287,22 @@ export function deriveFindings(input: {
   const failed = run?.status === "failed";
 
   let rootCauseShown = false;
+
+  if (failed && errorCode === "NO_DEPLOYABLE_APP") {
+    rootCauseShown = true;
+    findings.push({
+      id: "no-deployable-app",
+      tone: "warning",
+      title: "No deployable application detected",
+      body:
+        run?.error_summary ||
+        "Analysis completed, but this repository does not contain a deployable web application. Your analysis and findings are still available.",
+      action: {
+        label: "Open run detail →",
+        href: `/projects/${projectId}/runs/${run?.deployment_id}`,
+      },
+    });
+  }
 
   if (failed && errorCode && TARGET_ERROR_CODES.has(errorCode)) {
     rootCauseShown = true;

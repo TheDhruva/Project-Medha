@@ -114,6 +114,7 @@ class DeploymentRecord(BaseModel):
     ai: dict[str, Any] | None = None
     owner_sub: str | None = None
     project_id: str | None = None
+    pr_number: int | None = None
     created_at: str
     updated_at: str
     is_demo: bool = True
@@ -143,6 +144,7 @@ class DeploymentRecord(BaseModel):
             "ai": self.ai,
             "owner_sub": self.owner_sub,
             "project_id": self.project_id,
+            "pr_number": self.pr_number,
             "label": "DEMO/MOCK" if self.is_demo else None,
         }
 
@@ -168,6 +170,9 @@ class ProjectRecord(BaseModel):
     visibility: str = "unverified"
     connection_status: str = "pending"
     deploy_target: str | None = None
+    baseline_sha: str | None = None
+    baseline_at: str | None = None
+    last_full_scan_at: str | None = None
     created_at: str
     updated_at: str
 
@@ -184,6 +189,9 @@ class ProjectRecord(BaseModel):
             "visibility": self.visibility,
             "connection_status": self.connection_status,
             "deploy_target": self.deploy_target,
+            "baseline_sha": self.baseline_sha,
+            "baseline_at": self.baseline_at,
+            "last_full_scan_at": self.last_full_scan_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

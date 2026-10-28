@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from app.core.api_token import require_mutation_token
 from app.core.clerk_auth import LOCAL_SUBJECT, RequireSubject
@@ -20,7 +21,11 @@ from app.core.events import event_bus, make_event, utc_now_iso
 from app.core.logging import get_logger
 from app.ai.redact import redact_text
 from app.analysis.summary import present_repository_summary
-from app.database.repositories import DeploymentRepository, ProjectRepository
+from app.database.repositories import (
+    DeploymentRepository,
+    FindingRepository,
+    ProjectRepository,
+)
 from app.models.deployment import DeploymentRecord, DeploymentRequest, DeploymentResponse
 from app.workflow.planning import schedule_planning_pipeline
 
@@ -83,6 +88,25 @@ def _compute_duration_seconds(created_at: str, updated_at: str) -> float | None:
     return round(max(0.0, (updated - created).total_seconds()), 1)
 
 
+def _analysis_status(result: dict) -> str | None:
+    """Persisted analysis outcome (completed/partial/failed), if any.
+
+    Prefers the top-level field written by the pipeline; falls back to the
+    inventory blob so older successful runs resolve without a rewrite.
+    """
+    if not isinstance(result, dict):
+        return None
+    status = result.get("analysis_status")
+    if isinstance(status, str) and status:
+        return status
+    analysis = result.get("repository_analysis")
+    if isinstance(analysis, dict):
+        value = analysis.get("analysis_status")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _run_summary(record: DeploymentRecord) -> dict:
     change_intel = record.change_intel or {}
     risk: str | None = None
@@ -91,6 +115,21 @@ def _run_summary(record: DeploymentRecord) -> dict:
     result = record.result or {}
     ai = record.ai if isinstance(record.ai, dict) else {}
     health = _stored_health(record)
+    analysis_blob = result.get("repository_analysis")
+    if not isinstance(analysis_blob, dict):
+        analysis_blob = result.get("analysis")
+    if not isinstance(analysis_blob, dict):
+        analysis_blob = None
+    analysis_coverage = None
+    if analysis_blob is not None:
+        blob_cov = analysis_blob.get("coverage") or {}
+        analysis_coverage = {
+            "security_scan": blob_cov.get("security_scan"),
+            "scan_mode": blob_cov.get("scan_mode"),
+            "gaps": len(blob_cov.get("gaps") or []),
+            "finding_count": analysis_blob.get("finding_count"),
+            "commit_sha": analysis_blob.get("commit_sha"),
+        }
     return {
         "deployment_id": record.deployment_id,
         "status": record.status.value,
@@ -123,6 +162,21 @@ def _run_summary(record: DeploymentRecord) -> dict:
         # without parsing free-text error summaries.
         "error_code": result.get("code") if isinstance(result, dict) else None,
         "error_summary": record.error_summary,
+        # Structured failure diagnostics (category / operation / exit code /
+        # sanitized stderr tail) and the authoritative terminal phase
+        # snapshot; null on older or successful records.
+        "failure": result.get("failure") if isinstance(result, dict) else None,
+        "phases": result.get("phases") if isinstance(result, dict) else None,
+        # Authoritative run-outcome split: analysis (completed/partial/failed)
+        # vs deployment (blocked/none) so clients never infer the analysis
+        # outcome from the run status alone. Null on older records.
+        "analysis_status": _analysis_status(result),
+        # Scan coverage + findings for the Runs view (null on older records).
+        "analysis_coverage": analysis_coverage,
+        "pr_number": record.pr_number,
+        "deployment_status": (
+            result.get("deployment_status") if isinstance(result, dict) else None
+        ),
         "ai_outcome": ai.get("outcome") if ai else None,
         "ai_provider": ai.get("provider") if ai else None,
         "repository_summary": present_repository_summary(
@@ -481,6 +535,104 @@ async def get_repository_intelligence(deployment_id: str, subject: str = Require
     )
 
 
+class FindingTransitionRequest(BaseModel):
+    status: str
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence: list[str] = Field(default_factory=list, max_length=50)
+
+
+@router.get("/deploy/{deployment_id}/findings", response_model=None)
+async def get_findings(
+    deployment_id: str,
+    status: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    subject: str = RequireSubject,
+):
+    """Persisted finding ledger for this run's repository.
+
+    Stable identities across scans, full lifecycle status per finding, and
+    the observation history — never re-derived, never fabricated.
+    """
+    from app.database.repositories import FINDING_STATUSES
+
+    record = await _owned_record(deployment_id, subject)
+    if record is None:
+        return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
+    if status is not None and status not in FINDING_STATUSES:
+        return _error(
+            400, "FINDING_STATUS_INVALID",
+            f"Unknown finding status '{status}'.",
+            {"allowed": list(FINDING_STATUSES)},
+        )
+    rows = await asyncio.to_thread(
+        FindingRepository().list,
+        project_id=record.project_id or "",
+        repository=record.repository_url,
+        status=status,
+        limit=limit,
+    )
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    return JSONResponse(
+        {
+            "deployment_id": deployment_id,
+            "is_demo": record.is_demo,
+            "label": "DEMO/MOCK" if record.is_demo else None,
+            "lifecycle_states": list(FINDING_STATUSES),
+            "status_counts": counts,
+            "findings": rows,
+            "total": len(rows),
+        }
+    )
+
+
+@router.post(
+    "/deploy/{deployment_id}/findings/{finding_id}",
+    dependencies=[Depends(require_mutation_token)],
+    response_model=None,
+)
+async def transition_finding(
+    deployment_id: str,
+    finding_id: str,
+    payload: FindingTransitionRequest,
+    subject: str = RequireSubject,
+):
+    """Move one finding through its lifecycle with enforced evidence rules.
+
+    The state machine refuses illegal transitions; confirming, rejecting or
+    resolving requires at least one evidence reference. Disagreement is never
+    settled by assertion.
+    """
+    record = await _owned_record(deployment_id, subject)
+    if record is None:
+        return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
+    findings_repo = FindingRepository()
+    row = await asyncio.to_thread(findings_repo.get, finding_id)
+    if row is None or (
+        row.get("project_id") != (record.project_id or "")
+        or row.get("repository") != record.repository_url
+    ):
+        return _error(404, "NOT_FOUND", f"Finding '{finding_id}' was not found.")
+    try:
+        updated = await asyncio.to_thread(
+            findings_repo.transition,
+            finding_id,
+            payload.status,
+            reason=payload.reason,
+            at=utc_now_iso(),
+            evidence=payload.evidence,
+            deployment_id=deployment_id,
+        )
+    except ValueError as exc:
+        return _error(409, "FINDING_TRANSITION_INVALID", str(exc))
+    if updated is None:
+        return _error(404, "NOT_FOUND", f"Finding '{finding_id}' was not found.")
+    return JSONResponse(
+        {"deployment_id": deployment_id, "finding": updated, "history": updated["history"]}
+    )
+
+
 @router.get("/deploy/{deployment_id}/constraints", response_model=None)
 async def get_constraints(deployment_id: str, subject: str = RequireSubject):
     record = await _owned_record(deployment_id, subject)
@@ -526,12 +678,41 @@ async def get_verification(deployment_id: str, subject: str = RequireSubject):
     record = await _owned_record(deployment_id, subject)
     if record is None:
         return _error(404, "NOT_FOUND", f"Deployment '{deployment_id}' was not found.")
+    # Coverage (did checks run?) is reported separately from outcomes
+    # (what did they say?): a skipped or missing check is never a pass.
+    coverage = None
+    if record.verification:
+        try:
+            from app.scores.compute import compute_verification_confidence
+
+            _, evidence = compute_verification_confidence(
+                verification=record.verification,
+                assessed_at=record.updated_at,
+                revision=record.target_revision,
+            )
+            coverage = {
+                "counts": evidence.get("coverage"),
+                "normalized": [
+                    {
+                        "id": c.get("id"),
+                        "title": c.get("title"),
+                        "status": c.get("status"),
+                        "required": c.get("required"),
+                        "finding": c.get("finding"),
+                    }
+                    for c in (evidence.get("checks") or [])
+                ],
+                "reason": evidence.get("reason"),
+            }
+        except Exception:  # noqa: BLE001 - coverage is additive
+            coverage = None
     return JSONResponse(
         {
             "deployment_id": deployment_id,
             "is_demo": record.is_demo,
             "label": "DEMO/MOCK" if record.is_demo else None,
             "verification": record.verification,
+            "coverage": coverage,
             "critic": record.critic,
         }
     )

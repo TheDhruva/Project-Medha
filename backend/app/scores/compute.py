@@ -13,7 +13,10 @@ Four UI categories are scored independently from persisted artifacts:
   do not count as assessed.
 - deployment_readiness: target support, verification gate, build/runtime
   configuration, execution outcome and recorded health evidence. Pipeline
-  completion alone does not imply readiness.
+  completion alone does not imply readiness. When the run was blocked because
+  the repository has no deployable application (framework/library/CLI-only),
+  readiness is ``not_applicable`` (value ``None`` + ``applicable: false``)
+  rather than a fabricated low score.
 
 Every category returns ``None`` when no applicable check was actually assessed.
 Scores are integers 0-100, higher is better, and deterministic for identical
@@ -25,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
-VERSION = "scores-v2"
+VERSION = "scores-v4"
 
 PASSED = "passed"
 FAILED = "failed"
@@ -57,6 +60,19 @@ CAPS = {
     "no_security_scanner": (60, "no repository security scanner completed"),
     "partial_security_scanner": (85, "security scanner coverage is incomplete"),
     "no_static_analysis": (80, "no static-analysis coverage for code quality"),
+}
+
+# Support-gate codes meaning "this repository has no deployable application".
+# For these, deployment readiness is not applicable (never a low score).
+_NO_APP_TARGET_CODES = {
+    "NO_DEPLOYABLE_APP": (
+        "this repository has no deployable web application (framework, "
+        "library, or CLI-only project), so deployment readiness is not applicable"
+    ),
+    "NO_TARGET_CANDIDATES": (
+        "no deployable application candidates were discovered in this "
+        "repository, so deployment readiness is not applicable"
+    ),
 }
 
 # Verifier checks that must pass before execution. Anything else is optional.
@@ -396,11 +412,15 @@ def compute_code_quality(*, repository_analysis: dict | None = None,
         caps.append((*CAPS["critical_code"], "critical_code"))
     if not any(c["id"] == "static_analysis" and c["status"] in _ASSESSED for c in checks):
         caps.append((*CAPS["no_static_analysis"], "static_analysis"))
-    return _evidence(
+    value, evidence = _evidence(
         checks, caps=caps,
         reason="no code-quality check produced evidence for this run",
         assessed_at=assessed_at, revision=revision,
     )
+    evidence["code_quality_failures"] = sum(
+        1 for c in checks if c["status"] == FAILED
+    )
+    return value, evidence
 
 
 def compute_security(*, repository_analysis: dict | None = None,
@@ -422,6 +442,11 @@ def compute_security(*, repository_analysis: dict | None = None,
         _scanner_check(
             repository_analysis, "semgrep",
             check_id="static_security", title="Static security analysis",
+            category="security",
+        ),
+        _scanner_check(
+            repository_analysis, "builtin",
+            check_id="policy_checks", title="Configuration & code policy checks",
             category="security",
         ),
         _verification_check(verification),
@@ -452,11 +477,23 @@ def compute_security(*, repository_analysis: dict | None = None,
     elif len(assessed_scanners) < len(scanner_checks):
         caps.append((*CAPS["partial_security_scanner"], "scanner_coverage"))
 
-    return _evidence(
+    value, evidence = _evidence(
         checks, caps=caps,
         reason="no security scanner completed; security coverage is unknown",
         assessed_at=assessed_at, revision=revision,
     )
+    # Honest roll-up fields consumed by the dashboard: how many security
+    # checks actually failed, and how complete the scan coverage was.
+    analysis = _as_dict(repository_analysis)
+    coverage = _as_dict(analysis.get("coverage"))
+    gaps = coverage.get("gaps")
+    evidence["security_failures"] = sum(1 for c in checks if c["status"] == FAILED)
+    evidence["scan_completeness"] = {
+        "analysis_status": analysis.get("analysis_status"),
+        "security_scan": coverage.get("security_scan"),
+        "gaps": [str(g) for g in gaps] if isinstance(gaps, list) else [],
+    }
+    return value, evidence
 
 
 def compute_verification_confidence(*, verification: dict | None,
@@ -556,6 +593,31 @@ def compute_deployment_readiness(*, verification: dict | None,
                                  revision: str | None = None) -> tuple[int | None, dict]:
     result = _as_dict(result)
     checks: list[dict[str, Any]] = []
+
+    # Deployment ineligibility is not a deployment-readiness defect. A
+    # repository with no deployable application (framework, library, CLI-only
+    # project) is not applicable for this score — never a low number with
+    # fabricated "critical findings".
+    support = str(support_code or "").upper()
+    if support in _NO_APP_TARGET_CODES:
+        reason = _NO_APP_TARGET_CODES[support]
+        na_checks = [
+            _check(
+                "target_support", "deployment", "Deployment target support",
+                NOT_APPLICABLE, finding=reason,
+                evidence_source="execution.result.code", reference=support,
+            )
+        ]
+        return None, {
+            "category": "deployment",
+            "checks": na_checks,
+            "coverage": _coverage(na_checks),
+            "top_finding": None,
+            "assessed_at": assessed_at,
+            "revision": revision,
+            "applicable": False,
+            "reason": reason,
+        }
 
     verification = _as_dict(verification) if verification is not None else None
     if verification is not None and isinstance(verification.get("passed"), bool):
@@ -704,11 +766,23 @@ def compute_deployment_readiness(*, verification: dict | None,
 
 def compute_performance(*, change_intel: dict | None,
                         runtime_measured: dict | None) -> tuple[float | None, dict]:
-    """Static estimate only. Measured benchmark is None unless recorded."""
+    """Static estimate from change-risk evidence, or a measured benchmark.
+
+    Returns ``None`` when neither exists: an unmeasured system is never
+    assigned a default score, because a number without evidence would
+    misrepresent unassessed areas as healthy.
+    """
     evidence: dict[str, Any] = {"measured": bool(runtime_measured)}
+    if not change_intel and not runtime_measured:
+        evidence.update({
+            "reason": "no performance evidence was recorded for this run",
+            "benchmark": "not-measured",
+            "static_deductions": 0,
+        })
+        return None, evidence
     risk = _as_dict((change_intel or {}).get("risk"))
     factors = risk.get("factors", []) if isinstance(risk, dict) else []
-    score: float | None = 80
+    score: float = 80
     deductions = 0
     for factor in factors if isinstance(factors, list) else []:
         code = str(factor.get("code", ""))
@@ -725,15 +799,30 @@ def compute_performance(*, change_intel: dict | None,
 
 def compute_optimization(*, change_intel: dict | None,
                          verification: dict | None) -> tuple[float | None, dict]:
+    """Optimization headroom from observed verification warnings.
+
+    Returns ``None`` when no signal exists at all: warnings and open
+    requirements are the only observed inputs, so an empty evidence set
+    scored at 100 would claim "nothing to optimize" without ever looking.
+    """
+    if verification is None and change_intel is None:
+        return None, {
+            "reason": "verification evidence missing; optimization was not assessed",
+        }
     evidence: dict[str, Any] = {}
-    if change_intel is None and verification is None:
-        return None, {"reason": "no analysis evidence"}
     score = 100
     requirements = (change_intel or {}).get("requirements", []) if isinstance(change_intel, dict) else []
     open_reqs = [r for r in requirements if isinstance(r, dict) and r.get("status") != "done"]
+    checks = verification.get("checks", []) if isinstance(verification, dict) else []
+    if not checks and not requirements:
+        return None, {
+            "reason": (
+                "no verification checks or change requirements were recorded;"
+                " optimization was not assessed"
+            ),
+        }
     score -= min(30, len(open_reqs) * 3)
     evidence["open_requirements"] = len(open_reqs)
-    checks = (verification or {}).get("checks", []) if isinstance(verification, dict) else []
     warnings = [c for c in checks if isinstance(c, dict) and str(c.get("status", "")).lower() == "warning"]
     score -= min(20, len(warnings) * 2)
     evidence["warnings"] = len(warnings)

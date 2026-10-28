@@ -97,7 +97,7 @@ def _verification(*, passed: bool = True, checks: list[dict] | None = None) -> d
 
 
 def test_version_and_missing_evidence_is_none():
-    assert VERSION == "scores-v2"
+    assert VERSION == "scores-v4"
     out = compute_all(verification={"checks": []}, critic=None, change_intel=None)
     assert out["code_quality"]["value"] is None
     assert out["security"]["value"] is None
@@ -166,6 +166,36 @@ def test_security_completed_clean_scan_can_pass():
     )
     assert value == 100
     assert evidence["coverage"]["failed"] == 0
+
+
+def test_performance_and_optimization_require_real_evidence():
+    # No performance/optimization evidence means not assessed — never a
+    # default number presented as a measurement.
+    out = compute_all(verification={"checks": []}, critic=None, change_intel=None)
+    assert out["performance"]["value"] is None
+    assert out["performance"]["evidence"]["reason"]
+    assert out["optimization"]["value"] is None
+    assert out["optimization"]["evidence"]["reason"]
+
+
+def test_security_evidence_reports_failures_and_scan_completeness():
+    _, evidence = compute_security(
+        repository_analysis=_analysis(
+            scanners={
+                "gitleaks": "completed_with_findings",
+                "semgrep": "succeeded",
+                "trivy": "succeeded",
+            },
+            findings=[_finding("gitleaks", "high", rule="secret")],
+        ),
+        verification=_verification(),
+        change_intel=None,
+    )
+    assert evidence["security_failures"] >= 1
+    completeness = evidence["scan_completeness"]
+    assert completeness["analysis_status"] == "completed"
+    assert "security_scan" in completeness
+    assert isinstance(completeness["gaps"], list)
 
 
 def test_security_findings_penalize_and_cap_secrets():
@@ -291,6 +321,55 @@ def test_readiness_unsupported_target_is_blocked():
     )
     assert value is not None and value <= 30
     assert any(c["status"] == "failed" for c in evidence["checks"])
+
+
+def test_readiness_no_deployable_app_is_not_applicable():
+    """A framework/library/CLI repo must never get a fabricated readiness
+    score (the old 25/100 "Critical findings") for being undeployable."""
+    value, evidence = compute_deployment_readiness(
+        verification=None,
+        repository_analysis=_analysis(applications=[]),
+        result={"kind": "failed", "code": "NO_DEPLOYABLE_APP",
+                "blocked_stage": "analyze"},
+        support_code="NO_DEPLOYABLE_APP",
+        health_status="unknown",
+        execution_mode=None,
+    )
+    assert value is None
+    assert evidence["applicable"] is False
+    assert "no deployable" in evidence["reason"]
+    assert evidence["coverage"]["assessed"] == 0
+
+
+def test_readiness_no_target_candidates_is_not_applicable():
+    value, evidence = compute_deployment_readiness(
+        verification=None,
+        repository_analysis=_analysis(applications=[]),
+        result={"kind": "failed", "code": "NO_TARGET_CANDIDATES"},
+        support_code="NO_TARGET_CANDIDATES",
+        health_status="unknown",
+        execution_mode=None,
+    )
+    assert value is None
+    assert evidence["applicable"] is False
+
+
+def test_compute_all_marks_readiness_not_applicable_for_framework_repo():
+    out = compute_all(
+        verification=None,
+        critic=None,
+        change_intel=None,
+        repository_analysis=_analysis(applications=[], scanners={}),
+        result={"kind": "failed", "code": "NO_DEPLOYABLE_APP",
+                "blocked_stage": "analyze"},
+        support_code="NO_DEPLOYABLE_APP",
+    )
+    readiness = out["deployment_readiness"]
+    assert readiness["value"] is None
+    assert readiness["evidence"]["applicable"] is False
+    # Deployment ineligibility is not a code-quality or security defect.
+    assert out["code_quality"]["evidence"].get("applicable") is not False
+    assert out["security"]["evidence"].get("applicable") is not False
 
 
 def test_categories_are_independent():

@@ -69,7 +69,11 @@ export function DecisionCard({
                 {decision.score} <span className="font-normal text-medha-tertiary">/ 100</span>
               </p>
             ) : (
-              <p className="mt-1 text-sm text-medha-tertiary">Not evaluated yet</p>
+              <p className="mt-1 text-sm text-medha-tertiary">
+                {decision.kind === "blocked"
+                  ? "No score — evaluation stopped before a decision score existed."
+                  : "Not evaluated yet"}
+              </p>
             )}
           </div>
         </div>

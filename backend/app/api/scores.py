@@ -121,9 +121,16 @@ async def get_scores(deployment_id: str, subject: str = RequireSubject):
     support_code = None
     if result.get("blocked_stage") == "analyze" and deployment.get("code"):
         support_code = str(deployment["code"])
-    elif result.get("kind") == "success" or execution_mode in {
+    elif result.get("kind") == "success":
+        # A successful run necessarily passed the support gate.
+        support_code = "SUPPORTED"
+    elif repository_analysis is not None and execution_mode in {
         "real", "simulator", "simulator_fallback", "demo", "controlled_test",
     }:
+        # The support gate runs right after repository analysis. A run that
+        # died earlier (e.g. clone failure) has no repository_analysis, so
+        # target support was never established — it must read as
+        # not_assessed, never as a pass for an operation that never ran.
         support_code = "SUPPORTED"
     health_status = _readiness_health(record, result)
     target_sha = ""

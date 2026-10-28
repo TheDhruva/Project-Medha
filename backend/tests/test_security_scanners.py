@@ -133,6 +133,46 @@ def test_semgrep_findings_normalized(monkeypatch, target):
     assert res.findings[0].line == 7
 
 
+def test_semgrep_invokes_config_auto(monkeypatch, target):
+    """semgrep must actually receive a ruleset: --config auto, or it scans nothing."""
+    _which_found(monkeypatch)
+    captured: dict = {}
+
+    def spy(argv, **kwargs):
+        captured["argv"] = argv
+        return _Proc(0, json.dumps({"results": []}))
+
+    monkeypatch.setattr(scanners.subprocess, "run", spy)
+    scanners.run_scanner("semgrep", target)
+    argv = captured["argv"]
+    assert "--config" in argv
+    assert argv[argv.index("--config") + 1] == "auto"
+
+
+def test_scanner_message_is_redacted(monkeypatch, target):
+    """Finding messages are scrubbed of token-like material before storage."""
+    _which_found(monkeypatch)
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "python.lang.security.audit",
+                    "path": "conf.py",
+                    "start": {"line": 3},
+                    "extra": {
+                        "message": "hardcoded key sk-abcdef123456 in config",
+                        "severity": "WARNING",
+                    },
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(scanners.subprocess, "run", lambda *a, **k: _Proc(1, payload))
+    res = scanners.run_scanner("semgrep", target)
+    assert res.findings[0].message
+    assert "sk-abcdef123456" not in json.dumps(res.to_dict())
+
+
 def test_trivy_findings_normalized(monkeypatch, target):
     _which_found(monkeypatch)
     payload = json.dumps(

@@ -60,8 +60,10 @@ class Settings(BaseSettings):
     timeout_specialists_s: float = Field(default=30.0, alias="MEDHA_TIMEOUT_SPECIALISTS_S")
     timeout_verify_s: float = Field(default=30.0, alias="MEDHA_TIMEOUT_VERIFY_S")
     # Network-facing repository acquisition (clone/fetch) gets its own bound:
-    # same wait-not-kill semantics as the other stage timeouts.
-    timeout_acquire_s: float = Field(default=120.0, alias="MEDHA_TIMEOUT_ACQUIRE_S")
+    # same wait-not-kill semantics as the other stage timeouts. Default 600s:
+    # shallow clone + checkout of a 34k-file repository (vercel/next.js)
+    # measured ~85s on a mid-range machine — 120s was not enough headroom.
+    timeout_acquire_s: float = Field(default=600.0, alias="MEDHA_TIMEOUT_ACQUIRE_S")
     executor_mode: str = Field(default="auto", alias="MEDHA_EXECUTOR_MODE")
     api_token: str = Field(default="", alias="MEDHA_API_TOKEN")
     # Demo/scenario engine: disabled by default. The deterministic DemoRunner

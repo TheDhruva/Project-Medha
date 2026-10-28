@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS deployments (
     ai_json TEXT,
     owner_sub TEXT,
     project_id TEXT,
+    pr_number INTEGER,
     is_demo INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -121,6 +122,9 @@ CREATE TABLE IF NOT EXISTS projects (
     visibility TEXT NOT NULL DEFAULT 'unverified',
     connection_status TEXT NOT NULL DEFAULT 'pending',
     deploy_target TEXT,
+    baseline_sha TEXT,
+    baseline_at TEXT,
+    last_full_scan_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -130,6 +134,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_owner_repo
 
 CREATE INDEX IF NOT EXISTS idx_projects_repository
     ON projects (repository);
+
+-- Known pull requests per connected project (webhook-maintained).
+CREATE TABLE IF NOT EXISTS pull_requests (
+    seq BIGSERIAL PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT '',
+    repository TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    base_ref TEXT,
+    base_sha TEXT,
+    head_ref TEXT,
+    head_sha TEXT,
+    state TEXT NOT NULL DEFAULT 'open',
+    last_decision_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (project_id, repository, number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pull_requests_head
+    ON pull_requests (project_id, head_sha);
 
 CREATE TABLE IF NOT EXISTS jobs (
     seq BIGSERIAL PRIMARY KEY,
@@ -207,3 +231,40 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
     created_at TEXT NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}'
 );
+
+-- Persistent finding ledger with stable identity and explicit lifecycle.
+-- status: detected | under_investigation | confirmed | rejected |
+--         accepted_risk | fixed_unverified | resolved | reopened
+CREATE TABLE IF NOT EXISTS findings (
+    seq BIGSERIAL PRIMARY KEY,
+    finding_id TEXT UNIQUE NOT NULL,
+    fingerprint TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT '',
+    repository TEXT NOT NULL DEFAULT '',
+    deployment_id TEXT,
+    source TEXT NOT NULL,
+    rule_id TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'unknown',
+    severity TEXT NOT NULL DEFAULT 'medium',
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    path TEXT,
+    line INTEGER,
+    message TEXT NOT NULL DEFAULT '',
+    explanation TEXT,
+    remediation TEXT,
+    status TEXT NOT NULL DEFAULT 'detected',
+    verification_status TEXT NOT NULL DEFAULT 'unverified',
+    first_seen_sha TEXT,
+    last_seen_sha TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    history_json TEXT NOT NULL DEFAULT '[]',
+    is_demo INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (project_id, repository, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_project_status
+    ON findings (project_id, status);
+CREATE INDEX IF NOT EXISTS idx_findings_deployment
+    ON findings (deployment_id);

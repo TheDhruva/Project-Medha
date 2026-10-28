@@ -7,8 +7,11 @@ Design rules (Phase D):
   unparseable output is "failed". Callers must not treat either as "no issues".
 - No shell: argv is passed as a list with ``shell=False`` (no injection).
 - No secret exfiltration: gitleaks match/secret fields are dropped from
-  findings, so raw secrets never leave this module.
-- Stdlib only: no new runtime dependency is introduced.
+  findings, so raw secrets never leave this module. Tool messages are
+  additionally passed through the shared redaction filter, because some
+  tools echo matched file content into their message field.
+- Subprocess execution only: the module itself uses the standard library;
+  it shares the project's existing redaction helper (also stdlib).
 """
 from __future__ import annotations
 
@@ -19,6 +22,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from app.ai.redact import redact_text
 
 DEFAULT_TIMEOUT_S = 120.0
 
@@ -136,7 +141,11 @@ _SCANNERS: dict[str, _Spec] = {
     ),
     "semgrep": _Spec(
         "semgrep",
-        lambda exe, target: [exe, "--json", "--quiet", target],
+        # A config is mandatory for modern semgrep; without it the CLI exits
+        # before scanning. "auto" resolves the maintained registry ruleset.
+        lambda exe, target: [
+            exe, "scan", "--config", "auto", "--json", "--quiet", target,
+        ],
         _norm_semgrep,
     ),
     "trivy": _Spec(
@@ -219,6 +228,11 @@ def run_scanner(
             message=f"unparseable output: {exc}",
             duration_s=duration,
         )
+
+    # Tool messages may embed matched file content: redact before the
+    # findings leave this module (they flow to API payloads and the UI).
+    for finding in findings:
+        finding.message = redact_text(finding.message, max_len=500)
 
     if findings:
         return ScannerResult(

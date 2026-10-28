@@ -37,6 +37,7 @@ from app.database.repositories import (
     DeploymentRepository,
     ProjectRepository,
     ProposalRepository,
+    PullRequestRepository,
 )
 from app.models.deployment import DeploymentRecord, ProjectRecord, ProposalRecord
 from app.workflow.planning import _plan_hash, schedule_planning_pipeline
@@ -88,6 +89,111 @@ def verify_github_signature(body: bytes, signature: str, secret: str) -> bool:
         return hmac.compare_digest(expected, signature)
     except TypeError:
         return False
+
+
+# PR actions that can change what should be assessed or merged. Everything
+# else (labeled, edited, closed, ...) is recorded and ignored.
+_PR_ACTIONS = frozenset(
+    {"opened", "synchronize", "reopened", "ready_for_review"}
+)
+
+
+def _parse_pull_request(payload: dict) -> tuple[dict | None, str]:
+    """Extract base/head/number from a signed pull_request payload.
+
+    Returns ``(info, reason)``; ``info`` is None when the event cannot be
+    assessed (missing refs, fork head, unsupported action) — the caller
+    records the exact reason instead of guessing.
+    """
+    import re as _re
+
+    pr = payload.get("pull_request")
+    if not isinstance(pr, dict):
+        return None, "missing pull_request object"
+    action = str(payload.get("action") or "")
+    if action not in _PR_ACTIONS:
+        return None, f"action '{action}' does not change merge state"
+    number = payload.get("number")
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        return None, "missing pull request number"
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    repo_obj = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
+    base_ref = str(base.get("ref") or "").strip()
+    base_sha = str(base.get("sha") or "").strip().lower()
+    head_ref = str(head.get("ref") or "").strip()
+    head_sha = str(head.get("sha") or "").strip().lower()
+    base_full = str(
+        base_repo.get("full_name") or repo_obj.get("full_name") or ""
+    ).lower()
+    head_full = str(head_repo.get("full_name") or "").lower()
+    if not base_ref:
+        return None, "missing base branch"
+    if not _re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        return None, "missing base commit SHA"
+    if not _re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        return None, "missing head commit SHA"
+    if not head_full:
+        return None, "head repository unavailable (deleted fork?)"
+    if base_full and head_full != base_full:
+        return None, "pull requests from fork heads are not supported in V1"
+    return {
+        "number": number,
+        "action": action,
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+        "head_ref": head_ref,
+        "head_sha": head_sha,
+        "state": str(pr.get("state") or "open"),
+        "title": str(pr.get("title") or "")[:200],
+    }, ""
+
+
+def _reuse_assessment(
+    project_id: str | None, sha: str, base_sha: str | None = None
+) -> dict | None:
+    """Find a completed assessment of the exact same commit for a project.
+
+    Same repository + same base/head means the same inputs: analysis is
+    only reused when it COMPLETED (a failed or partial run never satisfies
+    a re-delivery or a force-push back to an already-assessed commit).
+    """
+    if not project_id:
+        return None
+    try:
+        records, _ = DeploymentRepository().list(project_id=project_id, limit=50)
+    except Exception:  # noqa: BLE001 - reuse is an optimization
+        return None
+    for record in records:
+        if record.target_revision != sha:
+            continue
+        if (record.base_revision or None) != (base_sha or None):
+            continue
+        result = record.result if isinstance(record.result, dict) else {}
+        if result.get("analysis_status") != "completed":
+            continue
+        if record.status not in (
+            DeploymentStatus.AWAITING_APPROVAL,
+            DeploymentStatus.COMPLETED,
+            DeploymentStatus.PARTIAL_RECOVERY,
+        ):
+            continue
+        try:
+            proposal = proposals.get_by_deployment(record.deployment_id)
+        except Exception:  # noqa: BLE001
+            proposal = None
+        if proposal is None:
+            continue
+        return {
+            "proposal_id": proposal.proposal_id,
+            "deployment_id": record.deployment_id,
+            "reused": "true",
+        }
+    return None
 
 
 def _settle_proposal(proposal_id: str, deployment_id: str, task) -> None:
@@ -161,21 +267,55 @@ async def github_webhook(request: Request):
     if isinstance(repo_obj, dict):
         repository = str(repo_obj.get("full_name") or "").strip()
     ref = str(payload.get("ref") or "")
-    push = summarize_push(payload)
-    sha = push.get("target_sha") or ""
-    base_sha = push.get("base_sha")
-    deleted = bool(push.get("deleted"))
     now = utc_now_iso()
+    pr_info: dict | None = None
 
-    if event != "push":
+    if event not in ("push", "pull_request"):
         proposals.record_delivery(
             delivery_id=delivery_id, repository=repository, ref=ref or None,
-            sha=sha or None, event=event or "unknown",
-            status="ignored", received_at=now, note="non-push event",
+            sha=None, event=event or "unknown",
+            status="ignored", received_at=now, note="unsupported event",
         )
-        return JSONResponse({"status": "ignored", "reason": "non-push event"})
+        return JSONResponse({"status": "ignored", "reason": "unsupported event"})
 
-    branch = ref.split("/")[-1] if ref.startswith("refs/heads/") else ""
+    if event == "pull_request":
+        pr_info, reason = _parse_pull_request(payload)
+        if pr_info is None:
+            proposals.record_delivery(
+                delivery_id=delivery_id, repository=repository, ref=None,
+                sha=None, event=event, status="ignored",
+                received_at=now, note=f"pull_request: {reason}",
+            )
+            return JSONResponse({"status": "ignored", "reason": reason})
+        # The base (target) branch is what gets watched and compared
+        # against; the assessed commit is the PR head.
+        branch = pr_info["base_ref"]
+        ref = f"refs/heads/{branch}"
+        sha = pr_info["head_sha"]
+        base_sha = pr_info["base_sha"]
+        deleted = False
+        # Push-shaped evidence for the pipeline: pull_request payloads carry
+        # no file list, so the exact-SHA checkout derives the diff.
+        push = {
+            "deleted": False,
+            "base_sha": base_sha,
+            "target_sha": sha,
+            "commit_count": 0,
+            "commits_truncated": False,
+            "commits": [],
+            "files": [],
+            "files_truncated": False,
+            "source": "pull_request",
+            "pr_number": pr_info["number"],
+            "pr_action": pr_info["action"],
+            "head_ref": pr_info["head_ref"],
+        }
+    else:
+        push = summarize_push(payload)
+        sha = push.get("target_sha") or ""
+        base_sha = push.get("base_sha")
+        deleted = bool(push.get("deleted"))
+        branch = ref.split("/")[-1] if ref.startswith("refs/heads/") else ""
     if deleted:
         proposals.record_delivery(
             delivery_id=delivery_id, repository=repository, ref=ref or None,
@@ -240,6 +380,26 @@ async def github_webhook(request: Request):
     repository_url = f"https://github.com/{repository}.git"
     started: list[dict[str, str]] = []
     for target in targets:
+        # PR state is recorded before analysis so the dashboard reflects the
+        # webhook even when analysis is later reused or fails.
+        if pr_info is not None and target is not None:
+            try:
+                PullRequestRepository().upsert(
+                    project_id=target.project_id,
+                    repository=repository.lower(),
+                    number=pr_info["number"],
+                    base_ref=pr_info["base_ref"],
+                    base_sha=pr_info["base_sha"],
+                    head_ref=pr_info["head_ref"],
+                    head_sha=pr_info["head_sha"],
+                    state=pr_info["state"],
+                    at=now,
+                )
+            except Exception as exc:  # noqa: BLE001 - bookkeeping must not 500
+                logger.warning(
+                    "Pull request upsert failed repo=%s: %s",
+                    repository, type(exc).__name__,
+                )
         outcome = await _start_proposal_analysis(
             delivery_id=delivery_id,
             repository=repository,
@@ -252,6 +412,7 @@ async def github_webhook(request: Request):
             push=push,
             project=target,
             now=now,
+            pr=pr_info,
         )
         if outcome is None:
             for done in started:
@@ -263,8 +424,10 @@ async def github_webhook(request: Request):
     if len(started) == 1:
         single = started[0]
         return JSONResponse(
-            {"status": "analyzing", "proposal_id": single["proposal_id"],
-             "deployment_id": single["deployment_id"]},
+            {"status": "reused" if single.get("reused") == "true" else "analyzing",
+             "proposal_id": single["proposal_id"],
+             "deployment_id": single["deployment_id"],
+             **({"reused": True} if single.get("reused") == "true" else {})},
             status_code=202,
         )
     return JSONResponse({"status": "analyzing", "proposals": started}, status_code=202)
@@ -281,8 +444,25 @@ async def _start_proposal_analysis(
     push: dict,
     project: ProjectRecord | None,
     now: str,
+    pr: dict | None = None,
 ) -> dict[str, str] | None:
-    """Persist one proposal + plan-only run for a (repo, project) target."""
+    """Persist one proposal + plan-only run for a (repo, project) target.
+
+    Same repo + same base/head already assessed (completed) is reused — a
+    re-delivery or force-push back to an assessed commit never triggers a
+    redundant scan. The pull-request row itself is upserted by the caller
+    before this check, so PR state stays current even when analysis is
+    reused.
+    """
+    project_id = project.project_id if project is not None else None
+    existing = _reuse_assessment(project_id, sha, base_sha)
+    if existing is not None:
+        logger.info(
+            "Reusing assessment repo=%s sha=%.12s deployment=%s",
+            repository, sha, existing["deployment_id"],
+        )
+        return existing
+
     proposal_id = f"prp_{uuid4().hex[:16]}"
     deployment_id = f"dep_{uuid4().hex[:16]}"
     proposal = ProposalRecord(
@@ -316,9 +496,14 @@ async def _start_proposal_analysis(
         scenario=None,
         target_host="localhost",
         target_port=8080,
-        intent=f"GitHub push to {branch} ({sha[:8]})",
+        intent=(
+            f"GitHub pull request #{pr['number']} to {branch} ({sha[:8]})"
+            if pr is not None
+            else f"GitHub push to {branch} ({sha[:8]})"
+        ),
         base_revision=base_sha,
         target_revision=sha,
+        pr_number=int(pr["number"]) if pr is not None else None,
         status=DeploymentStatus.STARTED,
         current_stage=None,
         explain_simple="Push received. Analysis started; execution waits for approval.",

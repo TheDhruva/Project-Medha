@@ -252,6 +252,78 @@ def _clamp_timeout(value: float, default: float) -> float:
     return max(1.0, min(parsed, 3600.0))
 
 
+def _changed_paths_for_scan(
+    checkout: Any,
+    base_sha: str | None,
+    target_sha: str | None,
+    push: dict[str, Any] | None,
+) -> tuple[list[str] | None, bool, str]:
+    """Changed paths for incremental scan planning.
+
+    Source priority: verified webhook payload files (no git needed), then a
+    merge-base diff inside the checkout (pull requests carry no file list),
+    then ``None`` (unknown changeset → the caller must plan a full scan).
+    Returns ``(paths, truncated, source)``.
+    """
+    push = push if isinstance(push, dict) else {}
+    files = [f for f in (push.get("files") or []) if isinstance(f, dict)]
+    paths = [str(f.get("path") or "") for f in files if f.get("path")]
+    if paths:
+        truncated = bool(
+            push.get("files_truncated") or push.get("commits_truncated")
+        )
+        return paths, truncated, "webhook payload"
+    if not base_sha or not target_sha:
+        return None, False, "no base/head revisions available"
+    if checkout is None:
+        return None, False, "no checkout available"
+    try:
+        from app.changeintel.git_extract import ChangeIntelError, _run_git
+        from app.changeintel.push_intel import _ensure_base_commit
+
+        checkout = Path(checkout)
+        if not _ensure_base_commit(checkout, base_sha):
+            return None, False, "base commit unavailable in checkout"
+        # Three-dot semantics: diff from the merge base so unrelated base
+        # movement never appears as part of this change.
+        try:
+            merge_base = _run_git(
+                checkout, "merge-base", base_sha, target_sha
+            ).strip()
+        except ChangeIntelError:
+            merge_base = base_sha
+        output = _run_git(
+            checkout, "diff", "--name-only", f"{merge_base}..{target_sha}"
+        )
+        changed = [line.strip() for line in output.splitlines() if line.strip()]
+        return (changed or None), False, f"git diff {merge_base[:8]}..{target_sha[:8]}"
+    except Exception as exc:  # noqa: BLE001 - unknown changeset → full scan
+        return None, False, f"changeset unavailable ({type(exc).__name__})"
+
+
+def _resolve_merge_base(checkout: Path, base_sha: str, target_sha: str) -> str | None:
+    """Merge base for a pull-request comparison inside the checkout.
+
+    Three-dot semantics: ``git merge-base base head`` so unrelated movement
+    of the base branch never counts as part of the pull request. Falls back
+    to the payload base sha when the merge base is unreadable; None when
+    even the base commit cannot be fetched.
+    """
+    try:
+        from app.changeintel.git_extract import ChangeIntelError, _run_git
+        from app.changeintel.push_intel import _ensure_base_commit
+
+        if not _ensure_base_commit(checkout, base_sha):
+            return None
+        try:
+            value = _run_git(checkout, "merge-base", base_sha, target_sha).strip()
+        except ChangeIntelError:
+            return base_sha
+        return value or base_sha
+    except Exception:  # noqa: BLE001 - advisory resolution
+        return None
+
+
 class PlanningPipeline:
     """Phases 4–11 real path (local only; Docker mutate opt-in)."""
 
@@ -262,6 +334,9 @@ class PlanningPipeline:
         self.tracker = StageTracker()
         self.stage_timings: dict[str, float] = {}
         self._pipeline_t0 = 0.0
+        # Last stage the pipeline reported it was working in; used to
+        # attribute an unexpected top-level failure to a stage.
+        self._active_stage: str | None = None
 
     # -- cancellation + terminal handling ------------------------------------
 
@@ -370,6 +445,7 @@ class PlanningPipeline:
         self._pipeline_t0 = pipeline_t0
         self.tracker = StageTracker()
         self.stage_timings = {}
+        self._active_stage = None
         # Comprehensive repository inventory (set after ANALYSIS; advisory).
         self._repository_analysis: dict | None = None
         # Immutable SHA bound before analysis; reused for late failure
@@ -565,6 +641,7 @@ class PlanningPipeline:
                         "Cannot verify repository access: "
                         f"{exc.message} Run a verification check first, or use a local path.",
                         technical=f"git.{exc.code}",
+                        failure=exc.to_diagnostics(),
                     )
                     return
                 await self._emit(
@@ -610,9 +687,8 @@ class PlanningPipeline:
                 except TimeoutError:
                     # __exit__ has not run yet, so elapsed is unset — measure
                     # from t0 directly for an honest timeout duration.
-                    self._record_timing(
-                        "acquire", time.perf_counter() - acquire_timer.t0
-                    )
+                    elapsed_s = time.perf_counter() - acquire_timer.t0
+                    self._record_timing("acquire", elapsed_s)
                     # The detached thread may still finish late; its result is
                     # dropped above, so remove any partial clone it leaves.
                     try:
@@ -623,6 +699,12 @@ class PlanningPipeline:
                         deployment_id,
                         "Repository acquisition timed out; the run fails closed.",
                         technical="TIMEOUT:acquire",
+                        failure={
+                            "code": "TIMEOUT:acquire",
+                            "category": "timeout",
+                            "operation": "clone",
+                            "duration_seconds": round(elapsed_s, 3),
+                        },
                     )
                     return
             self._record_timing("acquire", acquire_timer.elapsed)
@@ -828,15 +910,62 @@ class PlanningPipeline:
             # every outcome so the analysis report survives even when
             # deployment is blocked on an explicit target. Never raises.
             effective_target = deploy_target or profile.inferred_stack.selected_target
+            inventory_commit = acquisition.checked_sha or resolved_sha
+            # Incremental scan planning: pick external scanners from the
+            # changeset (fallback: full scan). Never fails the analysis.
             try:
+                scan_plan = await self._plan_scan(
+                    deployment_id=deployment_id,
+                    record=record,
+                    checkout=acquisition.path,
+                    base_sha=record.base_revision,
+                    target_sha=inventory_commit,
+                )
+            except Exception as exc:  # noqa: BLE001 - plan is advisory
+                logger.warning(
+                    "Scan planning failed deployment_id=%s: %s",
+                    deployment_id, type(exc).__name__,
+                )
+                from app.analysis.selection import ScanPlan
+
+                scan_plan = ScanPlan(
+                    mode="full",
+                    reasons=[f"scan planning failed: {type(exc).__name__}"],
+                )
+            try:
+                from app.analysis.cache import (
+                    inventory_cache_key,
+                    load_inventory,
+                    store_inventory,
+                )
                 from app.analysis.inventory import build_repository_inventory
 
-                repository_analysis = await asyncio.to_thread(
-                    build_repository_inventory,
-                    acquisition.path,
-                    commit_sha=acquisition.checked_sha or resolved_sha,
+                # Reuse a prior inventory only when the commit, target,
+                # scanner configuration and installed tool binaries all match.
+                # Key inputs mirror build_repository_inventory's defaults;
+                # scanner_names reflects the incremental plan.
+                cache_key = inventory_cache_key(
+                    commit_sha=inventory_commit,
                     selected_target=effective_target,
+                    scan_security=True,
+                    scanner_names=scan_plan.scanner_names,
+                    scanner_timeout_s=120.0,
                 )
+                repository_analysis = load_inventory(cache_key)
+                if repository_analysis is None:
+                    repository_analysis = await asyncio.to_thread(
+                        build_repository_inventory,
+                        acquisition.path,
+                        commit_sha=inventory_commit,
+                        selected_target=effective_target,
+                        scanner_names=scan_plan.scanner_names,
+                    )
+                    store_inventory(
+                        cache_key,
+                        repository_analysis,
+                        project_id=record.project_id,
+                        target_sha=inventory_commit or "",
+                    )
             except Exception as exc:  # noqa: BLE001 - analysis is advisory to the run
                 logger.warning(
                     "Repository inventory failed deployment_id=%s: %s",
@@ -860,6 +989,26 @@ class PlanningPipeline:
                     else "no immutable revision bound (local checkout without git history)"
                 ),
             }
+            # Honest coverage bookkeeping for the scan plan actually used:
+            # mode, why, and which scanners were deliberately skipped.
+            try:
+                cov = repository_analysis.setdefault("coverage", {})
+                gaps = cov.setdefault("gaps", [])
+                cov["scan_mode"] = scan_plan.mode
+                cov["scan_reasons"] = list(scan_plan.reasons)
+                cov["authorization_touched"] = bool(
+                    scan_plan.authorization_touched
+                )
+                if scan_plan.mode == "incremental":
+                    for _name in scan_plan.skipped:
+                        _note = (
+                            f"incremental: external scanner '{_name}' not run "
+                            "(changeset not relevant to it)"
+                        )
+                        if _note not in gaps:
+                            gaps.append(_note)
+            except Exception:  # noqa: BLE001 - bookkeeping only
+                pass
             # Compact repository summary for the overview header. Reuses the
             # already-budgeted repo_interpretation note; deterministic fallback
             # keeps this working with AI disabled. Failure only omits the
@@ -882,6 +1031,67 @@ class PlanningPipeline:
                     deployment_id, type(exc).__name__,
                 )
             self._repository_analysis = repository_analysis
+
+            # Cross-run finding ledger: stable IDs, dedup, explicit lifecycle.
+            # Advisory — a ledger problem never fails the run. Absence marking
+            # only applies to checks that actually completed in this scan.
+            try:
+                from app.database.repositories import FindingRepository
+
+                active_sources: set[str] = set()
+                for t in repository_analysis.get("tasks") or []:
+                    name = str(t.get("task") or "")
+                    if not name.startswith("security:"):
+                        continue
+                    if t.get("status") not in {"succeeded", "completed_with_findings"}:
+                        continue
+                    sub = name.split(":", 1)[1]
+                    active_sources.add(
+                        "builtin" if sub == "builtin" else f"scanner:{sub}"
+                    )
+                FindingRepository(db_path=self.repo.db_path).sync_scan(
+                    project_id=record.project_id or "",
+                    repository=record.repository_url,
+                    deployment_id=deployment_id,
+                    commit_sha=inventory_commit,
+                    findings=repository_analysis.get("findings") or [],
+                    active_sources=active_sources,
+                    scanned_at=utc_now_iso(),
+                    is_demo=bool(record.is_demo),
+                )
+            except Exception as exc:  # noqa: BLE001 - ledger is advisory
+                logger.warning(
+                    "Finding ledger sync failed deployment_id=%s: %s",
+                    deployment_id, type(exc).__name__,
+                )
+
+            # Baseline + rescan progress: the first COMPLETED assessment
+            # records the baseline commit; a full scan with real security
+            # coverage advances the periodic-rescan clock. Advisory only.
+            if (
+                record.project_id
+                and repository_analysis.get("analysis_status") == "completed"
+            ):
+                try:
+                    from app.database.repositories import ProjectRepository
+
+                    _coverage = repository_analysis.get("coverage") or {}
+                    ProjectRepository(db_path=self.repo.db_path).update_scan_state(
+                        record.project_id,
+                        baseline_sha=inventory_commit,
+                        baseline_at=utc_now_iso(),
+                        full_scan=bool(
+                            scan_plan.full
+                            and _coverage.get("security_scan")
+                            in {"complete", "partial"}
+                        ),
+                        at=utc_now_iso(),
+                    )
+                except Exception as exc:  # noqa: BLE001 - bookkeeping
+                    logger.warning(
+                        "Baseline update failed deployment_id=%s: %s",
+                        deployment_id, type(exc).__name__,
+                    )
 
             support = assess_plan_support(profile, selected_target=deploy_target)
             if not support.supported:
@@ -1277,10 +1487,112 @@ class PlanningPipeline:
                 time.perf_counter() - pipeline_t0,
             )
         except GitAcquireError as exc:
-            await self._fail(deployment_id, exc.message, technical=f"git.{exc.code}")
-        except Exception as exc:  # noqa: BLE001
+            # The revision was resolved (ls-remote) before acquisition: keep it
+            # on the failure record so the run never reads "Revision Unknown".
+            if self._resolved_sha is None:
+                try:
+                    self._resolved_sha = resolved_sha
+                except UnboundLocalError:
+                    pass
+            await self._fail(
+                deployment_id,
+                exc.message,
+                technical=f"git.{exc.code}",
+                failure=exc.to_diagnostics(),
+            )
+        except asyncio.CancelledError:
+            # Task-level cancellation (worker shutdown, timeout wrappers) must
+            # never leave the run stuck in a non-terminal state — the dashboard
+            # would show a false active run. _fail drops this when the cancel
+            # endpoint already recorded terminal CANCELLED (cancellation wins).
+            stage = getattr(self, "_active_stage", None) or "unknown"
+            logger.warning(
+                "Planning pipeline cancelled deployment_id=%s stage=%s",
+                deployment_id, stage,
+            )
+            try:
+                await self._fail(
+                    deployment_id,
+                    f"Run interrupted during the {stage} stage; "
+                    "remaining stages skipped.",
+                    technical=f"PIPELINE_CANCELLED · stage={stage}",
+                    result={
+                        "kind": "failed",
+                        "title": "PIPELINE_CANCELLED",
+                        "final_status": "failed",
+                        "message": (
+                            "Run interrupted during the "
+                            f"{stage} stage; remaining stages skipped."
+                        ),
+                        "durationLabel": stage.lower(),
+                        "servicesLabel": "n/a",
+                        "verificationScore": None,
+                        "constraintsResolved": 0,
+                        "rollbackScope": None,
+                        "phase": PHASE_LABEL,
+                        "is_demo": False,
+                        "code": "PIPELINE_CANCELLED",
+                        "failed_stage": stage,
+                        "deployment_id": deployment_id,
+                    },
+                )
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Cancellation re-raised while persisting interruption "
+                    "deployment_id=%s",
+                    deployment_id,
+                )
+                raise
+            except Exception:  # noqa: BLE001 - never mask the cancellation
+                logger.exception(
+                    "Interrupted-run diagnostics could not be persisted "
+                    "deployment_id=%s",
+                    deployment_id,
+                )
+            raise
+        except Exception as exc:  # noqa: BLE001 - last-resort diagnostic boundary
+            # Unexpected exceptions must become persisted terminal failures —
+            # never orphaned runs. The full traceback stays server-side; the
+            # stored result records run id, failing stage, stable code, and a
+            # concise user-facing message.
             logger.exception("Planning pipeline failed deployment_id=%s", deployment_id)
-            await self._fail(deployment_id, str(exc), technical=type(exc).__name__)
+            stage = getattr(self, "_active_stage", None) or "unknown"
+            detail = next(
+                (line.strip() for line in str(exc).splitlines() if line.strip()),
+                type(exc).__name__,
+            )[:300]
+            message = f"Unexpected error during the {stage} stage: {detail}"
+            try:
+                await self._fail(
+                    deployment_id,
+                    message,
+                    technical=(
+                        f"PIPELINE_ERROR · stage={stage} · error={type(exc).__name__}"
+                    ),
+                    result={
+                        "kind": "failed",
+                        "title": "PIPELINE_ERROR",
+                        "final_status": "failed",
+                        "message": message,
+                        "durationLabel": stage.lower(),
+                        "servicesLabel": "n/a",
+                        "verificationScore": None,
+                        "constraintsResolved": 0,
+                        "rollbackScope": None,
+                        "phase": PHASE_LABEL,
+                        "is_demo": False,
+                        "code": "PIPELINE_ERROR",
+                        "failed_stage": stage,
+                        "error_type": type(exc).__name__,
+                        "deployment_id": deployment_id,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - never mask the original failure
+                logger.exception(
+                    "Failure diagnostics could not be persisted deployment_id=%s",
+                    deployment_id,
+                )
+                raise exc from None
         finally:
             release_real_deploy(deployment_id)
             run_control.clear_run(deployment_id)
@@ -1459,6 +1771,54 @@ class PlanningPipeline:
                 deployment_id, ai=summary, updated_at=utc_now_iso()
             )
 
+    async def _plan_scan(
+        self,
+        *,
+        deployment_id: str,
+        record,
+        checkout: Any,
+        base_sha: str | None,
+        target_sha: str | None,
+    ):
+        """Incremental-vs-full scanner plan from the persisted changeset."""
+        from app.analysis.selection import plan_scan
+        from app.core.events import utc_now_iso as _iso
+        from app.database.repositories import (
+            ProjectRepository,
+            ProposalRepository,
+        )
+
+        proposal = None
+        try:
+            proposal = ProposalRepository(db_path=self.repo.db_path).get_by_deployment(
+                deployment_id
+            )
+        except Exception:  # noqa: BLE001 - plan falls back to full
+            proposal = None
+        push = proposal.push if proposal is not None else None
+        paths, truncated, source = _changed_paths_for_scan(
+            checkout, base_sha, target_sha, push
+        )
+        last_full = None
+        if record.project_id:
+            project = ProjectRepository(db_path=self.repo.db_path).get(
+                record.project_id
+            )
+            if project is not None:
+                last_full = project.last_full_scan_at
+        plan = plan_scan(
+            paths,
+            last_full_scan_at=last_full,
+            truncated=truncated,
+            now=_iso(),
+        )
+        plan.reasons.append(f"changeset source: {source}")
+        logger.info(
+            "Scan plan deployment_id=%s mode=%s scanners=%s source=%s",
+            deployment_id, plan.mode, plan.scanner_names, source,
+        )
+        return plan
+
     async def _run_change_intel(self, deployment_id: str, record, settings, delay: float):
         """Phase 2/2b: deterministic change-impact analysis.
 
@@ -1589,7 +1949,10 @@ class PlanningPipeline:
             proposal = None
         push = (proposal.push if proposal is not None else None) or {}
         files = push.get("files") if isinstance(push.get("files"), list) else []
-        if not files:
+        # Pull-request payloads carry no file list: the exact-SHA checkout
+        # produces the diff (merge-base aware), so an empty list is expected.
+        is_pull_request = str(push.get("source") or "") == "pull_request"
+        if not files and not is_pull_request:
             await self._emit(
                 deployment_id,
                 EventType.SYSTEM_MESSAGE,
@@ -1615,11 +1978,20 @@ class PlanningPipeline:
                 },
             )
             return None
+        # Pull requests compare from the merge base (three-dot diff), not
+        # the current base-branch tip.
+        diff_base = record.base_revision
+        if is_pull_request and record.base_revision and target_sha:
+            resolved_base = await asyncio.to_thread(
+                _resolve_merge_base, checkout, record.base_revision, target_sha
+            )
+            if resolved_base:
+                diff_base = resolved_base
         try:
             info = await asyncio.to_thread(
                 analyze_push_checkout,
                 repository_url=record.repository_url,
-                base_sha=record.base_revision,
+                base_sha=diff_base,
                 target_sha=target_sha,
                 files=files,
                 checkout_path=checkout,
@@ -3477,6 +3849,13 @@ class PlanningPipeline:
             "phase": PHASE_LABEL,
             "is_demo": False,
         }
+        # Keep the revision-scoped analysis report on the run: the runs
+        # view, assessment summary and merge policy all read it from
+        # result.repository_analysis (this payload must not drop it).
+        analysis = getattr(self, "_repository_analysis", None)
+        if isinstance(analysis, dict) and analysis:
+            result["analysis_status"] = analysis.get("analysis_status")
+            result["repository_analysis"] = analysis
         self.repo.save_artifacts(
             deployment_id, result=result, updated_at=utc_now_iso()
         )
@@ -3526,6 +3905,8 @@ class PlanningPipeline:
         technical: str,
         error: str | None = None,
     ) -> None:
+        if stage is not None:
+            self._active_stage = stage.value
         self.repo.update_status(
             deployment_id,
             status=status,
@@ -3627,6 +4008,126 @@ class PlanningPipeline:
             include_agents=True,
         )
 
+    # UI phase model (see frontend executionPhases.ts): backend stages map
+    # onto the six user-facing phases; AGENTS folds into Analyze.
+    _PHASE_ORDER = ("preflight", "analyze", "plan", "cnp", "verify", "execute")
+    _PHASE_OF_STAGE = {
+        "PREFLIGHT": "preflight",
+        "ANALYZE": "analyze",
+        "AGENTS": "analyze",
+        "PLAN": "plan",
+        "NEGOTIATE": "cnp",
+        "VERIFY": "verify",
+        "EXECUTE": "execute",
+    }
+    _PHASE_AGENTS = {
+        "preflight": ("preflight",),
+        "analyze": ("analyzer", "docker", "nginx", "security"),
+        "cnp": ("mediator",),
+        "verify": ("verifier", "critic"),
+        "execute": ("executor",),
+    }
+    # Codes that mean "analysis produced results; deployment was blocked by
+    # configuration or target selection" — later phases were never reached,
+    # not failed. Mirrors the frontend CONFIG_BLOCK_CODES /
+    # DEPLOYMENT_BLOCKED_CODES sets (single vocabulary, both sides).
+    _ANALYSIS_COMPLETE_BLOCKS = frozenset({
+        "MULTIPLE_APPS_REQUIRE_TARGET", "NO_DEPLOYABLE_APP",
+        "INVALID_DEPLOYMENT_TARGET", "AMBIGUOUS_DEPLOY_TARGET",
+        "DEPLOYMENT_UNSUPPORTED", "NO_TARGET_CANDIDATES", "PLAN_REQUIRES_REVIEW",
+    })
+    _EXECUTION_NOT_CONFIGURED = frozenset({
+        "EXECUTION_NOT_CONFIGURED", "EXECUTION_DISABLED",
+        "EXECUTION_DISABLED_HOSTED", "REAL_EXECUTION_NOT_ENABLED",
+        "REAL_BUILDER_UNAVAILABLE",
+    })
+
+    def _terminal_phases(self, code: str | None, message: str = "") -> list[dict]:
+        """Authoritative terminal phase snapshot for a failed run.
+
+        Distinguishes the phase that actually failed from phases that never
+        started (blocked by their failed prerequisite). Derived from the real
+        stage tracker plus the stage that was active at failure — never from
+        guesswork. Empty list when no failure point can be established.
+        """
+        bare_code = (code or "").removeprefix("git.").strip()
+        tracker = getattr(self, "tracker", None)
+        agent_status: dict[str, str] = {}
+        if tracker is not None:
+            agent_status = {row["id"]: row["status"] for row in tracker.snapshot()}
+
+        def _phase_done(phase: str) -> bool:
+            agents = self._PHASE_AGENTS.get(phase, ())
+            if not agents:
+                return False  # PLAN has no dedicated agent; stage events rule
+            return any(agent_status.get(a) == "complete" for a in agents)
+
+        def _phase_broken(phase: str) -> bool:
+            agents = self._PHASE_AGENTS.get(phase, ())
+            return any(
+                agent_status.get(a) in {"failed", "timed_out"} for a in agents
+            )
+
+        active = getattr(self, "_active_stage", None)
+        failed_idx = (
+            self._PHASE_ORDER.index(self._PHASE_OF_STAGE[active])
+            if active in self._PHASE_OF_STAGE
+            else None
+        )
+
+        # Configuration/target blocks: analysis completed, later phases were
+        # never attempted — mark them skipped, not failed.
+        blocked_before: int | None = None
+        if bare_code in self._ANALYSIS_COMPLETE_BLOCKS:
+            failed_idx = None
+            blocked_before = self._PHASE_ORDER.index("analyze") + 1
+        elif bare_code in self._EXECUTION_NOT_CONFIGURED:
+            # The execute gate itself blocked the run: no phase "failed" —
+            # execution was never configured. Matches the frontend's
+            # CONFIG_BLOCK_CODES semantics (execute skipped, not failed).
+            failed_idx = None
+            blocked_before = self._PHASE_ORDER.index("execute")
+        else:
+            blocked_before = None
+
+        # Fallback when the active stage carries no phase (or was reset to
+        # COMPLETE): the tracker's real agent failures identify the phase.
+        if failed_idx is None and blocked_before is None:
+            for phase in self._PHASE_ORDER:
+                if _phase_broken(phase):
+                    failed_idx = self._PHASE_ORDER.index(phase)
+                    break
+
+        phases: list[dict] = []
+        for idx, phase in enumerate(self._PHASE_ORDER):
+            if failed_idx is None and blocked_before is not None and idx >= blocked_before:
+                phases.append({
+                    "id": phase,
+                    "status": "skipped",
+                    "reason": f"Deployment blocked ({bare_code or 'blocked'}); phase not attempted.",
+                })
+            elif failed_idx is not None and idx == failed_idx:
+                phases.append({
+                    "id": phase,
+                    "status": "failed",
+                    "reason": (message or "Phase failed.")[:200],
+                })
+            elif failed_idx is not None and idx > failed_idx:
+                phases.append({
+                    "id": phase,
+                    "status": "blocked",
+                    "reason": f"Prerequisite phase '{self._PHASE_ORDER[failed_idx]}' failed.",
+                })
+            elif (failed_idx is not None and idx < failed_idx) or (
+                # Reaching a later gate is proof every prior phase completed,
+                # even phases with no dedicated agent (PLAN) to attest it.
+                blocked_before is not None and idx < blocked_before
+            ) or _phase_done(phase):
+                phases.append({"id": phase, "status": "completed", "reason": None})
+            else:
+                phases.append({"id": phase, "status": "pending", "reason": None})
+        return phases
+
     async def _fail(
         self,
         deployment_id: str,
@@ -3634,6 +4135,7 @@ class PlanningPipeline:
         *,
         technical: str,
         result: dict | None = None,
+        failure: dict | None = None,
     ) -> None:
         # Late-result guard: a cancelled/completed run must never be flipped
         # to failed by a racing stage (cancellation always wins the race).
@@ -3668,6 +4170,7 @@ class PlanningPipeline:
         payload.setdefault("message", message)
         payload.setdefault("phase", PHASE_LABEL)
         payload.setdefault("code", technical)
+        payload.setdefault("deployment_id", deployment_id)
         payload.setdefault("timings", self._result_timings())
         # Preserve repository-analysis provenance on a late failure (e.g. the
         # execute stage): a genuine failure must never hide what analysis
@@ -3682,6 +4185,19 @@ class PlanningPipeline:
         tracker = getattr(self, "tracker", None)
         if tracker is not None:
             tracker.fail_remaining(error=message[:200])
+        # Structured failure record + authoritative terminal phase snapshot,
+        # persisted with the result (kept separate from raw event logs so the
+        # UI never parses free text to learn what failed and what never ran).
+        payload.setdefault("failed_stage", getattr(self, "_active_stage", None))
+        if failure and "failure" not in payload:
+            payload["failure"] = {
+                **failure,
+                "failed_stage": failure.get("stage") or payload.get("failed_stage"),
+            }
+        if "phases" not in payload:
+            phases = self._terminal_phases(technical, message)
+            if phases:
+                payload["phases"] = phases
         # Persist the failure result BEFORE flipping to the terminal status: the
         # post-terminal guard refuses result writes once the run is terminal,
         # so writing after update_status would drop this enriched payload

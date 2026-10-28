@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.core.enums import DeploymentStatus, EventType, ProposalStatus
+from app.core.enums import DeploymentStatus, EventType, ProposalStatus, StageId
 from app.core.events import make_event, utc_now_iso
 from app.core.logging import get_logger
 from app.database.connection import get_connection, resolve_backend, translate_sql
@@ -78,12 +78,19 @@ def reconcile_interrupted(db_path: Path | None = None) -> dict[str, int]:
         if orphaned:
             cursor = conn.execute(
                 _sql(
-                    "UPDATE deployments SET status = ?, error_summary = ?, "
-                    f"updated_at = ? WHERE status IN ({_placeholders(_ORPHAN_DEPLOYMENT_STATUSES)})",
+                    "UPDATE deployments SET status = ?, current_stage = ?, "
+                    "explain_simple = ?, explain_technical = ?, "
+                    "error_summary = ?, updated_at = ? "
+                    f"WHERE status IN ({_placeholders(_ORPHAN_DEPLOYMENT_STATUSES)})",
                     db_path,
                 ),
                 (
                     DeploymentStatus.FAILED.value,
+                    # Same terminal shape the pipeline's failure path records:
+                    # terminal status, COMPLETE stage, and one honest reason.
+                    StageId.COMPLETE.value,
+                    INTERRUPTED_ERROR,
+                    "recovery=startup_reconcile",
                     INTERRUPTED_ERROR,
                     now,
                     *_ORPHAN_DEPLOYMENT_STATUSES,

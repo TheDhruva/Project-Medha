@@ -1,5 +1,27 @@
 /** MEDHA shared UI types — used by demo fixtures, API event mapping, and live runs. */
 
+/** Structured failure diagnostics persisted with a failed run's result.
+ * Structural twin of the API client's RunFailureInfo (kept local to avoid
+ * an import cycle: client.ts imports from this module). */
+export interface RunFailureInfo {
+  code?: string | null;
+  category?: string | null;
+  stage?: string | null;
+  operation?: string | null;
+  failed_stage?: string | null;
+  exit_code?: number | null;
+  duration_seconds?: number | null;
+  stderr_tail?: string | null;
+  stdout_tail?: string | null;
+}
+
+/** Terminal phase snapshot entry persisted by the backend stage tracker. */
+export interface RunPhaseState {
+  id: string;
+  status: "completed" | "failed" | "blocked" | "skipped" | "running" | "pending";
+  reason?: string | null;
+}
+
 export type ScenarioId =
   | "SUCCESSFUL_DEPLOYMENT"
   | "PORT_CONFLICT"
@@ -372,6 +394,14 @@ export interface DeploymentResultView {
   rollbackScope: string | null;
   /** Structured failure/block code (e.g. MULTIPLE_APPS_REQUIRE_TARGET); absent on older payloads. */
   code?: string | null;
+  /** Structured failure diagnostics (category/operation/exit_code/tail); absent on older payloads. */
+  failure?: RunFailureInfo | null;
+  /** Authoritative terminal phase snapshot; absent on older payloads. */
+  phases?: RunPhaseState[] | null;
+  /** SHA the run was bound to before analysis; null when never resolved. */
+  target_sha?: string | null;
+  /** Stage that was active when the run failed; null when not recorded. */
+  failed_stage?: string | null;
   /** Target-selection detail for target-related blocks; absent otherwise. */
   target_selection?: TargetSelectionView | null;
   /** Analysis outcome, distinct from the (possibly blocked) deployment. */

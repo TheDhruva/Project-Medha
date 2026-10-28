@@ -1,6 +1,7 @@
 import type { RunLogLine, RunSummary } from "@/lib/api/client";
 import {
   CONFIG_BLOCK_CODES,
+  DEPLOYMENT_BLOCKED_CODES,
   type PipelineStage,
 } from "@/lib/projects/useProjectData";
 import { isRunningStatus } from "@/lib/projects/projects";
@@ -16,12 +17,20 @@ export const PIPELINE_PHASES = [
 
 export type PhaseId = (typeof PIPELINE_PHASES)[number]["id"];
 export type Phase = (typeof PIPELINE_PHASES)[number];
-export type VisualState = "completed" | "running" | "failed" | "waiting" | "skipped" | "unknown";
+export type VisualState =
+  | "completed"
+  | "running"
+  | "failed"
+  | "blocked"
+  | "waiting"
+  | "skipped"
+  | "unknown";
 
 export const STATE_LABEL: Record<VisualState, string> = {
   completed: "Completed",
   running: "Running",
   failed: "Failed",
+  blocked: "Blocked",
   waiting: "Waiting",
   skipped: "Skipped",
   unknown: "Unknown",
@@ -34,6 +43,7 @@ export const STATE_TONE: Record<
   completed: "success",
   running: "info",
   failed: "error",
+  blocked: "warning",
   waiting: "neutral",
   skipped: "neutral",
   unknown: "neutral",
@@ -58,6 +68,24 @@ const PHASE_WORDS: Record<PhaseId, string[]> = {
 };
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "partial_recovery"]);
+
+/** Map a backend-persisted phase snapshot entry to a visual state. */
+function visualFromSnapshot(status: string): VisualState {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "blocked":
+      return "blocked";
+    case "skipped":
+      return "skipped";
+    case "running":
+      return "running";
+    default:
+      return "waiting";
+  }
+}
 
 export function formatDuration(ms: number | null | undefined): string | null {
   if (ms == null) return null;
@@ -124,6 +152,16 @@ function visualStateFor(
   ) {
     return "skipped";
   }
+  // Analysis-produced-but-deployment-blocked runs: phases after Analyze
+  // were never reached — not failed, not unknown.
+  if (
+    run?.status === "failed" &&
+    run.error_code != null &&
+    DEPLOYMENT_BLOCKED_CODES.has(run.error_code) &&
+    phaseIndex > phases.findIndex((p) => p.id === "analyze")
+  ) {
+    return "skipped";
+  }
   if (!stage) return "unknown";
   if (stage.state === "blocked") return stage.reason === "config" ? "skipped" : "failed";
   if (stage.state === "done") return "completed";
@@ -147,6 +185,21 @@ export function derivePhaseStates({
   stages: PipelineStage[];
   hydrating: boolean;
 }): Record<PhaseId, VisualState> {
+  // Authoritative: the backend persists a terminal phase snapshot with the
+  // failure record. Prefer it over event-derived inference when present —
+  // it distinguishes the failed phase from phases that never started.
+  if (run?.phases?.length && TERMINAL.has(run.status)) {
+    const byId = new Map(run.phases.map((p) => [p.id, p]));
+    if (PIPELINE_PHASES.every((p) => byId.has(p.id))) {
+      return PIPELINE_PHASES.reduce(
+        (acc, phase) => {
+          acc[phase.id] = visualFromSnapshot(byId.get(phase.id)!.status);
+          return acc;
+        },
+        {} as Record<PhaseId, VisualState>,
+      );
+    }
+  }
   const stageById = new Map(stages.map((stage) => [stage.id, stage]));
   const blocked = stages.find((stage) => stage.state === "blocked" && stage.reason !== "config") ?? null;
   return PIPELINE_PHASES.reduce(

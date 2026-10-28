@@ -49,14 +49,18 @@ import {
   type HistoryCommit,
   type Project,
 } from "@/lib/api/client";
-import { formatActivity } from "@/lib/projects/projects";
+import {
+  DEPLOYMENT_BLOCKED_CODES,
+  DEPLOYMENT_NOT_APPLICABLE_CODES,
+  formatActivity,
+} from "@/lib/projects/projects";
 import { labelStatus, statusGlyph } from "@/lib/ui/status";
 import { cn } from "@/lib/ui/cn";
 
-function runTitle(snapshot: DeploymentSnapshot, deploymentId: string): string {
+function runTitle(snapshot: DeploymentSnapshot): string {
   if (snapshot.changeIntel?.label) return snapshot.changeIntel.label;
-  if (snapshot.deploymentId) return `Run ${snapshot.deploymentId}`;
-  return "Verification run";
+  // Readable default title; the technical run id stays visible below.
+  return "Repository Analysis";
 }
 
 function StatusLine({ snapshot }: { snapshot: DeploymentSnapshot }) {
@@ -73,12 +77,24 @@ function StatusLine({ snapshot }: { snapshot: DeploymentSnapshot }) {
         <AlertTriangle className="h-3.5 w-3.5" aria-hidden /> Recovered
       </span>
     );
-  if (s === "failed")
+  if (s === "failed") {
+    // Deployment-blocked runs report the outcome, not a bare "Failed".
+    const code = (snapshot.result?.code ?? "").toUpperCase();
+    if (DEPLOYMENT_BLOCKED_CODES.has(code)) {
+      const notApplicable = DEPLOYMENT_NOT_APPLICABLE_CODES.has(code);
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-medha-secondary">
+          <AlertTriangle className="h-3.5 w-3.5 text-medha-warning" aria-hidden />
+          Analysis complete · {notApplicable ? "Deployment not applicable" : "Deployment blocked"}
+        </span>
+      );
+    }
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-medha-danger">
-        <XCircle className="h-3.5 w-3.5" aria-hidden /> Blocked
+        <XCircle className="h-3.5 w-3.5" aria-hidden /> Failed
       </span>
     );
+  }
   if (s === "running")
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-medha-run">
@@ -131,6 +147,11 @@ function shortSha(rev: string | null | undefined): string | null {
 
 function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
   const failed = snapshot.runStatus === "failed" || snapshot.runStatus === "partial_recovery";
+  // A deployment block is an outcome (analysis persisted), not a failure to diagnose.
+  const code = (snapshot.result?.code ?? "").toUpperCase();
+  const blockedRun = failed && DEPLOYMENT_BLOCKED_CODES.has(code);
+  const notApplicable = blockedRun && DEPLOYMENT_NOT_APPLICABLE_CODES.has(code);
+  const diagnose = failed && !blockedRun;
   const running = snapshot.runStatus === "running";
   const message = snapshot.result?.message ?? snapshot.explain.technicalText ?? "";
   const { fact, hypothesis } = useMemo(() => splitCause(message), [message]);
@@ -142,9 +163,40 @@ function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
   const appLog = stderrTail || stdoutTail;
   const revision =
     shortSha(snapshot.changeIntel?.changeset.target_sha) ??
-    shortSha(snapshot.changeIntel?.changeset.target_revision);
+    shortSha(snapshot.changeIntel?.changeset.target_revision) ??
+    shortSha(snapshot.result?.target_sha);
   const build = snapshot.result?.build ?? null;
   const remediation = buildRemediation(build?.error_code);
+  // Structured checkout-failure diagnostics (persisted separately from raw
+  // logs); sanitized server-side before storage.
+  const failure = snapshot.result?.failure ?? null;
+  const [diagCopied, setDiagCopied] = useState(false);
+
+  const diagnosticsText = failure
+    ? [
+        `code: ${failure.code ?? "not recorded"}`,
+        `failed_stage: ${failure.failed_stage ?? failure.stage ?? "not recorded"}`,
+        `operation: ${failure.operation ?? "not recorded"}`,
+        `category: ${failure.category ?? "not recorded"}`,
+        `exit_code: ${failure.exit_code ?? "not recorded"}`,
+        `duration_seconds: ${failure.duration_seconds ?? "not recorded"}`,
+        `revision: ${revision ?? "not recorded"}`,
+        failure.stderr_tail ? `stderr_tail:\n${failure.stderr_tail}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "";
+
+  const copyDiagnostics = async () => {
+    if (!diagnosticsText) return;
+    try {
+      await navigator.clipboard.writeText(diagnosticsText);
+      setDiagCopied(true);
+      setTimeout(() => setDiagCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable — selection still works */
+    }
+  };
 
   const copyLogs = async () => {
     if (!appLog) return;
@@ -158,21 +210,71 @@ function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
   };
 
   return (
-    <section id="diagnosis" aria-label={failed ? "Failure diagnosis" : "Run outcome"} className="scroll-mt-20 rounded-xl border border-medha-border bg-white p-4 sm:p-5">
+    <section id="diagnosis" aria-label={diagnose ? "Failure diagnosis" : "Run outcome"} className="scroll-mt-20 rounded-xl border border-medha-border bg-white p-4 sm:p-5">
       <p className="medha-label">
-        {failed ? "Diagnosis" : running ? "Current state" : "Outcome"}
+        {diagnose ? "Diagnosis" : running ? "Current state" : "Outcome"}
       </p>
-      {failed ? (
+      {diagnose ? (
         <div className="mt-2 space-y-2.5">
           <div>
-            <p className="text-[12px] font-semibold uppercase tracking-wide text-medha-danger">Failure</p>
+            <p className="text-[12px] font-semibold uppercase tracking-wide text-medha-danger">
+              {failure ? "Repository checkout failed" : "Failure"}
+            </p>
             <p className="mt-0.5 text-[13.5px] leading-relaxed text-medha-text">{concise(fact, 320)}</p>
             {hypothesis ? (
               <p className="mt-1 text-[13.5px] italic leading-relaxed text-medha-secondary">
                 Hypothesis (unverified): {hypothesis}
               </p>
             ) : null}
+            {failure ? (
+              <p className="mt-1 text-[13px] text-medha-secondary">
+                Deployment readiness was not evaluated — the run stopped during repository
+                checkout, before a decision score existed.
+              </p>
+            ) : null}
           </div>
+          {failure ? (
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <p className="medha-label">Checkout diagnostics</p>
+                <button
+                  type="button"
+                  onClick={() => void copyDiagnostics()}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[12px] font-medium text-medha-secondary hover:bg-medha-muted hover:text-medha-text"
+                >
+                  {diagCopied ? <Check className="h-3 w-3" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
+                  {diagCopied ? "Copied" : "Copy diagnostics"}
+                </button>
+              </div>
+              <dl className="mt-1 grid gap-x-4 gap-y-1 text-[13px] text-medha-secondary sm:grid-cols-2">
+                {failure.operation ? (
+                  <div><dt className="inline font-semibold text-medha-text">Operation: </dt><dd className="inline">{failure.operation}</dd></div>
+                ) : null}
+                {failure.category ? (
+                  <div><dt className="inline font-semibold text-medha-text">Category: </dt><dd className="inline">{failure.category}</dd></div>
+                ) : null}
+                {failure.exit_code != null ? (
+                  <div><dt className="inline font-semibold text-medha-text">Exit code: </dt><dd className="medha-mono inline">{failure.exit_code}</dd></div>
+                ) : null}
+                {failure.duration_seconds != null ? (
+                  <div><dt className="inline font-semibold text-medha-text">Duration: </dt><dd className="medha-mono inline">{failure.duration_seconds}s</dd></div>
+                ) : null}
+                {revision ? (
+                  <div><dt className="inline font-semibold text-medha-text">Revision: </dt><dd className="medha-mono inline">{revision}</dd></div>
+                ) : null}
+              </dl>
+              {failure.stderr_tail ? (
+                <details className="mt-1.5" open>
+                  <summary className="cursor-pointer text-[13.5px] font-semibold text-medha-accent">
+                    Git output (stderr tail, sanitized)
+                  </summary>
+                  <pre className="medha-mono mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-medha-border bg-medha-muted p-2.5 text-[12px] leading-relaxed text-medha-text">
+                    {failure.stderr_tail}
+                  </pre>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
           {build ? (
             <div>
               <p className="medha-label">
@@ -264,6 +366,11 @@ function DiagnosisCard({ snapshot }: { snapshot: DeploymentSnapshot }) {
         </div>
       ) : (
         <div className="mt-1.5 space-y-1.5">
+          {blockedRun ? (
+            <p className="text-[13.5px] font-semibold text-medha-text">
+              Analysis complete · {notApplicable ? "Deployment not applicable" : "Deployment blocked"}
+            </p>
+          ) : null}
           <p className="text-[13.5px] leading-relaxed text-medha-text">
             {running ? snapshot.explain.simpleText : message || snapshot.explain.simpleText}
           </p>
@@ -593,7 +700,13 @@ function RunContextBar({ deploymentId, projectId }: { deploymentId: string; proj
     setStarting(true);
     setStartError(null);
     try {
-      const response = await createProjectRun(project.project_id);
+      // On a failed run this is a retry: link the new attempt to the old
+      // one (retry_of) so history stays traceable; the old run's record
+      // and diagnostics are never touched.
+      const response = await createProjectRun(
+        project.project_id,
+        failed && snapshot.deploymentId ? { retry_of: snapshot.deploymentId } : undefined,
+      );
       router.push(`/projects/${projectId}/runs/${response.deployment_id}`);
     } catch (err) {
       setStartError(err instanceof Error ? err.message : "Cannot start the analysis run.");
@@ -802,7 +915,7 @@ function RunBody({ deploymentId, projectId }: { deploymentId: string; projectId?
         />
         <div className="min-w-0">
           <h1 className="text-[28px] font-semibold tracking-tight text-medha-text">
-            {runTitle(snapshot, deploymentId)}
+            {runTitle(snapshot)}
           </h1>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             <StatusLine snapshot={snapshot} />

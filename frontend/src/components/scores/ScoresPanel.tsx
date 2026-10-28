@@ -10,7 +10,7 @@ import { cn } from "@/lib/ui/cn";
 /* Verification scores, two panels side by side on wide screens:
    a compact clickable summary (left) and the actionable findings behind
    low scores (right). Backed by stored scoring evidence (backend
-   `scores-v2`): 100 minus each failed/warning check's documented
+   `scores-v4`): 100 minus each failed/warning check's documented
    score_impact, then capped. A check that never ran is incompleteness —
    never a defect, never a pass. Every sentence derives from the stored
    evidence; when the reason is not recorded, the panel says so instead

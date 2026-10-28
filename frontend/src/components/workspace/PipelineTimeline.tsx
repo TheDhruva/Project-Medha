@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import {
+  Ban,
   CheckCircle2,
   Circle,
   Loader2,
@@ -30,6 +31,8 @@ const CARD = {
     "border-medha-run/40 bg-medha-run-soft/60 hover:border-medha-run/70 hover:bg-medha-run-soft",
   failed:
     "border-medha-danger/35 bg-medha-danger-soft/60 hover:border-medha-danger/60 hover:bg-medha-danger-soft",
+  blocked:
+    "border-medha-warning/40 bg-medha-warning-soft/40 hover:border-medha-warning/60 hover:bg-medha-warning-soft/60",
   waiting: "border-medha-border bg-medha-surface hover:border-medha-border-strong hover:bg-medha-surface-soft",
   skipped: "border-medha-border bg-medha-muted/50 hover:border-medha-border-strong hover:bg-medha-muted",
   unknown: "border-dashed border-medha-border bg-medha-surface hover:border-medha-border-strong",
@@ -39,6 +42,7 @@ const TOP = {
   completed: "bg-medha-success",
   running: "bg-medha-run",
   failed: "bg-medha-danger",
+  blocked: "bg-medha-warning",
   waiting: "bg-medha-border",
   skipped: "bg-medha-border-strong",
   unknown: "bg-medha-border",
@@ -48,6 +52,7 @@ const STATUS_TEXT = {
   completed: "text-medha-success",
   running: "text-medha-run-ink",
   failed: "text-medha-danger",
+  blocked: "text-medha-warning",
   waiting: "text-medha-tertiary",
   skipped: "text-medha-tertiary",
   unknown: "text-medha-tertiary",
@@ -57,6 +62,7 @@ function StatusIcon({ state }: { state: VisualState }) {
   const common = "h-4 w-4 shrink-0";
   if (state === "completed") return <CheckCircle2 className={common} aria-hidden />;
   if (state === "failed") return <XCircle className={common} aria-hidden />;
+  if (state === "blocked") return <Ban className={common} aria-hidden />;
   if (state === "running") {
     return (
       <Loader2

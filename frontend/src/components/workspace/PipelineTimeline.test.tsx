@@ -246,6 +246,36 @@ describe("PipelineTimeline", () => {
     });
   });
 
+  it("renders the backend's persisted terminal phases, marking unreached phases blocked", () => {
+    renderPipeline({
+      run: makeRun({
+        status: "failed",
+        error_code: "GIT.CHECKOUT_FAILED",
+        error_summary: "fatal: cannot create directory at 'test/…': Filename too long",
+        phases: [
+          { id: "preflight", status: "completed" },
+          { id: "analyze", status: "failed", reason: "Clone failed" },
+          { id: "plan", status: "blocked", reason: "Analyze failed first" },
+          { id: "cnp", status: "blocked", reason: "Analyze failed first" },
+          { id: "verify", status: "blocked", reason: "Analyze failed first" },
+          { id: "execute", status: "blocked", reason: "Analyze failed first" },
+        ],
+      }),
+      stages: [],
+      logs: [],
+    });
+
+    const list = cards();
+    expect(list[0]).toHaveAttribute("data-state", "completed");
+    expect(list[1]).toHaveAttribute("data-state", "failed");
+    for (const card of list.slice(2)) {
+      expect(card).toHaveAttribute("data-state", "blocked");
+      expect(within(card).getByText("Blocked")).toBeInTheDocument();
+      expect(within(card).queryByText("Failed")).not.toBeInTheDocument();
+      expect(within(card).queryByText("Unknown")).not.toBeInTheDocument();
+    }
+  });
+
   it("does not render health, rollback, or raw logs in the pipeline grid", () => {
     renderPipeline({
       run: makeRun({ status: "partial_recovery" }),

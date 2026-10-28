@@ -21,7 +21,7 @@ import { decideProposal, type RunHealth } from "@/lib/api/client";
 import {
   buildRunFeed, buildRunRoster, derivePipeline, summarizeVerification,
   useProjectData,
-  type AgentState, type PipelineStage,
+  type AgentState, type FeedEntry, type FeedKind, type PipelineStage,
 } from "@/lib/projects/useProjectData";
 import { formatDuration, runStatusBadge } from "@/lib/projects/executionPhases";
 import { formatActivity, isRunningStatus, summarizeRunFailure } from "@/lib/projects/projects";
@@ -392,15 +392,97 @@ const STAGE_STATE_LABEL: Record<PipelineStage["state"], string> = {
   idle: "Waiting",
 };
 
+/* Feed badge classification → plain-English label + 10px pill styling.
+   Colors reuse existing medha tokens only (var() colors take no alpha). */
+const FEED_KIND_LABEL: Record<FeedKind, string> = {
+  hypothesis: "Hypothesis",
+  challenge: "Challenge",
+  agent_activity: "Agent activity",
+  verification_started: "Verification started",
+  verification_check: "Verification check",
+  verification_passed: "Verification passed",
+  verification_failed: "Verification failed",
+  coordinator_decision: "Coordinator decision",
+  final_decision: "Final decision",
+  merge_decision: "Merge decision",
+  finding_submitted: "Finding submitted",
+  note: "Note",
+};
+
+const FEED_KIND_CLASS: Record<FeedKind, string> = {
+  hypothesis: "border-medha-accent bg-medha-accent-soft text-medha-accent",
+  challenge: "border-medha-warning bg-medha-warning-soft text-medha-warning",
+  agent_activity: "border-medha-border bg-medha-muted text-medha-tertiary",
+  verification_started: "border-medha-run bg-medha-run-soft text-medha-run-ink",
+  verification_check: "border-medha-border bg-white text-medha-secondary",
+  verification_passed: "border-medha-success bg-medha-success-soft text-medha-success-ink",
+  verification_failed: "border-medha-danger bg-medha-danger-soft text-medha-danger",
+  coordinator_decision: "border-medha-accent bg-white text-medha-accent",
+  final_decision: "border-medha-strong bg-medha-muted text-medha-text",
+  merge_decision: "border-medha-accent bg-medha-accent-soft text-medha-accent",
+  finding_submitted: "border-medha-warning bg-white text-medha-warning",
+  note: "border-medha-border bg-white text-medha-tertiary",
+};
+
+function feedKindChip(kind: FeedKind) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-1.5 py-px text-[10px] font-semibold leading-none",
+        FEED_KIND_CLASS[kind],
+      )}
+    >
+      {FEED_KIND_LABEL[kind]}
+    </span>
+  );
+}
+
+/** Message body with an inline details toggle for long/multiline records. */
+function FeedMessage({ entry }: { entry: FeedEntry }) {
+  const [open, setOpen] = useState(false);
+  if (!entry.longMessage) return <>{entry.message}</>;
+  const firstLine = entry.message.split("\n")[0];
+  const preview =
+    firstLine.length > 160 || firstLine.length < entry.message.length
+      ? `${firstLine.slice(0, 160)}…`
+      : firstLine;
+  return (
+    <>
+      <span className={open && entry.message.includes("\n") ? "whitespace-pre-wrap" : ""}>
+        {open ? entry.message : preview}
+      </span>{" "}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="rounded font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+      >
+        {open ? "hide" : "details"}
+      </button>
+      {open && entry.technical ? (
+        <span className="mt-0.5 block medha-mono text-[11px] text-medha-tertiary">
+          {entry.technical}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 export function OrchestrationView({ projectId }: { projectId: string }) {
-  const { repo, name, runs, loading, error, backendReachable, selectedId, selectRun, hydration, hydrating, refresh } =
+  const { repo, name, runs, loading, error, backendReachable, selectedId, selectRun, hydration, hydrating, refresh, feed: liveFeed } =
     useProjectData(projectId);
   const selected = runs.find((r) => r.deployment_id === selectedId) ?? runs[0] ?? null;
   // Feed/roster derivation is O(N) over logs — memoize on the actual inputs.
   // (Hooks stay unconditional: the !repo early-return renders below them.)
+  // Live SSE feed from the hook; while it is still empty (hydration just
+  // arrived, hook mocks) derive from the REST log so nothing flashes blank.
   const feed = useMemo(
-    () => (hydration ? buildRunFeed(hydration.logs, hydration.agents) : []),
-    [hydration],
+    () =>
+      liveFeed && liveFeed.length > 0
+        ? liveFeed
+        : hydration
+          ? buildRunFeed(hydration.logs, hydration.agents)
+          : [],
+    [liveFeed, hydration],
   );
   const roster = useMemo(
     () => (hydration ? buildRunRoster(feed, hydration.agents) : []),
@@ -590,7 +672,8 @@ export function OrchestrationView({ projectId }: { projectId: string }) {
                                         : "bg-medha-muted text-medha-secondary",
                                   )}
                                 >
-                                  {entry.message}
+                                  {feedKindChip(entry.kind)}{" "}
+                                  <FeedMessage entry={entry} />
                                   {entry.timeLabel ? (
                                     <>
                                       {" "}
@@ -649,6 +732,7 @@ export function OrchestrationView({ projectId }: { projectId: string }) {
                               >
                                 <p className={cn("flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[12.5px]", skin.ink)}>
                                   <span className="font-semibold">{entry.actor}</span>
+                                  {feedKindChip(entry.kind)}
                                   {entry.timeLabel ? (
                                     <time dateTime={entry.ts} className="medha-mono text-[10.5px] font-normal text-medha-tertiary">
                                       {entry.timeLabel}
@@ -672,7 +756,7 @@ export function OrchestrationView({ projectId }: { projectId: string }) {
                                     entry.outcome === "error" ? "text-medha-danger" : "text-medha-text",
                                   )}
                                 >
-                                  {entry.message}
+                                  <FeedMessage entry={entry} />
                                 </p>
                                 {entry.error ? (
                                   <p className="mt-0.5 break-words text-[12px] text-medha-danger">{entry.error}</p>
@@ -1003,8 +1087,13 @@ export function VerificationView({ projectId }: { projectId: string }) {
   if (!repo) return <NotFound what="This project link does not decode to a known repository." />;
   const selected = runs.find((r) => r.deployment_id === selectedId) ?? runs[0] ?? null;
   const summary = summarizeVerification(hydration?.verification ?? null);
+  // Normalized coverage strip; null when the backend recorded none (older runs).
+  const coverage = hydration?.coverage ?? null;
   const raw = hydration?.verification as {
-    checks?: { id?: string; name?: string; status?: string; message?: string; rule?: string; category?: string }[];
+    checks?: {
+      id?: string; name?: string; status?: string; message?: string;
+      rule?: string; category?: string; evidence?: unknown;
+    }[];
     blocking_failures?: string[]; warnings?: string[];
   } | null;
   const critic = hydration?.critic as {
@@ -1069,6 +1158,33 @@ export function VerificationView({ projectId }: { projectId: string }) {
               <>
                 <ScoresPanel projectId={projectId} runId={selected.deployment_id} />
 
+                {/* Coverage strip: how much of the gate was actually assessed.
+                    Absent coverage is stated as unavailable, never as passed. */}
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-lg border border-medha-border bg-white px-3.5 py-2.5 text-[13px]">
+                  <span className="font-semibold text-medha-text">Coverage</span>
+                  {coverage ? (
+                    <>
+                      <span className="text-medha-secondary">
+                        checks assessed {coverage.counts.assessed}/{coverage.counts.applicable} (
+                        {Math.round(coverage.counts.ratio * 100)}%)
+                      </span>
+                      <span className="text-medha-tertiary">
+                        {coverage.counts.passed} passed · {coverage.counts.failed} failed ·{" "}
+                        {coverage.counts.warnings} warnings · {coverage.counts.skipped} skipped ·{" "}
+                        {coverage.counts.not_assessed} not assessed
+                        {coverage.counts.not_applicable > 0
+                          ? ` · ${coverage.counts.not_applicable} not applicable`
+                          : ""}
+                      </span>
+                      {coverage.reason ? (
+                        <span className="min-w-0 text-medha-tertiary">{coverage.reason}</span>
+                      ) : null}
+                    </>
+                  ) : (
+                    <span className="text-medha-secondary">coverage unavailable for this run</span>
+                  )}
+                </div>
+
                 {/* Every check stays accessible behind one control; the summary
                     row keeps the real result (including failures) visible. */}
                 <details id="checks" className="medha-panel p-4 sm:p-5">
@@ -1079,7 +1195,7 @@ export function VerificationView({ projectId }: { projectId: string }) {
                       </span>
                       {summary ? (
                         <span className="text-[13px] text-medha-secondary">
-                          {summary.passedCount}/{summary.assessed} passed
+                          {summary.passedCount}/{summary.assessed} passed (assessed checks only)
                           {summary.failed > 0 ? (
                             <span className="text-medha-danger"> · {summary.failed} failed</span>
                           ) : null}
@@ -1118,7 +1234,70 @@ export function VerificationView({ projectId }: { projectId: string }) {
                         ))}
                       </ul>
                     ) : null}
-                    {(raw?.checks ?? []).length > 0 ? (
+                    {coverage ? (
+                      coverage.normalized.length > 0 ? (
+                        <ul className={cn("divide-y divide-medha-border border-t border-medha-border", summary?.blocking.length || (raw?.warnings ?? []).length ? "mt-3" : "")}>
+                          {coverage.normalized.map((check) => {
+                            const matched = (raw?.checks ?? []).find(
+                              (c) => c.id === check.id || c.name === check.title,
+                            );
+                            const notRun = check.status === "not_assessed";
+                            const label = notRun
+                              ? check.required
+                                ? "required — did not run"
+                                : "did not run"
+                              : check.status === "skipped"
+                                ? "skipped / not applicable"
+                                : check.status === "passed"
+                                  ? "passed"
+                                  : check.status === "failed"
+                                    ? "failed"
+                                    : "warning";
+                            const toneClass =
+                              check.status === "passed"
+                                ? "text-medha-success-ink"
+                                : check.status === "failed"
+                                  ? "text-medha-danger"
+                                  : check.status === "warning"
+                                    ? "text-medha-warning"
+                                    : notRun && check.required
+                                      ? "text-medha-warning"
+                                      : "text-medha-tertiary";
+                            const detail = matched?.message ?? (check.finding || null);
+                            const evidence = matched?.evidence;
+                            return (
+                              <li key={check.id} className="py-2">
+                                <details>
+                                  <summary className="flex cursor-pointer list-none items-center gap-3 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent [&::-webkit-details-marker]:hidden">
+                                    <span className={cn("w-44 shrink-0 text-[12.5px] font-semibold", toneClass)}>
+                                      {label}
+                                    </span>
+                                    <span className="min-w-0 flex-1 text-[13.5px] font-medium text-medha-text">
+                                      {check.title}
+                                    </span>
+                                    {check.required ? (
+                                      <span className="shrink-0 text-[11.5px] text-medha-tertiary">required</span>
+                                    ) : null}
+                                  </summary>
+                                  {detail || evidence != null ? (
+                                    <div className="mt-0.5 space-y-0.5 pl-[11.5rem] text-[12.5px]">
+                                      {detail ? <p className="text-medha-secondary">{detail}</p> : null}
+                                      {evidence != null ? (
+                                        <p className="medha-mono break-words text-[11.5px] text-medha-tertiary">
+                                          {typeof evidence === "string" ? evidence : JSON.stringify(evidence)}
+                                        </p>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+                                </details>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <p className="text-[13px] text-medha-tertiary">No individual checks were recorded.</p>
+                      )
+                    ) : (raw?.checks ?? []).length > 0 ? (
                       <ul className={cn("divide-y divide-medha-border border-t border-medha-border", summary?.blocking.length || (raw?.warnings ?? []).length ? "mt-3" : "")}>
                         {(raw?.checks ?? []).map((c, i) => {
                           const meta = checkStatusMeta(c.status ?? "");

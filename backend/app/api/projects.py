@@ -139,6 +139,9 @@ class ProjectRunBody(BaseModel):
     target_host: str = Field(default="localhost", max_length=64)
     target_port: int = Field(default=8080, ge=1, le=65535)
     deployment_target: str | None = Field(default=None, max_length=120)
+    # Optional link to the deployment this run retries: makes a retry a
+    # traceable attempt without touching the prior run's diagnostics.
+    retry_of: str | None = Field(default=None, max_length=64)
 
 
 @router.post("/projects", status_code=201, dependencies=[Depends(require_mutation_token)])
@@ -446,7 +449,8 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
         status=DeploymentStatus.STARTED,
         current_stage=None,
         explain_simple="Project analysis accepted. Real pipeline starting.",
-        explain_technical=f"deployment_id={deployment_id} · project={project_id} · is_demo=false",
+        explain_technical=f"deployment_id={deployment_id} · project={project_id} · is_demo=false"
+        + (f" · retry_of={body.retry_of}" if body.retry_of else ""),
         owner_sub=subject,
         project_id=project_id,
         created_at=now,
@@ -460,7 +464,11 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
             event_type=EventType.DEPLOYMENT_CREATED,
             message="Project analysis created.",
             status=DeploymentStatus.STARTED.value,
-            metadata={"project_id": project_id, "repository": project.repository},
+            metadata={
+                "project_id": project_id,
+                "repository": project.repository,
+                **({"retry_of": body.retry_of} if body.retry_of else {}),
+            },
             is_demo=False,
         )
         repo.add_event(created)
@@ -475,6 +483,6 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
     return JSONResponse(
         {"deployment_id": deployment_id, "status": DeploymentStatus.STARTED.value,
          "project_id": project_id, "mode": DeployMode.REAL.value, "is_demo": False,
-         "deploy_target": project.deploy_target},
+         "deploy_target": project.deploy_target, "retry_of": body.retry_of},
         status_code=202,
     )

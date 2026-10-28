@@ -6,11 +6,14 @@ import {
   authReady,
   clearApiCache,
   eventsUrl,
+  fetchAssessmentSummary,
   fetchChangeImpact,
   fetchConfigStatus,
+  fetchProjectFindings,
   fetchRunHealth,
   fetchRunHydration,
   fetchRunLogs,
+  projectFindingsQuery,
   registerAuthTokenGetter,
 } from "@/lib/api/client";
 import type { ChangeImpactResponse } from "@/lib/api/client";
@@ -258,5 +261,43 @@ describe("auth token forwarding", () => {
   it("authReady resolves after registerAuthTokenGetter is called", async () => {
     registerAuthTokenGetter(async () => "token");
     await expect(authReady).resolves.toBeUndefined();
+  });
+});
+
+describe("assessment and findings client", () => {
+  it("projectFindingsQuery builds only the provided filters", () => {
+    expect(projectFindingsQuery()).toBe("");
+    expect(projectFindingsQuery({ sort: "severity" })).toBe("?sort=severity");
+    expect(
+      projectFindingsQuery({ status: "open", severity: "high", sort: "last_seen", limit: 20 }),
+    ).toBe("?status=open&severity=high&sort=last_seen&limit=20");
+  });
+
+  it("fetchProjectFindings requests the project findings endpoint with filters", async () => {
+    stubFetch(
+      jsonResponse({
+        findings: [],
+        status_counts: {},
+        severity_counts: {},
+        lifecycle_states: ["open", "fixed"],
+        baseline_sha: null,
+        filters: { status: null, severity: "high", sort: "severity" },
+        total: 0,
+        blocking_rule: { severities: ["critical", "high"], statuses: ["open"] },
+      }),
+    );
+    const r = await fetchProjectFindings("prj_a/b", { severity: "high", sort: "severity" });
+    expect(lastUrl).toContain(
+      `/api/projects/${encodeURIComponent("prj_a/b")}/findings?severity=high&sort=severity`,
+    );
+    expect(r.total).toBe(0);
+    expect(r.lifecycle_states).toEqual(["open", "fixed"]);
+  });
+
+  it("fetchAssessmentSummary reads the project assessment summary", async () => {
+    stubFetch(jsonResponse({ project_id: "prj_1", status: "never_assessed" }));
+    const r = await fetchAssessmentSummary("prj_1");
+    expect(lastUrl).toContain("/api/projects/prj_1/assessment-summary");
+    expect(r.status).toBe("never_assessed");
   });
 });

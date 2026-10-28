@@ -10,6 +10,8 @@ import { Badge, EmptyState, ErrorBox, Panel, Skeleton } from "@/components/ui/pr
 import { DeploymentDetailsPopover } from "@/components/workspace/DeploymentDetailsPopover";
 import { MetricCard } from "@/components/workspace/MetricCard";
 import { OperationalStatus } from "@/components/workspace/OperationalStatus";
+import { AssessmentPanel } from "@/components/workspace/AssessmentPanel";
+import { FindingsPanel } from "@/components/workspace/FindingsPanel";
 import { PipelineTimeline } from "@/components/workspace/PipelineTimeline";
 import { RepositorySummaryBlock } from "@/components/workspace/RepositorySummaryBlock";
 import {
@@ -26,7 +28,8 @@ import {
   useProjectData,
 } from "@/lib/projects/useProjectData";
 import type { PhaseId } from "@/lib/projects/executionPhases";
-import { canonicalRepoKey, formatActivity, isRunningStatus } from "@/lib/projects/projects";
+import { canonicalRepoKey, formatActivity, isRunningStatus, runOutcome } from "@/lib/projects/projects";
+import { scenarioDisplayName } from "@/lib/runs/display";
 import { selectRepositorySummary } from "@/lib/projects/repositorySummary";
 import {
   createProjectRun,
@@ -35,15 +38,6 @@ import {
   type ExecutionReadiness,
   type ScoresResponse,
 } from "@/lib/api/client";
-
-/* A finished run reports completion only — never health. Only genuinely
-   positive evidence (verification passed, preserved services) uses green. */
-function statusTone(status: string): "success" | "warning" | "error" | "info" | "neutral" {
-  if (status === "partial_recovery" || status === "awaiting_approval") return "warning";
-  if (status === "failed" || status === "cancelled") return "error";
-  if (isRunningStatus(status)) return "info";
-  return "neutral";
-}
 
 export function ProjectBoard({ projectId }: { projectId: string }) {
   const router = useRouter();
@@ -57,6 +51,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [selectedPhase, setSelectedPhase] = useState<PhaseId | null>(null);
+  const [showFindings, setShowFindings] = useState(false);
 
   const selected = useMemo(
     () => runs.find((r) => r.deployment_id === selectedId) ?? latest,
@@ -74,6 +69,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
   // Phase details belong to one run; never carry them across a run or project switch.
   useEffect(() => {
     setSelectedPhase(null);
+    setShowFindings(false);
   }, [projectId, selected?.deployment_id]);
 
   const pipeline = useMemo(
@@ -134,6 +130,8 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
   const blockers = findings.filter((f) => f.tone === "error").length;
   const repositorySummary = useMemo(() => selectRepositorySummary(runs), [runs]);
   const analyzing = latest ? isRunningStatus(latest.status) : false;
+  // Primary status describes repository analysis; deployment is secondary.
+  const latestOutcome = useMemo(() => (latest ? runOutcome(latest) : null), [latest]);
   const repoIdentity = useMemo(() => {
     if (project) {
       return {
@@ -274,7 +272,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="break-words text-[26px] font-semibold leading-tight tracking-tight text-medha-text">{name}</h1>
-                {latest && !loading ? (
+                {latest && !loading && latestOutcome ? (
                   <span className="inline-flex items-center gap-1.5">
                     <MedhaFace
                       state={faceStateFromRun({
@@ -287,7 +285,10 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
                       })}
                       size={24}
                     />
-                    <Badge tone={statusTone(latest.status)}>{latest.status.replace(/_/g, " ")}</Badge>
+                    <Badge tone={latestOutcome.analysis.tone}>{latestOutcome.analysis.label}</Badge>
+                    {latestOutcome.deployment ? (
+                      <Badge tone={latestOutcome.deployment.tone}>{latestOutcome.deployment.label}</Badge>
+                    ) : null}
                     {latest.is_demo ? <span className="text-[12px] font-semibold text-medha-tertiary">DEMO/MOCK</span> : null}
                   </span>
                 ) : null}
@@ -384,97 +385,135 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
           />
         ) : (
           <>
-            {/* Four semicircular assessment cards */}
+            {/* ---- B. Four semicircular assessment scorecards ---- */}
             <div className="grid grid-cols-2 gap-3 xl:grid-cols-4" aria-label="Run scorecards">
               {scorecards.map((metric) => (
                 <MetricCard key={metric.id} metric={metric} />
               ))}
             </div>
 
-            {/* Pipeline + operational status */}
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-              <PipelineTimeline
-                projectId={projectId}
-                run={selected ?? null}
-                stages={pipeline}
-                logs={hydration?.logs ?? []}
-                hydrating={hydrating}
-                selectedPhase={selectedPhase}
-                onSelectPhase={setSelectedPhase}
-              />
-
-              <OperationalStatus
-                projectId={projectId}
-                run={selected ?? null}
-                stages={pipeline}
-                logs={hydration?.logs ?? []}
-                hydrating={hydrating}
-                health={hydration?.health ?? null}
-                verification={verification}
-                negotiation={hydration?.negotiation ?? null}
-                rollback={hydration?.rollback ?? null}
-                executionMode={hydration?.executionMode ?? null}
-                selectedPhase={selectedPhase}
-                onClear={() => setSelectedPhase(null)}
-              />
-            </div>
-
-            {/* Latest commit + events */}
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-              <div className="lg:col-span-7">
-                <LatestCommitCard projectId={projectId} run={selected ?? null} isCanonical={isCanonical} />
-              </div>
-              <div className="lg:col-span-5">
-                <EventsCard runId={selected?.deployment_id ?? null} logs={hydration?.logs ?? []} />
-              </div>
-            </div>
-
-            {/* Repository intelligence + deployment health */}
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-              <div className="lg:col-span-6">
-                <RepoIntelCard runId={selected?.deployment_id ?? null} detailHref={selected ? `/projects/${projectId}/runs/${selected.deployment_id}` : `/projects/${projectId}/orchestration`} />
-              </div>
-              <div id="deployment-health" className="scroll-mt-20 lg:col-span-6">
-                <DeployHealthCard
-                  run={selected ?? null}
-                  health={hydration?.health ?? null}
-                  runtimeLogs={hydration?.runtimeLogs ?? null}
-                  detailHref={selected ? `/projects/${projectId}/runs/${selected.deployment_id}` : `/projects/${projectId}/runs`}
-                />
-              </div>
-            </div>
-
-            {/* Findings + recent runs */}
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+            {/* ---- C. One assessment summary: what was detected, key findings,
+                 analysis outcome, and whether deployment is possible. ---- */}
+            <AssessmentPanel
+              projectId={projectId}
+              runKey={selected ? `${selected.deployment_id}:${selected.status}` : null}
+            />
+            {findings.length > 0 ? (
               <Panel
                 id="findings"
-                className="lg:col-span-7"
-                title="Findings"
-                eyebrow={findings.length > 0 ? `${findings.length} open · blockers first` : "Clear"}
+                title="Most important findings"
+                eyebrow={`${findings.length} · blockers first`}
+                action={
+                  <button
+                    type="button"
+                    onClick={() => setShowFindings((v) => !v)}
+                    aria-expanded={showFindings}
+                    className="rounded text-[13px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                  >
+                    {showFindings ? "Hide full findings" : "View all findings"}
+                  </button>
+                }
               >
                 <FindingsStrip findings={findings} />
+                {showFindings ? <FindingsPanel projectId={projectId} /> : null}
               </Panel>
+            ) : null}
+
+            {/* ---- D. Recent activity: a few meaningful events + recent runs.
+                 Full timeline, logs, and agent detail live in run detail. ---- */}
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+              <div className="lg:col-span-7">
+                <EventsCard runId={selected?.deployment_id ?? null} logs={hydration?.logs ?? []} />
+              </div>
               <Panel
                 className="lg:col-span-5"
                 title="Recent runs"
                 eyebrow={`${runs.length} recorded`}
-                action={<Link href={`/projects/${projectId}/runs`} className="rounded text-[13px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">All executions →</Link>}
+                action={
+                  <Link
+                    href={`/projects/${projectId}/runs`}
+                    className="rounded text-[13px] font-semibold text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                  >
+                    View all activity →
+                  </Link>
+                }
               >
                 <ol className="divide-y divide-medha-border">
-                  {runs.slice(0, 4).map((r) => (
-                    <li key={r.deployment_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 py-2 text-[13px]">
-                      <Badge tone={statusTone(r.status)}>{r.status.replace(/_/g, " ")}</Badge>
-                      <Link href={`/projects/${projectId}/runs/${r.deployment_id}`} className="medha-mono min-w-0 truncate rounded font-medium text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
-                        {r.deployment_id.slice(0, 12)}…
-                      </Link>
-                      <span className="min-w-0 flex-1 truncate text-medha-tertiary">
-                        {r.duration_seconds != null ? `${r.duration_seconds}s · ` : ""}{formatActivity(r.updated_at)}
-                      </span>
-                    </li>
-                  ))}
+                  {runs.slice(0, 4).map((r) => {
+                    const outcome = runOutcome(r);
+                    return (
+                      <li key={r.deployment_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 py-2 text-[13px]">
+                        <Badge tone={outcome.analysis.tone}>{outcome.analysis.label}</Badge>
+                        <Link href={`/projects/${projectId}/runs/${r.deployment_id}`} title={r.deployment_id} className="min-w-0 truncate rounded font-medium text-medha-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent">
+                          {scenarioDisplayName(r)}
+                        </Link>
+                        <span className="min-w-0 flex-1 truncate text-medha-tertiary">
+                          {outcome.deployment ? `${outcome.deployment.label} · ` : ""}
+                          {r.duration_seconds != null ? `${r.duration_seconds}s · ` : ""}{formatActivity(r.updated_at)}
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ol>
               </Panel>
             </div>
+
+            {/* ---- Technical details (expandable): full pipeline timeline,
+                 operational status, latest commit, repository intelligence, and
+                 deployment health. Also available on the run detail page. ---- */}
+            <details className="group rounded-xl border border-medha-border bg-medha-surface">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-xl px-4 py-3 text-[14px] font-semibold text-medha-text transition hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent">
+                <span>Technical details</span>
+                <span className="text-[12px] font-medium text-medha-tertiary transition group-open:rotate-180" aria-hidden>
+                  ▾
+                </span>
+              </summary>
+              <div className="space-y-3 border-t border-medha-border px-4 pb-4 pt-3">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+                  <PipelineTimeline
+                    projectId={projectId}
+                    run={selected ?? null}
+                    stages={pipeline}
+                    logs={hydration?.logs ?? []}
+                    hydrating={hydrating}
+                    selectedPhase={selectedPhase}
+                    onSelectPhase={setSelectedPhase}
+                  />
+                  <OperationalStatus
+                    projectId={projectId}
+                    run={selected ?? null}
+                    stages={pipeline}
+                    logs={hydration?.logs ?? []}
+                    hydrating={hydrating}
+                    health={hydration?.health ?? null}
+                    verification={verification}
+                    negotiation={hydration?.negotiation ?? null}
+                    rollback={hydration?.rollback ?? null}
+                    executionMode={hydration?.executionMode ?? null}
+                    selectedPhase={selectedPhase}
+                    onClear={() => setSelectedPhase(null)}
+                    onRetry={selected?.status === "failed" && !runBlocked ? () => void startRun() : null}
+                    retrying={starting}
+                  />
+                </div>
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+                  <div className="lg:col-span-7">
+                    <LatestCommitCard projectId={projectId} run={selected ?? null} isCanonical={isCanonical} />
+                  </div>
+                  <div className="lg:col-span-5">
+                    <RepoIntelCard runId={selected?.deployment_id ?? null} detailHref={selected ? `/projects/${projectId}/runs/${selected.deployment_id}` : `/projects/${projectId}/orchestration`} />
+                  </div>
+                </div>
+                <div id="deployment-health" className="scroll-mt-20">
+                  <DeployHealthCard
+                    run={selected ?? null}
+                    health={hydration?.health ?? null}
+                    runtimeLogs={hydration?.runtimeLogs ?? null}
+                    detailHref={selected ? `/projects/${projectId}/runs/${selected.deployment_id}` : `/projects/${projectId}/runs`}
+                  />
+                </div>
+              </div>
+            </details>
           </>
         )}
       </div>

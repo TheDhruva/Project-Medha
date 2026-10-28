@@ -7,6 +7,11 @@ import { deployStateOf } from "@/components/workspace/DashboardSections";
 import type { RunHealth, RunLogLine, RunSummary } from "@/lib/api/client";
 import type { NegotiationView, RollbackSummary } from "@/lib/demo/types";
 import type { PipelineStage, VerificationSummary } from "@/lib/projects/useProjectData";
+import { DEPLOYMENT_BLOCKED_CODES } from "@/lib/projects/useProjectData";
+import {
+  CONFIG_BLOCK_CODES,
+  DEPLOYMENT_NOT_APPLICABLE_CODES,
+} from "@/lib/projects/projects";
 import {
   PIPELINE_PHASES,
   STATE_LABEL,
@@ -114,12 +119,23 @@ function phaseResult(
   hydrating: boolean,
 ): string {
   if (state === "skipped") {
-    return `Execution was not attempted${run?.error_code ? ` (${run.error_code})` : ""}; analysis and verification evidence remain valid.`;
+    const code = run?.error_code ? ` (${run.error_code})` : "";
+    if (run?.error_code && DEPLOYMENT_BLOCKED_CODES.has(run.error_code)) {
+      return `Not reached — this run was blocked before execution${code}. Analysis evidence remains available.`;
+    }
+    return `Execution was not attempted${code}; analysis and verification evidence remain valid.`;
   }
   if (state === "failed") {
     if (run?.error_summary?.trim()) return run.error_summary.trim();
     const error = [...phaseLogs(logs, phase.id)].reverse().find((line) => line.level === "error");
     return error?.message.trim() || "The backend recorded this phase as failed; no error summary was stored.";
+  }
+  if (state === "blocked") {
+    // Never "failed" and never "completed": a prerequisite stopped this phase
+    // before it started. Prefer the backend's persisted reason when present.
+    const persisted = run?.phases?.find((p) => p.id === phase.id)?.reason;
+    if (persisted?.trim()) return `Not reached — ${persisted.trim()}`;
+    return "Not reached — a prerequisite phase failed before this phase could start.";
   }
   if (state === "running") {
     return activityFor(logs, phase.id) ?? "Running; no activity line has been recorded yet.";
@@ -145,19 +161,45 @@ function executionSummary(
   if (!run) return { ...badge, detail: "No run selected." };
   if (run.status === "failed") {
     if (skipped) {
+      const code = run.error_code ?? null;
+      // Blocked/config runs completed analysis — report that outcome instead
+      // of a bare "Failed" so every panel tells the same story.
+      const analysisCompleted =
+        code != null &&
+        (DEPLOYMENT_BLOCKED_CODES.has(code) || CONFIG_BLOCK_CODES.has(code));
+      const outcome = analysisCompleted
+        ? { label: "Analysis complete", tone: "success" as const }
+        : badge;
+      if (run.error_code === "NO_DEPLOYABLE_APP") {
+        return {
+          ...outcome,
+          detail: `Analysis completed. This repository has no deployable web application, so Medha did not deploy it (${run.error_code}). Your analysis and findings are still available.`,
+        };
+      }
+      if (code != null && DEPLOYMENT_NOT_APPLICABLE_CODES.has(code)) {
+        return {
+          ...outcome,
+          detail: `Analysis completed. Deployment is not applicable for this repository (${code}); your findings are still available.`,
+        };
+      }
+      if (analysisCompleted) {
+        return {
+          ...outcome,
+          detail: `Analysis completed; execution was not attempted (${code}).`,
+        };
+      }
       return {
         ...badge,
         detail: `Execution was not attempted${run.error_code ? ` (${run.error_code})` : ""}.`,
       };
     }
     const cause = run.error_summary?.trim();
+    const ref = run.deployment_id ? ` (run ${run.deployment_id.slice(0, 14)})` : "";
     return {
       ...badge,
       detail: failed
         ? `Failed at ${failed.label}${cause ? ` — ${cause}` : "."}`
-        : cause
-          ? `Failed — ${cause}`
-          : "The run failed; the failing phase was not recorded.",
+        : `This run stopped before the failing stage was recorded${ref}${cause ? `. ${cause}` : "."}`,
     };
   }
   if (run.status === "completed") {
@@ -214,6 +256,8 @@ export function OperationalStatus({
   executionMode,
   selectedPhase,
   onClear,
+  onRetry,
+  retrying = false,
 }: {
   projectId: string;
   run: RunSummary | null;
@@ -227,6 +271,9 @@ export function OperationalStatus({
   executionMode: string | null;
   selectedPhase: PhaseId | null;
   onClear: () => void;
+  /** Starts a new attempt (existing run-history semantics); null hides it. */
+  onRetry?: (() => void) | null;
+  retrying?: boolean;
 }) {
   const phase = selectedPhase
     ? PIPELINE_PHASES.find((item) => item.id === selectedPhase) ?? null
@@ -243,7 +290,7 @@ export function OperationalStatus({
         ? phaseHref(projectId, run.deployment_id, failedPhase.id, true)
         : {
             href: `/projects/${projectId}/runs/${run.deployment_id}#diagnosis`,
-            label: "Open error details",
+            label: "View failure details",
           }
       : null;
 
@@ -404,6 +451,47 @@ export function OperationalStatus({
             ) : null}
           </dd>
         </div>
+
+        {run?.status === "failed" ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <dt className="w-24 shrink-0 font-medium text-medha-secondary">Technical</dt>
+            <dd className="min-w-0 flex-1">
+              <details className="text-[12.5px] text-medha-tertiary">
+                <summary className="cursor-pointer font-semibold text-medha-accent">
+                  Technical details
+                </summary>
+                <ul className="medha-mono mt-1 space-y-0.5">
+                  <li>code: {run.failure?.code ?? run.error_code ?? "not recorded"}</li>
+                  {run.failure?.operation ? <li>operation: {run.failure.operation}</li> : null}
+                  {run.failure?.category ? <li>category: {run.failure.category}</li> : null}
+                  {run.failure?.exit_code != null ? <li>exit code: {run.failure.exit_code}</li> : null}
+                  <li>stage: {run.failure?.failed_stage ?? run.current_stage ?? "not recorded"}</li>
+                  <li>run: {run.deployment_id}</li>
+                </ul>
+              </details>
+            </dd>
+          </div>
+        ) : null}
+
+        {run?.status === "failed" && onRetry ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <dt className="w-24 shrink-0 font-medium text-medha-secondary">Retry</dt>
+            <dd className="min-w-0 flex-1">
+              <button
+                type="button"
+                onClick={onRetry}
+                disabled={retrying}
+                data-testid="retry-run-button"
+                className="rounded border border-medha-border bg-medha-surface px-2.5 py-1 text-[12.5px] font-semibold text-medha-text hover:border-medha-border-strong disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+              >
+                {retrying ? "Starting retry…" : "Retry run"}
+              </button>
+              <span className="mt-0.5 block text-[12px] text-medha-tertiary">
+                Creates a new run; this run and its diagnostics stay unchanged.
+              </span>
+            </dd>
+          </div>
+        ) : null}
 
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <dt className="w-24 shrink-0 font-medium text-medha-secondary">Application</dt>

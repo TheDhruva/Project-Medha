@@ -79,6 +79,109 @@ def _settle_proposal(proposal_id: str | None, record, db_path=None) -> None:
         logger.exception("Proposal settle failed proposal=%s", proposal_id)
 
 
+async def _publish_merge_decision(deployment_id: str, record, db_path=None) -> None:
+    """Evaluate and publish merge readiness for a pull-request run.
+
+    Advisory only: the decision is computed from persisted evidence, saved
+    to the PR row (only for the exact head it was computed against), posted
+    as a GitHub status check when configured (honest `setup_required`
+    otherwise), and emitted as a real orchestration event. Never raises.
+    """
+    if not getattr(record, "project_id", None) or not getattr(record, "pr_number", None):
+        return
+    repo_full = ""
+    try:
+        from app.services.github_app import parse_github_repo
+
+        repo_full = (parse_github_repo(record.repository_url) or "").lower()
+    except Exception:  # noqa: BLE001 - status publishing is best-effort
+        pass
+    try:
+        from app.mergepolicy import evaluate_merge_readiness
+
+        decision = evaluate_merge_readiness(
+            record.project_id,
+            base_sha=record.base_revision,
+            head_sha=record.target_revision,
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail the job for this
+        logger.warning(
+            "Merge decision failed deployment=%s: %s",
+            deployment_id, type(exc).__name__,
+        )
+        return
+
+    if repo_full and record.target_revision:
+        try:
+            from app.services.github_status import publish_decision
+
+            publish_result = await asyncio.to_thread(
+                publish_decision, repo_full, record.target_revision, decision
+            )
+            decision["github_status"] = publish_result
+        except Exception as exc:  # noqa: BLE001 - publishing is best-effort
+            logger.warning(
+                "GitHub status publish failed deployment=%s: %s",
+                deployment_id, type(exc).__name__,
+            )
+
+    now = utc_now_iso()
+    try:
+        from app.database.repositories import PullRequestRepository
+
+        PullRequestRepository(db_path=db_path).save_decision(
+            project_id=record.project_id,
+            repository=repo_full or (record.repository_url or ""),
+            number=int(record.pr_number),
+            head_sha=record.target_revision,
+            decision=decision,
+            at=now,
+        )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not raise
+        logger.warning(
+            "Merge decision persist failed deployment=%s: %s",
+            deployment_id, type(exc).__name__,
+        )
+
+    try:
+        from app.core.events import event_bus, make_event
+        from app.core.enums import EventType
+
+        outcome = decision.get("outcome") or "assessment_incomplete"
+        reasons = decision.get("reasons") or []
+        top = next(
+            (r.get("message") for r in reasons if isinstance(r, dict)
+             and r.get("kind") == "blocking"),
+            "all mandatory rules held" if outcome == "approved" else
+            (reasons[0].get("message") if reasons else ""),
+        )
+        event = make_event(
+            deployment_id=deployment_id,
+            event_type=EventType.SYSTEM_MESSAGE,
+            message=f"Merge readiness: {outcome} — {top}",
+            status=record.status.value,
+            metadata={
+                "simple": f"Merge readiness: {outcome}.",
+                "technical": (
+                    f"policy={decision.get('policy_version')} · "
+                    f"head={str(record.target_revision)[:12]} · "
+                    f"reasons={len(reasons)} · "
+                    f"blocking={len(decision.get('blocking_findings') or [])}"
+                ),
+                "merge_decision": decision,
+            },
+            is_demo=bool(record.is_demo),
+        )
+        DeploymentRepository(db_path=db_path).add_event(event)
+        await event_bus.publish(event)
+    except Exception as exc:  # noqa: BLE001 - observability must not raise
+        logger.warning(
+            "Merge decision event failed deployment=%s: %s",
+            deployment_id, type(exc).__name__,
+        )
+
+
 async def _process_one(job: dict, db_path=None) -> None:
     """Run the real plan-only analysis for one claimed job, then settle it.
 
@@ -107,10 +210,12 @@ async def _process_one(job: dict, db_path=None) -> None:
     # (e.g. this job was requeued after a crash), do not run it twice.
     if record.status in _DONE_OK:
         _settle_proposal(proposal_id, record, db_path)
+        await _publish_merge_decision(deployment_id, record, db_path)
         jobs.finish(job_id, ok=True, updated_at=utc_now_iso())
         return
     if record.status == DeploymentStatus.FAILED:
         _settle_proposal(proposal_id, record, db_path)
+        await _publish_merge_decision(deployment_id, record, db_path)
         jobs.finish(job_id, ok=False, error=record.error_summary or "analysis-failed",
                     updated_at=utc_now_iso())
         return
@@ -122,12 +227,18 @@ async def _process_one(job: dict, db_path=None) -> None:
             deployment_id, plan_only=True, proposal_id=proposal_id
         )
     except Exception as exc:  # noqa: BLE001 - bounded retry via finish(ok=False)
+        # Publish an honest incomplete decision for PR runs before failing.
+        failed_record = deployments.get(deployment_id)
+        if failed_record is not None:
+            await _publish_merge_decision(deployment_id, failed_record, db_path)
         jobs.finish(job_id, ok=False, error=type(exc).__name__,
                     updated_at=utc_now_iso())
         return
 
     record = deployments.get(deployment_id)
     _settle_proposal(proposal_id, record, db_path)
+    if record is not None:
+        await _publish_merge_decision(deployment_id, record, db_path)
     if record is not None and record.status in _DONE_OK:
         jobs.finish(job_id, ok=True, updated_at=utc_now_iso())
     else:

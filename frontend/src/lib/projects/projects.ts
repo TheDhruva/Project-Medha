@@ -120,6 +120,108 @@ export function shortNameForRepo(repositoryUrl: string): string {
 const TERMINAL_OK = new Set(["completed"]);
 const ATTENTION_STATUS = new Set(["failed", "awaiting_approval", "partial_recovery"]);
 
+/** Failure codes meaning "execution was never configured/available" — the
+ * blocked stage is the execute gate itself; upstream stages remain done. */
+export const CONFIG_BLOCK_CODES = new Set([
+  "EXECUTION_NOT_CONFIGURED",
+  "EXECUTION_DISABLED",
+  "EXECUTION_DISABLED_HOSTED",
+  "REAL_EXECUTION_NOT_ENABLED",
+  "REAL_BUILDER_UNAVAILABLE",
+]);
+
+/** Failure codes meaning analysis produced results but deployment was
+ * blocked or not applicable — later phases were never reached, not failed. */
+export const DEPLOYMENT_BLOCKED_CODES = new Set([
+  "NO_DEPLOYABLE_APP",
+  "MULTIPLE_APPS_REQUIRE_TARGET",
+  "INVALID_DEPLOYMENT_TARGET",
+  "AMBIGUOUS_DEPLOY_TARGET",
+  "DEPLOYMENT_UNSUPPORTED",
+  "NO_TARGET_CANDIDATES",
+  "PLAN_REQUIRES_REVIEW",
+]);
+
+/** Blocked codes meaning "this repository has no suitable deployment target"
+ * (framework, library, or CLI-only project) — not applicable, not blocked. */
+export const DEPLOYMENT_NOT_APPLICABLE_CODES = new Set([
+  "NO_DEPLOYABLE_APP",
+  "NO_TARGET_CANDIDATES",
+]);
+
+/** Failure codes that name the execution stage itself (build/start/readiness). */
+const EXECUTION_FAILURE_CODES = new Set([
+  "BUILD_FAILED",
+  "BUILD_TIMEOUT",
+  "BUILD_REJECTED",
+  "START_FAILED",
+  "READINESS_FAILED",
+  "REAL_EXECUTION_FAILED",
+  "POLICY_VIOLATION",
+]);
+
+export type OutcomeTone = "success" | "warning" | "error" | "info" | "neutral";
+
+export interface RunOutcome {
+  /** Primary status: what repository analysis did — never deployment. */
+  analysis: { label: string; tone: OutcomeTone };
+  /** Secondary status: deployment, when a deployment outcome exists at all. */
+  deployment: { label: string; tone: OutcomeTone } | null;
+}
+
+/**
+ * Authoritative analysis-vs-deployment outcome for one run.
+ *
+ * Uses the backend-persisted `analysis_status`/`deployment_status` and the
+ * structured `error_code` first; run status is only the honest fallback for
+ * older records. A deployment block never becomes an analysis failure, and a
+ * genuine failure never claims analysis completed.
+ */
+export function runOutcome(run: RunSummary): RunOutcome {
+  const code = (run.error_code ?? "").toUpperCase();
+  const blocked = code !== "" && DEPLOYMENT_BLOCKED_CODES.has(code);
+
+  let analysis: RunOutcome["analysis"];
+  const status = run.analysis_status ?? null;
+  if (status === "completed") analysis = { label: "Analysis complete", tone: "success" };
+  else if (status === "partial") analysis = { label: "Analysis partially complete", tone: "warning" };
+  else if (status === "failed") analysis = { label: "Analysis failed", tone: "error" };
+  else if (isRunningStatus(run.status)) {
+    analysis = { label: run.status === "queued" ? "Queued" : "Analyzing", tone: "info" };
+  } else if (blocked || (code !== "" && CONFIG_BLOCK_CODES.has(code)) || run.status === "completed") {
+    // Backend gate semantics: the support/execution gates fire only after
+    // analysis persisted, so blocked runs did complete analysis.
+    analysis = { label: "Analysis complete", tone: "success" };
+  } else if (run.status === "partial_recovery") {
+    analysis = { label: "Analysis complete", tone: "warning" };
+  } else if (run.status === "failed") {
+    // No evidence the analysis finished — never blame it by default.
+    analysis = { label: "Run failed", tone: "error" };
+  } else if (run.status === "cancelled") {
+    analysis = { label: "Cancelled", tone: "error" };
+  } else if (run.status === "awaiting_approval") {
+    analysis = { label: "Awaiting approval", tone: "warning" };
+  } else {
+    analysis = { label: run.status.replace(/_/g, " "), tone: "neutral" };
+  }
+
+  let deployment: RunOutcome["deployment"] = null;
+  if (code !== "" && DEPLOYMENT_NOT_APPLICABLE_CODES.has(code)) {
+    deployment = { label: "Deployment not applicable", tone: "neutral" };
+  } else if (blocked) {
+    deployment = { label: "Deployment blocked", tone: "warning" };
+  } else if (code !== "" && CONFIG_BLOCK_CODES.has(code)) {
+    deployment = { label: "Execution not configured", tone: "neutral" };
+  } else if (run.status === "completed") {
+    deployment = { label: "Deployment completed", tone: "success" };
+  } else if (run.status === "partial_recovery") {
+    deployment = { label: "Deployment recovered", tone: "warning" };
+  } else if (run.status === "failed" && code !== "" && EXECUTION_FAILURE_CODES.has(code)) {
+    deployment = { label: "Deployment failed", tone: "error" };
+  }
+  return { analysis, deployment };
+}
+
 /* Plain-language prefixes for backend failure codes we actually emit. */
 const FAILURE_PREFIX: Record<string, string> = {
   EXECUTION_NOT_CONFIGURED: "Execution not configured",
@@ -127,8 +229,10 @@ const FAILURE_PREFIX: Record<string, string> = {
   INVALID_DEPLOYMENT_TARGET: "Deployment target invalid",
   AMBIGUOUS_DEPLOY_TARGET: "Deployment target ambiguous",
   DEPLOYMENT_UNSUPPORTED: "Deployment unsupported",
+  NO_DEPLOYABLE_APP: "No deployable application detected",
   NO_TARGET_CANDIDATES: "No deployable application detected",
   PLAN_REQUIRES_REVIEW: "Plan needs review",
+  PIPELINE_ERROR: "Unexpected pipeline error",
   BUILD_FAILED: "Build failed",
   BUILD_TIMEOUT: "Build timed out",
   BUILD_REJECTED: "Build rejected",

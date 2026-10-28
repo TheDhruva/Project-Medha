@@ -35,11 +35,17 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # GitHub-shaped tokens (also covered by core deploy logs)
     (re.compile(r"\b(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)"), REDACTED),
     (re.compile(r"x-access-token:[^\s]+"), REDACTED),
+    # Google API keys (AIza + 35 chars; a shorter floor still catches
+    # truncated/partial echoes without meaningful false positives).
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{10,}"), REDACTED),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*"), f"Bearer {REDACTED}"),
-    # key = value assignments
+    # key = value assignments. The optional [A-Za-z0-9_]* prefix lets a bare
+    # \b boundary match inside common names like db_password / user_token /
+    # app_secret (the leading \b alone sits between two word chars and skips
+    # them). The value is always redacted regardless of the name prefix.
     (
         re.compile(
-            r'(?i)\b(api[_-]?key|secret|token|password|passwd|pwd)\b\s*[:=]\s*["\']?([^\s"\';,}]+)["\']?'
+            r'(?i)\b[A-Za-z0-9_]*?(api[_-]?key|secret|token|password|passwd|pwd)\b\s*[:=]\s*["\']?([^\s"\';,}]+)["\']?'
         ),
         lambda m: f"{m.group(1)}={REDACTED}",
     ),

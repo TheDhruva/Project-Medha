@@ -137,6 +137,20 @@ Fetch deployment snapshot.
 ```
 
 When finished, `result` may embed a `DeploymentResult` summary (see `DATA_MODEL.md`).
+On terminal runs it may also carry two additive, redacted fields:
+
+- `result.failure` — structured failure diagnostics for acquisition/execution
+  failures, persisted separately from raw logs: `code`, `category`
+  (`timeout|filesystem|disk|network|auth|not_found|unavailable|unknown`),
+  `operation` (`clone|fetch|checkout|…`), `exit_code`, `duration_seconds`,
+  bounded `stderr_tail`/`stdout_tail`, and `failed_stage` (credentials are
+  redacted before storage; absent on older records and on failures without
+  process output).
+- `result.phases` — authoritative terminal snapshot of the six UI phases
+  (`preflight|analyze|plan|cnp|verify|execute`), each `completed|failed|
+  blocked|skipped|pending` with an evidence-based `reason`. `blocked` means
+  the phase was never reached because a prerequisite failed; `skipped` means
+  a reached gate stopped it (e.g. execution not configured).
 
 ---
 
@@ -290,11 +304,13 @@ tokens, or repository contents appear in this surface.
 | POST | `/api/evaluation/run/cnp` | Execute CNP evaluation runner (token-guarded) |
 | POST | `/api/evaluation/run/ceg` | Execute CEG evaluation runner (token-guarded) |
 | GET | `/api/evaluation/latest/{kind}` | Fetch one artifact (`cnp`/`ceg`/`combined`) |
-| GET | `/api/deploys` | List runs (`status`, `mode`, `repository`, `project_id`, `limit`, `offset`); each summary carries `error_code` when the stored result has a structured failure/block code (e.g. `EXECUTION_NOT_CONFIGURED`) |
+| GET | `/api/deploys` | List runs (`status`, `mode`, `repository`, `project_id`, `limit`, `offset`); each summary carries `error_code` when the stored result has a structured failure/block code (e.g. `EXECUTION_NOT_CONFIGURED`), the additive `failure` diagnostics record and authoritative `phases` snapshot (§3, null/absent on older records), plus additive `analysis_status` (`completed`/`partial`/`failed`) and `deployment_status` (e.g. `blocked`) outcome fields from the persisted result (null on older records) |
 | GET | `/api/deploy/{id}/verification` | Stored verification + critic artifacts |
 | GET | `/api/deploy/{id}/rollback` | Stored rollback scope |
 | GET | `/api/deploy/{id}/execution` | Stored result + graph + rollback |
-| GET | `/api/deploy/{id}/scores` | Six versioned evidence-backed scores (`scores-v2`; §18) |
+| GET | `/api/deploy/{id}/scores` | Six versioned evidence-backed scores (`scores-v4`; §18) |
+| GET | `/api/deploy/{id}/findings` | Persisted finding ledger with lifecycle states and status counts (§20) |
+| POST | `/api/deploy/{id}/findings/{finding_id}` | Transition one finding through its enforced lifecycle (token-guarded; §20) |
 | GET | `/api/scores/history` | Score history by `run_id` or `project_id` (§18) |
 | GET | `/api/deploy/{id}/health` | Observed runtime health (live probe; `healthy` only on evidence, else `unhealthy`/`unknown`/`test_only`/`demo`) |
 | GET | `/api/config/status` | Presence-only environment diagnostics (booleans, never secret values) + structured `execution_readiness` (`status`/`reason_code`/`message`/`next_actions`/restart & operator flags; §17) |
@@ -499,9 +515,13 @@ Clerk subject (or the legacy single-operator subject); all rows carry
   run/proposal history is preserved but no longer routable. Deletion is
   refused with `409 ACTIVE_RUNS` while a run is in flight.
 - `POST /api/projects/{id}/runs` `{intent?, base_revision? (40-hex),
-  target_revision? (40-hex), target_host?, target_port?, deployment_target?}` — starts a
+  target_revision? (40-hex), target_host?, target_port?, deployment_target?,
+  retry_of? (≤64 chars)}` — starts a
   real-mode analysis bound to the project (`connected` required, else
-  `409 PROJECT_NOT_CONNECTED`). Omitting both revisions runs a full
+  `409 PROJECT_NOT_CONNECTED`). `retry_of` links a retry to the run it
+  retries: it is echoed in the response and persisted in the new run's
+  `explain_technical` (the prior run's record and diagnostics stay
+  unchanged); every retry creates a distinct `deployment_id`. Omitting both revisions runs a full
   analysis of the project's current HEAD; when given, revisions must be
   exact 40-hex SHAs (`400 INVALID_SHA`) and `target_revision` is checked
   out exactly (see §12). Target resolution order: explicit
@@ -538,7 +558,7 @@ their provenance:
 
 ---
 
-## 18. Scores (`scores-v2`)
+## 18. Scores (`scores-v4`)
 
 `GET /api/deploy/{id}/scores` computes six deterministic scores from stored
 evidence and persists snapshots: `code_quality`, `security`,
@@ -553,15 +573,30 @@ independently from repository analysis and stored artifacts:
 - `code_quality`: build result (25), repository static analysis (35), secret
   findings (20), blocker findings (20).
 - `security`: container verification check (30), semgrep (25), trivy (25),
-  gitleaks (20).
+  gitleaks (20), plus the deterministic built-in policy checks (`SEC-*`,
+  `CFG-*`, `AUTH-*`, severity-based deduction). Security evidence always
+  includes `security_failures` (number of failed security checks) and
+  `scan_completeness` (`analysis_status`, `security_scan`, `gaps`).
 - `verification_confidence`: the 9 required verifier checks; warnings count
   half, absent required checks are `not_assessed`.
 - `deployment_readiness`: target support (25), application inventory (20),
   verification gate (25), real execution (20), observed health (10).
+- `performance`: only from change-risk evidence or a measured benchmark;
+  with neither, `value: null` — no default number is presented as a
+  measurement.
+- `optimization`: only from recorded verification checks or change
+  requirements; with neither, `value: null` — "nothing to optimize" is never
+  claimed without looking.
 
 Unavailable scanners, skipped checks and unrun health checks are
 `not_assessed`, not passes. Coverage caps keep unknown areas from scoring
-full. `GET /api/scores/history?run_id=…&project_id=…` queries snapshots.
+full. When the run was blocked because the repository has no deployable
+application (`NO_DEPLOYABLE_APP`, `NO_TARGET_CANDIDATES`),
+`deployment_readiness` is **not applicable**: `value: null` plus
+`evidence.applicable = false` and a plain-English `evidence.reason` — never a
+fabricated low score or a "critical findings" label. The `scores-v4` version
+bump forces recompute of stale `scores-v3` snapshots. `GET
+/api/scores/history?run_id=…&project_id=…` queries snapshots.
 
 ## 19. Commit history
 
@@ -570,3 +605,56 @@ full. `GET /api/scores/history?run_id=…&project_id=…` queries snapshots.
 `partial`/`shallow` flags when history is bounded. Detail endpoint adds
 per-file added/deleted counts. CIG (dependency impact) and CEG (execution
 causality) remain distinct graphs with their own evidence.
+
+## 20. Findings ledger
+
+Findings persist across runs with a stable identity. The fingerprint is
+`sha256(source | rule_id | path | normalized message)` — line numbers are
+deliberately excluded, so reformatting or shifted lines never create a
+duplicate. `finding_id` is derived from `(project, repository, fingerprint)`
+and never changes for the same condition.
+
+### GET `/api/deploy/{id}/findings`
+
+Query: `status` (one of the lifecycle states below; validated) and `limit`
+(1–500, default 200).
+
+Response `200`:
+
+- `deployment_id`, `is_demo`, `label` (`DEMO/MOCK` for demo runs)
+- `lifecycle_states`: the full ordered state list
+- `status_counts`: counts per status within the returned rows
+- `findings[]`: full rows — identity (`finding_id`, `fingerprint`), `source`,
+  `rule_id`, `category`, `severity`, `confidence`, `path`/`line`, `message`,
+  `status`, `verification_status`, `first_seen_sha`/`last_seen_sha`,
+  timestamps, observation `evidence`, and `history`
+- `total`
+
+Errors: `404 NOT_FOUND` (unknown or unowned run), `400 FINDING_STATUS_INVALID`
+(unknown `status` value; response includes the `allowed` list).
+
+### POST `/api/deploy/{id}/findings/{finding_id}` (mutation token)
+
+Body: `status` (target state), `reason` (required, 1–2000 chars), `evidence`
+(list of string references, max 50).
+
+Lifecycle: `detected`, `under_investigation`, `confirmed`, `rejected`,
+`accepted_risk`, `fixed_unverified`, `resolved`, `reopened`. Transitions are
+enforced server-side; `confirmed`, `rejected` and `resolved` require at least
+one `evidence` reference — a verified conclusion is never settled by
+assertion. Re-detection of a `resolved`/`rejected`/`fixed_unverified`
+condition produces `reopened`.
+
+Response `200`: `{deployment_id, finding, history}`.
+
+Errors: `404 NOT_FOUND` (unknown run or finding), `409
+FINDING_TRANSITION_INVALID` (unknown state, illegal transition, or missing
+evidence).
+
+### Scan-time semantics
+
+- Each scan upserts its findings; new conditions enter as `detected`.
+- A previously reported condition disappears to `fixed_unverified` — never
+  `resolved` — only when its originating check actually re-ran in that scan
+  and did not report it. A check that did not run leaves finding state
+  untouched.

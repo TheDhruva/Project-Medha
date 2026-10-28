@@ -11,10 +11,12 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.ai.redact import redact_text
 from app.core.logging import get_logger
 from app.core.repo_url import (
     RepositoryUrlError,
@@ -61,11 +63,20 @@ def _enforce_connection_boundary(cleaned_url: str) -> str | None:
 
 
 def _secure_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Env for every git subprocess: no prompts, no credential leakage."""
+    """Env for every git subprocess: no prompts, no credential leakage.
+
+    `core.longpaths=true` fixes real checkout failures on Windows, where
+    git's default MAX_PATH (260) limit aborts clones of repositories with
+    deeply nested paths (verified: vercel/next.js). It is a no-op on other
+    platforms, so it is safe to pass everywhere.
+    """
     env = {
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_ASKPASS": "",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.longpaths",
+        "GIT_CONFIG_VALUE_0": "true",
     }
     if extra:
         env.update(extra)
@@ -87,10 +98,147 @@ class RepoAcquisition:
 
 
 class GitAcquireError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    """Git failure with structured, sanitized diagnostics.
+
+    `message` is the concise user-facing summary (fatal lines only — never
+    progress noise). The full (bounded, redacted) subprocess output and the
+    exit code / duration / failing operation live in the dedicated fields so
+    callers can persist them without parsing the message string.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        operation: str | None = None,
+        exit_code: int | None = None,
+        duration_s: float | None = None,
+        stderr_tail: str | None = None,
+        stdout_tail: str | None = None,
+        category: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.operation = operation
+        self.exit_code = exit_code
+        self.duration_s = duration_s
+        self.stderr_tail = stderr_tail
+        self.stdout_tail = stdout_tail
+        self.category = category or _CATEGORY_BY_CODE.get(code, "unknown")
+
+    def to_diagnostics(self) -> dict:
+        """JSON-safe diagnostics for the persisted run failure record."""
+        out: dict = {"code": self.code, "category": self.category}
+        if self.operation:
+            out["operation"] = self.operation
+        if self.exit_code is not None:
+            out["exit_code"] = self.exit_code
+        if self.duration_s is not None:
+            out["duration_seconds"] = round(self.duration_s, 3)
+        if self.stderr_tail:
+            out["stderr_tail"] = self.stderr_tail
+        if self.stdout_tail:
+            out["stdout_tail"] = self.stdout_tail
+        return out
+
+
+# Coarse failure categories derived from stable error codes. Codes that
+# depend on git output text are classified at raise time instead.
+_CATEGORY_BY_CODE = {
+    "GIT_TIMEOUT": "timeout",
+    "GIT_UNAVAILABLE": "unavailable",
+    "GIT_CHECKOUT_FAILED": "filesystem",
+    "REPO_NOT_FOUND": "not_found",
+    "REVISION_NOT_FOUND": "not_found",
+    "SHA_NOT_FOUND": "not_found",
+}
+
+# Bounded tails: enough for diagnosis, never the whole pack negotiation.
+_STDERR_TAIL_CHARS = 4000
+_STDOUT_TAIL_CHARS = 2000
+
+# Git progress output (stderr) that carries no diagnostic value. Only used to
+# keep the human-readable summary clean — the sanitized tail retains it.
+_PROGRESS_RE = re.compile(
+    r"^(Cloning into |Updating files:|remote:\s*(Counting|Compressing|Enumerating|"
+    r"Total|Finding sources|Flattening|Writing objects)|Receiving objects:|"
+    r"Resolving deltas:|fatal:\s*dangling|Filtering content:|Downloading |"
+    r"\s*[0-9]+%)"
+)
+
+
+def _classify_git_stderr(stderr: str) -> str:
+    """Map git output to a stable failure category (deterministic, bounded)."""
+    text = stderr.lower()
+    if "clone succeeded, but checkout failed" in text or "filename too long" in text:
+        return "filesystem"
+    if "cannot create " in text or "unable to create file" in text:
+        return "filesystem"
+    if "no space left on device" in text or "disk full" in text:
+        return "disk"
+    if (
+        "repository not found" in text
+        or "does not appear to be a git repository" in text
+        or "404" in text
+    ):
+        return "not_found"
+    if (
+        "authentication failed" in text
+        or "could not read username" in text
+        or "returned error: 401" in text
+        or "returned error: 403" in text
+        or "permission denied" in text
+    ):
+        return "auth"
+    if (
+        "could not resolve host" in text
+        or "unable to access" in text
+        or "early eof" in text
+        or "connection reset" in text
+        or "connection timed out" in text
+        or "network is unreachable" in text
+        or "the remote end hung up" in text
+    ):
+        return "network"
+    return "unknown"
+
+
+def _git_fatal_summary(stderr: str) -> str:
+    """Concise summary: the fatal/error lines, else the last meaningful line.
+
+    Git writes progress ("Updating files: 77%") to stderr ahead of the one
+    line that explains the failure — keep the signal, drop the noise.
+    Redacted here so the user-facing message can never leak credentials
+    embedded in URLs (e.g. https://user:pass@host).
+    """
+    meaningful = [
+        line.strip()
+        for line in (stderr or "").splitlines()
+        if line.strip() and not _PROGRESS_RE.match(line.strip())
+    ]
+    if not meaningful:
+        return "git exited unsuccessfully without a diagnostic message."
+    fatal = [line for line in meaningful if line.lower().startswith(("fatal:", "error:"))]
+    chosen = fatal or meaningful
+    summary = " / ".join(chosen[-3:])
+    if len(summary) > 300:
+        summary = f"{summary[:297]}..."
+    return redact_text(summary)
+
+
+def _sanitize_git_output(text: str | None, *, max_chars: int) -> str | None:
+    """Redact credentials and bound subprocess output for persistence."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    redacted = redact_text(stripped)
+    if len(redacted) > max_chars:
+        redacted = f"[...truncated...]\n{redacted[-max_chars:]}"
+    return redacted
 
 
 def _require_full_sha(sha: str | None) -> str:
@@ -116,9 +264,13 @@ def normalize_commit_sha(sha: str | None) -> str:
 
 def _run_git(
     args: list[str], *, cwd: Path | None = None, timeout: int = _GIT_TIMEOUT_S,
-    env: dict[str, str] | None = None,
+    env: dict[str, str] | None = None, operation: str | None = None,
 ) -> str:
-    """Run a bounded git command; stdout on success, GitAcquireError otherwise."""
+    """Run a bounded git command; stdout on success, GitAcquireError otherwise.
+
+    Failures carry the real exit code, elapsed time, and a sanitized stderr
+    tail so callers can persist honest diagnostics.
+    """
     import os
 
     merged = {**os.environ, **_secure_git_env(env)}
@@ -130,6 +282,8 @@ def _run_git(
         return arg
 
     safe_args = [_scrub(a) for a in args]
+    op = operation or "git"
+    started = time.monotonic()
     try:
         completed = subprocess.run(
             ["git", *args],
@@ -141,12 +295,31 @@ def _run_git(
             env=merged,
         )
     except subprocess.TimeoutExpired as exc:
-        raise GitAcquireError("GIT_TIMEOUT", "Git operation timed out") from exc
+        stderr_tail = _sanitize_git_output(
+            exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr,
+            max_chars=_STDERR_TAIL_CHARS,
+        )
+        raise GitAcquireError(
+            "GIT_TIMEOUT",
+            f"Git {op} timed out after {timeout}s",
+            operation=op,
+            duration_s=time.monotonic() - started,
+            stderr_tail=stderr_tail,
+        ) from exc
     except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()[:300]
+        stderr = exc.stderr or ""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        summary = _git_fatal_summary(stderr)
         raise GitAcquireError(
             "GIT_COMMAND_FAILED",
-            f"Git '{' '.join(safe_args[:3])}' failed: {stderr or 'git error'}",
+            f"Git {op} failed: {summary}",
+            operation=op,
+            exit_code=exc.returncode,
+            duration_s=time.monotonic() - started,
+            stderr_tail=_sanitize_git_output(stderr, max_chars=_STDERR_TAIL_CHARS),
+            stdout_tail=_sanitize_git_output(exc.stdout, max_chars=_STDOUT_TAIL_CHARS),
+            category=_classify_git_stderr(stderr),
         ) from exc
     return (completed.stdout or "").strip()
 
@@ -250,13 +423,14 @@ def checkout_commit(repo_path: Path, sha: str, *, timeout: int = _GIT_TIMEOUT_S,
     _run_git(
         ["-C", str(repo_path), "-c", "http.followRedirects=false",
          "fetch", "--depth", "1", "--filter=blob:none", "origin", wanted],
-        timeout=timeout, env=env,
+        timeout=timeout, env=env, operation="fetch",
     )
     _run_git(
         ["-C", str(repo_path), "checkout", "--detach", "--force", wanted],
-        timeout=timeout, env=env,
+        timeout=timeout, env=env, operation="checkout",
     )
-    head = _run_git(["-C", str(repo_path), "rev-parse", "HEAD"], timeout=timeout).lower()
+    head = _run_git(["-C", str(repo_path), "rev-parse", "HEAD"], timeout=timeout,
+                    env=env, operation="rev-parse").lower()
     if head != wanted:
         raise GitAcquireError(
             "SHA_MISMATCH",
@@ -449,11 +623,14 @@ def acquire_repository(
         raise GitAcquireError(
             "GIT_UNAVAILABLE",
             "git executable not found. Install git or pass a local repository path.",
+            operation="clone",
         )
     _enforce_connection_boundary(repository_url)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     import os
+
+    from app.core.config import get_settings
 
     clone_env = {**os.environ, **_secure_git_env(token_env)}
     # Disable submodule auto-fetch at clone time; submodules are validated
@@ -464,23 +641,49 @@ def acquire_repository(
         "http.followRedirects=false",
         repository_url, str(dest),
     ]
+    # Evidence-based bound: cloning + checkout of a 34k-file repository
+    # (vercel/next.js) measured ~85s on a mid-range machine; the configured
+    # acquire timeout (default 600s) leaves headroom for slower links.
+    clone_timeout = max(60.0, float(get_settings().timeout_acquire_s))
+    started = time.monotonic()
     try:
-        subprocess.run(
+        completed = subprocess.run(
             ["git", *clone_cmd[1:]],
-            check=True,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=clone_timeout,
             env=clone_env,
         )
     except subprocess.TimeoutExpired as exc:
-        raise GitAcquireError("GIT_TIMEOUT", "Shallow clone timed out") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()[:500]
+        stderr_tail = _sanitize_git_output(
+            exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr,
+            max_chars=_STDERR_TAIL_CHARS,
+        )
         raise GitAcquireError(
-            "GIT_CLONE_FAILED",
-            f"Shallow clone failed: {stderr or exc}",
+            "GIT_TIMEOUT",
+            f"Shallow clone timed out after {clone_timeout:.0f}s",
+            operation="clone",
+            duration_s=time.monotonic() - started,
+            stderr_tail=stderr_tail,
         ) from exc
+    if completed.returncode != 0:
+        stderr = completed.stderr or ""
+        # "Clone succeeded, but checkout failed" means the objects arrived but
+        # the working tree could not be materialized (e.g. Windows long paths,
+        # permissions, disk) — a distinct outcome from a transport failure.
+        checkout_failed = "Clone succeeded, but checkout failed" in stderr
+        code = "GIT_CHECKOUT_FAILED" if checkout_failed else "GIT_CLONE_FAILED"
+        summary = _git_fatal_summary(stderr)
+        raise GitAcquireError(
+            code,
+            f"Shallow clone failed: {summary}",
+            operation="checkout" if checkout_failed else "clone",
+            exit_code=completed.returncode,
+            duration_s=time.monotonic() - started,
+            stderr_tail=_sanitize_git_output(stderr, max_chars=_STDERR_TAIL_CHARS),
+            stdout_tail=_sanitize_git_output(completed.stdout, max_chars=_STDOUT_TAIL_CHARS),
+            category=_classify_git_stderr(stderr),
+        )
 
     checked: str | None = None
     if wanted:

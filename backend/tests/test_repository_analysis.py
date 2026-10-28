@@ -100,6 +100,38 @@ def test_inventory_covers_all_discovered_applications(tmp_path):
         assert "duration_ms" in t
 
 
+def test_builtin_policy_checks_run_and_external_coverage_stays_honest(
+    tmp_path, monkeypatch
+):
+    """Builtin checks give baseline coverage; they never fake a clean scan."""
+    from app.security import scanners as sc
+
+    monkeypatch.setattr(sc.shutil, "which", lambda exe: None)  # no tools at all
+    _write(tmp_path / "app.py", "subprocess.run(cmd, shell=True)\n")
+    report = build_repository_inventory(
+        tmp_path, scanner_names=["gitleaks", "semgrep", "trivy"]
+    )
+
+    tasks = {t["task"]: t for t in report["tasks"]}
+    builtin = tasks.get("security:builtin")
+    assert builtin is not None
+    assert builtin["status"] == "completed_with_findings"
+    assert any(f["rule_id"] == "SEC-101" for f in report["findings"])
+    assert all(
+        f["source"] == "builtin"
+        for f in report["findings"]
+        if f["rule_id"] == "SEC-101"
+    )
+
+    # External scanners all ran as unavailable: coverage is "none", not
+    # "complete", and the gap says what is actually unknown.
+    assert report["coverage"]["security_scan"] == "none"
+    assert any(
+        "no external security scanner executed" in g
+        for g in report["coverage"]["gaps"]
+    )
+
+
 def test_missing_scanner_is_unavailable_not_clean(tmp_path, monkeypatch):
     from app.security import scanners
 

@@ -294,10 +294,18 @@ def _node_start(pkg: dict) -> list[str]:
 
 
 def _find_python_app(checkout: Path) -> str | None:
-    for candidate in ("app", "main", "wsgi", "asgi", "server"):
-        if (checkout / f"{candidate}.py").is_file():
-            return candidate
-    return None
+    """Dotted module path of the Python web entrypoint (e.g. ``app.main``).
+
+    Delegates to the authoritative shared detector in ``app_discovery``
+    so the analyzer, support gate, and runtime spec all agree. Returns the
+    importable module path (root-level ``app.py``/``main.py`` or nested
+    ``app/main.py``/``src/main.py`` layouts) or None when no web entrypoint
+    is evidenced.
+    """
+    from app.core.app_discovery import find_python_web_entry
+
+    entry = find_python_web_entry(checkout)
+    return entry.module if entry else None
 
 
 def _is_fastapi(checkout: Path) -> bool:

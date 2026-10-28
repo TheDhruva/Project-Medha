@@ -7,7 +7,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { EnvBadge } from "@/components/ui/Section";
 import { fetchRunsList, type RunSummary } from "@/lib/api/client";
 import { scenarioDisplayName } from "@/lib/runs/display";
-import { summarizeRunFailure } from "@/lib/projects/projects";
+import { runOutcome, summarizeRunFailure } from "@/lib/projects/projects";
 
 function outcomeFor(status: string): { icon: React.ReactNode; label: string } {
   switch (status) {
@@ -63,6 +63,20 @@ function conciseOutcome(run: RunSummary): string | null {
   if (run.status === "completed") return "All checks passed";
   if (run.status === "failed") return summarizeRunFailure(run);
   return null;
+}
+
+/** Recorded analysis status → ink color; unknown/null stays tertiary. */
+function analysisTone(status: string | null | undefined): string {
+  switch (status) {
+    case "completed":
+      return "text-medha-success-ink";
+    case "partial":
+      return "text-medha-warning";
+    case "failed":
+      return "text-medha-danger";
+    default:
+      return "text-medha-tertiary";
+  }
 }
 
 export function RunsList() {
@@ -156,6 +170,17 @@ export function RunsList() {
                 {runs.map((run) => {
                   const outcome = outcomeFor(run.status);
                   const detail = conciseOutcome(run);
+                  // Failed runs report the authoritative analysis/deployment
+                  // outcome instead of a bare "Blocked" label.
+                  const outcomeLabel =
+                    run.status === "failed"
+                      ? (() => {
+                          const labels = runOutcome(run);
+                          return [labels.analysis.label, labels.deployment?.label]
+                            .filter(Boolean)
+                            .join(" · ");
+                        })()
+                      : outcome.label;
                   return (
                     <li key={run.deployment_id}>
                       <Link
@@ -168,12 +193,33 @@ export function RunsList() {
                             {scenarioDisplayName(run)}
                           </span>
                           <span className="mt-0.5 line-clamp-2 block text-[12.5px] leading-4 text-medha-secondary">
-                            {outcome.label}
+                            {outcomeLabel}
                             {detail ? ` · ${detail}` : ""}
                             {run.duration_seconds != null
                               ? ` · ${run.duration_seconds.toFixed(1)}s`
                               : ""}
                             {` · ${formatDateTime(run.created_at)}`}
+                          </span>
+                          {/* Recorded analysis facts; absent fields stay "—". */}
+                          <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-medha-tertiary">
+                            <span className="medha-mono">rev {run.target_revision?.slice(0, 7) ?? "—"}</span>
+                            <span
+                              className={`rounded border border-medha-border px-1.5 py-px font-medium ${analysisTone(
+                                run.analysis_status,
+                              )}`}
+                            >
+                              analysis {run.analysis_status ?? "—"}
+                            </span>
+                            <span>
+                              coverage{" "}
+                              {run.analysis_coverage
+                                ? `${run.analysis_coverage.security_scan ?? "—"} · ${
+                                    run.analysis_coverage.gaps
+                                  } gap${run.analysis_coverage.gaps === 1 ? "" : "s"}`
+                                : "—"}
+                            </span>
+                            <span>findings {run.analysis_coverage?.finding_count ?? "—"}</span>
+                            {run.pr_number != null ? <span>PR #{run.pr_number}</span> : null}
                           </span>
                         </span>
                         <EnvBadge isDemo={run.is_demo} size="sm" />

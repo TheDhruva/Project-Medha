@@ -342,7 +342,12 @@ SQLite tables (Postgres mirrors in `schema_pg.sql`) map closely to:
   attempts/backoff; schema v8)
 - `commits` (commit history metadata per project + SHA)
 - `scores` (versioned score snapshots per run + score name, with inputs hash)
-- `analysis_cache` (incremental cache validity metadata)
+- `analysis_cache` (repository-inventory reuse keyed by commit + target +
+  scanner configuration + installed-tool signature; failed payloads never
+  stored)
+- `findings` (cross-run finding ledger: sha256 fingerprint identity,
+  lifecycle `status` + `verification_status`, first/last seen SHA,
+  observation `evidence` and transition `history` JSON; schema v11)
 
 No Redis caches required for correctness.
 

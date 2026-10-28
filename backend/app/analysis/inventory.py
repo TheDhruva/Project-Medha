@@ -339,11 +339,11 @@ def build_repository_inventory(
             details.append({**app, "available": False, "detail_error": res.error})
 
     findings: list[dict[str, Any]] = []
+    scope = root
     if scan_security:
         from app.security import scanners
 
         names = scanner_names if scanner_names is not None else scanners.supported_scanners()
-        scope = root
         if selected_target and selected_target not in (".", "") and (root / selected_target).is_dir():
             scope = root / selected_target
         for name in names:
@@ -355,22 +355,45 @@ def build_repository_inventory(
             tasks.append(st)
             findings.extend(st.findings)
 
+        # Deterministic built-in policy checks: always available, so MEDHA
+        # has baseline security coverage even when no optional tool exists.
+        from app.analysis.policy import run_policy_checks
+
+        policy_scope = scope
+        builtin = run_isolated(
+            "security:builtin",
+            lambda: run_policy_checks(policy_scope),
+            timeout_s=60.0,
+        )
+        tasks.append(builtin)
+        findings.extend(builtin.findings)
+
     findings = dedupe_findings(findings)
 
     # Security coverage is tracked separately from the aggregate: an absent
     # optional scanner is a coverage limitation, never a clean result, and
-    # never downgrades the aggregate of tasks that actually ran.
+    # never downgrades the aggregate of tasks that actually ran. The builtin
+    # policy task always runs when scanning is on, so external-tool coverage
+    # (security_scan) is computed from external scanners only — builtin
+    # presence must not soften a "no external scanner ran" result.
     security_tasks = [t for t in tasks if t.task.startswith("security:")]
+    external_tasks = [t for t in security_tasks if t.task != "security:builtin"]
     scanners = [
         {"name": t.task.split(":", 1)[1], "status": t.status,
          "error": t.error, "duration_ms": t.duration_ms}
         for t in security_tasks
     ]
-    scanners_ran = [s["name"] for s in scanners if s["status"] in {SUCCEEDED, COMPLETED_WITH_FINDINGS}]
-    scanners_failed = [s["name"] for s in scanners if s["status"] in {FAILED, TIMED_OUT}]
-    if not security_tasks:
+    scanners_ran = [
+        t.task.split(":", 1)[1] for t in external_tasks
+        if t.status in {SUCCEEDED, COMPLETED_WITH_FINDINGS}
+    ]
+    scanners_failed = [
+        t.task.split(":", 1)[1] for t in external_tasks
+        if t.status in {FAILED, TIMED_OUT}
+    ]
+    if not external_tasks:
         security_scan = "not_requested"
-    elif scanners_ran and not scanners_failed and len(scanners_ran) == len(security_tasks):
+    elif scanners_ran and not scanners_failed and len(scanners_ran) == len(external_tasks):
         security_scan = "complete"
     elif scanners_ran:
         security_scan = "partial"
@@ -386,7 +409,10 @@ def build_repository_inventory(
         if t.status in {FAILED, TIMED_OUT, UNAVAILABLE, PARTIAL}:
             gaps.append(f"{t.task}: {t.status}" + (f" ({t.error})" if t.error else ""))
     if security_scan == "none":
-        gaps.append("no security scanner executed; security coverage is unknown")
+        gaps.append(
+            "no external security scanner executed; secret, dependency and "
+            "SAST coverage is unknown"
+        )
     # Unsupported runtime families present in the tree.
     langs = {l["language"] for l in languages.evidence.get("languages", [])}
     runtime_map = {"javascript": "node", "typescript": "node", "vue": "node", "svelte": "node",

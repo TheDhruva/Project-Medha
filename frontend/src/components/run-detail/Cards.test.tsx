@@ -83,6 +83,34 @@ describe("DecisionCard", () => {
     expect(screen.queryByText("0")).not.toBeInTheDocument();
   });
 
+  it("explains a missing score on a blocked run instead of implying it was evaluated", () => {
+    render(
+      <DecisionCard
+        snapshot={snap({
+          runStatus: "failed",
+          critic: null,
+          result: {
+            kind: "failed",
+            title: "FAILED",
+            message: "Clone failed",
+            durationLabel: "—",
+            servicesLabel: "n/a",
+            verificationScore: null,
+            constraintsResolved: 0,
+            rollbackScope: null,
+            code: "GIT.CHECKOUT_FAILED",
+          },
+        })}
+        onViewEvidence={noop}
+        onViewRecovery={noop}
+      />,
+    );
+    expect(
+      screen.getByText("No score — evaluation stopped before a decision score existed."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Not evaluated yet")).not.toBeInTheDocument();
+  });
+
   it("blocks failed runs and recovers partial runs honestly", () => {
     const { rerender } = render(
       <DecisionCard

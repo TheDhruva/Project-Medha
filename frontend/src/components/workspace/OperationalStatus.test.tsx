@@ -96,6 +96,8 @@ function renderStatus(props: {
   executionMode?: string | null;
   selectedPhase?: PhaseId | null;
   onClear?: () => void;
+  onRetry?: (() => void) | null;
+  retrying?: boolean;
 } = {}) {
   return render(
     <OperationalStatus
@@ -111,6 +113,8 @@ function renderStatus(props: {
       executionMode={props.executionMode === undefined ? "real" : props.executionMode}
       selectedPhase={props.selectedPhase ?? null}
       onClear={props.onClear ?? (() => undefined)}
+      onRetry={props.onRetry ?? null}
+      retrying={props.retrying ?? false}
     />
   );
 }
@@ -142,6 +146,73 @@ describe("OperationalStatus", () => {
     expect(within(region).getByText("Unknown")).toBeInTheDocument();
     expect(within(region).getByText(/does not confirm a healthy application/)).toBeInTheDocument();
     expect(within(region).queryByText("Healthy")).not.toBeInTheDocument();
+  });
+
+  it("never reports Analyze failed when no failure-stage evidence exists", () => {
+    renderStatus({
+      run: makeRun({
+        status: "failed",
+        current_stage: "COMPLETE",
+        result_kind: "failed",
+        error_summary: null,
+      }),
+      stages: [],
+      verification: null,
+    });
+
+    const region = panel();
+    const text = region.textContent ?? "";
+    expect(text).toContain("This run stopped before the failing stage was recorded");
+    expect(text).toContain("dep_1"); // run reference is shown
+    expect(text).not.toContain("Failed at Analyze");
+    expect(text).not.toContain("Failed —");
+    // No identifiable failed phase → the link goes straight to the
+    // diagnosis section under its own label.
+    expect(within(region).getByRole("link", { name: "View failure details →" })).toHaveAttribute(
+      "href",
+      "/projects/prj_1/runs/dep_1#diagnosis",
+    );
+  });
+
+  it("shows no fabricated verification metrics when verification never ran", () => {
+    renderStatus({
+      run: makeRun({ status: "failed", result_kind: "failed", error_summary: "boom" }),
+      stages: [],
+      verification: null,
+    });
+
+    const region = panel();
+    expect(within(region).getByText("No verification artifact was recorded.")).toBeInTheDocument();
+    expect(within(region).queryByText(/Passed \d+ of \d+/)).toBeNull();
+    expect(within(region).queryByText("100")).toBeNull();
+  });
+
+  it("reports a deployment-blocked run as analysis completed, phases not reached", () => {
+    renderStatus({
+      run: makeRun({
+        status: "failed",
+        result_kind: "failed",
+        error_code: "NO_DEPLOYABLE_APP",
+        error_summary:
+          "Analysis completed, but this repository does not contain a deployable web application.",
+      }),
+      stages: makeStages({
+        plan: { state: "idle" },
+        cnp: { state: "idle" },
+        verify: { state: "idle" },
+        execute: { state: "idle" },
+      }),
+      verification: null,
+    });
+
+    const region = panel();
+    expect(
+      within(region).getByText(/Analysis completed\. This repository has no deployable web application/),
+    ).toBeInTheDocument();
+    // Technical codes stay behind the expandable technical-details section.
+    expect(within(region).getByText("code: NO_DEPLOYABLE_APP")).toBeInTheDocument();
+    expect(within(region).getByText("run: dep_1")).toBeInTheDocument();
+    expect(within(region).queryByText(/Failed at/)).not.toBeInTheDocument();
   });
 
   it("reports real verification passed, failed, warning, and pending counts", () => {
@@ -393,5 +464,88 @@ describe("OperationalStatus", () => {
       within(region).getByRole("link", { name: "Open verification details →" }),
     ).toHaveAttribute("href", "/projects/prj_1/verification?run=dep_1");
     expect(within(region).queryByText("line-by-line raw verification output")).not.toBeInTheDocument();
+  });
+
+  it("shows structured checkout diagnostics and a retry action on a failed run", () => {
+    const onRetry = vi.fn();
+    renderStatus({
+      run: makeRun({
+        status: "failed",
+        current_stage: "COMPLETE",
+        result_kind: "failed",
+        error_code: "GIT.CHECKOUT_FAILED",
+        error_summary: "fatal: cannot create directory at 'test/…': Filename too long",
+        failure: {
+          code: "GIT.CHECKOUT_FAILED",
+          category: "filesystem",
+          operation: "clone",
+          exit_code: 128,
+          duration_seconds: 84,
+          failed_stage: "ANALYZE",
+          stderr_tail: "fatal: cannot create directory at 'test/…': Filename too long",
+        },
+      }),
+      stages: makeStages({
+        preflight: { state: "done" },
+        analyze: { state: "blocked", reason: "failure" },
+      }),
+      verification: null,
+      onRetry,
+    });
+
+    const region = panel();
+    // A failed phase exists (Analyze), so the link opens that run's details.
+    expect(within(region).getByRole("link", { name: "Open run details →" })).toHaveAttribute(
+      "href",
+      "/projects/prj_1/runs/dep_1",
+    );
+    expect(within(region).getByText("code: GIT.CHECKOUT_FAILED")).toBeInTheDocument();
+    expect(within(region).getByText("operation: clone")).toBeInTheDocument();
+    expect(within(region).getByText("category: filesystem")).toBeInTheDocument();
+    expect(within(region).getByText("exit code: 128")).toBeInTheDocument();
+
+    const retry = within(region).getByTestId("retry-run-button");
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("disables retry while a retry attempt is already starting", () => {
+    renderStatus({
+      run: makeRun({ status: "failed", result_kind: "failed", error_summary: "boom" }),
+      stages: [],
+      verification: null,
+      onRetry: vi.fn(),
+      retrying: true,
+    });
+    const retry = within(panel()).getByTestId("retry-run-button");
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveTextContent("Starting retry…");
+  });
+
+  it("explains phases the backend marked blocked as not reached, with the reason", () => {
+    renderStatus({
+      run: makeRun({
+        status: "failed",
+        error_code: "GIT.CHECKOUT_FAILED",
+        error_summary: "Clone failed",
+        phases: [
+          { id: "preflight", status: "completed" },
+          { id: "analyze", status: "failed", reason: "Clone failed" },
+          { id: "plan", status: "blocked", reason: "Analyze failed first" },
+          { id: "cnp", status: "blocked", reason: "Analyze failed first" },
+          { id: "verify", status: "blocked", reason: "Analyze failed first" },
+          { id: "execute", status: "blocked", reason: "Analyze failed first" },
+        ],
+      }),
+      stages: [],
+      verification: null,
+      selectedPhase: "plan",
+    });
+
+    const details = screen.getByRole("region", { name: "Plan details" });
+    expect(within(details).getByText("Blocked")).toBeInTheDocument();
+    expect(within(details).getByText("Not reached — Analyze failed first")).toBeInTheDocument();
+    expect(within(details).queryByText("Failed")).not.toBeInTheDocument();
   });
 });

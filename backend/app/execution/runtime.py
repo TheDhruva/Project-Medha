@@ -508,14 +508,16 @@ def _python_spec(
     checkout: Path, *, target_port: int, commit_sha: str | None,
     readiness_deadline_s: float,
 ) -> RuntimeSpec:
-    from app.execution.profiles import UnsupportedStack, _find_python_app, _is_fastapi
+    from app.core.app_discovery import find_python_web_entry
+    from app.execution.profiles import UnsupportedStack
 
-    app = _find_python_app(checkout)
-    if app is None:
+    entry = find_python_web_entry(checkout)
+    if entry is None:
         raise UnsupportedStack(
             "UNSUPPORTED_STACK",
             "Python repository has no recognizable web entrypoint "
-            "(app.py / main.py / wsgi.py / asgi.py with app object).",
+            "(app.py / main.py / wsgi.py / asgi.py — including nested "
+            "app/ or src/ layouts — with an app object or create_app factory).",
         )
     combined = ""
     for name in ("requirements.txt", "pyproject.toml"):
@@ -526,20 +528,28 @@ def _python_spec(
     is_fastapi = "fastapi" in combined
     framework = "fastapi" if is_fastapi else ("flask" if "flask" in combined else None)
     server = "uvicorn" if is_fastapi else "gunicorn"
-    evidence = [f"python entrypoint {app}", "requirements.txt/pyproject.toml"]
+    target = f"{entry.module}:{entry.object_name}"
+    evidence = [f"python entrypoint {entry.path} ({target})", "requirements.txt/pyproject.toml"]
     if framework:
         evidence.append(f"framework={framework}")
+    if entry.factory:
+        evidence.append("factory=create_app")
+    start_command = [server]
+    if entry.factory and server == "uvicorn":
+        # uvicorn --factory invokes a create_app() factory; only the ASGI
+        # server supports this flag (gunicorn WSGI factories stay out of V1).
+        start_command.append("--factory")
+    start_command += [target, "--host", "0.0.0.0", "--port", str(target_port)]
     return RuntimeSpec(
         profile="python-asgi", profile_version=PROFILE_VERSIONS["python-asgi"],
-        reason=f"python entrypoint {app}",
+        reason=f"python entrypoint {entry.path}",
         commit_sha=commit_sha, app_root=".",
         language="python", framework=framework,
         package_manager="pip", evidence=evidence, confidence=0.8,
         internal_port=target_port, host_port=target_port,
         env_defaults={}, required_env_names=_env_example_names(checkout),
         build=RuntimeBuild(required=False, command=None),
-        start={"command": [server, f"{app}:app", "--host", "0.0.0.0",
-                           "--port", str(target_port)], "bind_host": "0.0.0.0"},
+        start={"command": start_command, "bind_host": "0.0.0.0"},
         readiness={"path": "/", "deadline_s": readiness_deadline_s},
         base_image="python:3.12-slim",
     )

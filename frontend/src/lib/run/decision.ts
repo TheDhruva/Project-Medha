@@ -55,6 +55,29 @@ export function getDecision(snapshot: DeploymentSnapshot): {
 
   if (runStatus === "failed") {
     const blockedByVerification = verification?.passed === false;
+    // Acquisition/checkout failures never reached deployment at all:
+    // "Deployment blocked" would wrongly imply the deployment decision was
+    // the issue. Name the real failure instead.
+    const code = (result?.code ?? "").toUpperCase();
+    const failure = result?.failure;
+    const acquisition =
+      code.startsWith("GIT.") ||
+      code === "TIMEOUT:ACQUIRE" ||
+      failure?.operation === "clone" ||
+      failure?.operation === "checkout";
+    if (acquisition) {
+      return {
+        kind: "blocked",
+        title: "Repository checkout failed",
+        body:
+          result?.message && result.message !== "Run did not complete."
+            ? result.message
+            : "Medha could not check out the repository, so analysis and every later phase did not run.",
+        cta: "Inspect failure",
+        score: null,
+        risk,
+      };
+    }
     const body =
       result?.message && result.message !== "Run did not complete."
         ? result.message
