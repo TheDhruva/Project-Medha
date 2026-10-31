@@ -30,7 +30,9 @@ const FULL_SHA = /^[0-9a-fA-F]{40}$/;
 function Flow() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const projectId = searchParams.get("project");
+  const projectId = searchParams.get("project") || searchParams.get("repo");
+  const targetRevisionParam = searchParams.get("rev") || searchParams.get("target_revision");
+  const baseRevisionParam = searchParams.get("base") || searchParams.get("base_revision");
   const { form, setForm, startDeployment, isRunning, snapshot, connectionError } =
     useDeployment();
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -47,7 +49,11 @@ function Flow() {
   // engine is not part of the product workflow, so the form always runs in
   // real mode regardless of the context default.
   useEffect(() => {
-    setForm({ mode: "real" });
+    setForm({
+      mode: "real",
+      ...(targetRevisionParam ? { targetRevision: targetRevisionParam } : {}),
+      ...(baseRevisionParam ? { baseRevision: baseRevisionParam } : {}),
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

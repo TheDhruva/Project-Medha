@@ -75,7 +75,7 @@ describe("ProjectHub", () => {
   it("renders the compact heading, grounded card content, and single activity row", () => {
     render(<ProjectHub />);
 
-    expect(screen.getByRole("heading", { name: "Project Hub" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeInTheDocument();
     expect(screen.queryByText("Your repositories at a glance.")).toBeNull();
     expect(screen.getByRole("button", { name: /New project/ })).toBeInTheDocument();
 

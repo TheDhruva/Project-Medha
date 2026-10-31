@@ -292,3 +292,38 @@ def test_delete_blocked_while_run_in_flight(api_client):
     # Mapping survives; disconnect stays available while blocked.
     assert api_client.get(f"/api/projects/{project_id}").status_code == 200
     assert api_client.post(f"/api/projects/{project_id}/disconnect").status_code == 200
+
+
+def test_validate_repository_success(api_client, monkeypatch):
+    from app.services import git_service
+
+    monkeypatch.setattr(
+        git_service,
+        "ls_remote_branches_and_default",
+        lambda url, timeout=30, env=None: ("main", ["main", "feature/login", "dev"]),
+    )
+    res = api_client.post("/api/projects/validate-repository", json={"repository": "octo/demo"})
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["accessible"] is True
+    assert data["repository"] == "octo/demo"
+    assert data["default_branch"] == "main"
+    assert "feature/login" in data["branches"]
+
+
+def test_validate_repository_invalid_ref(api_client):
+    res = api_client.post("/api/projects/validate-repository", json={"repository": "invalid"})
+    assert res.status_code == 400
+    assert res.json()["error"]["code"] == "INVALID_REPOSITORY_REF"
+
+
+def test_validate_repository_not_found(api_client, monkeypatch):
+    from app.services import git_service
+
+    def _fail(*args, **kwargs):
+        raise git_service.GitAcquireError("REPO_NOT_FOUND", "Repository not found.", category="not_found")
+
+    monkeypatch.setattr(git_service, "ls_remote_branches_and_default", _fail)
+    res = api_client.post("/api/projects/validate-repository", json={"repository": "octo/missing"})
+    assert res.status_code == 404
+    assert res.json()["error"]["code"] == "REPO_NOT_FOUND"

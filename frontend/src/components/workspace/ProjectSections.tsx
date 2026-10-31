@@ -1,5 +1,7 @@
 "use client";
 
+import { FindingsPanel } from "@/components/workspace/FindingsPanel";
+
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -1387,6 +1389,8 @@ export function VerificationView({ projectId }: { projectId: string }) {
                     ) : null}
                   </Panel>
                 ) : null}
+                {/* Authoritative Findings Ledger & Automated Remediation */}
+                <FindingsPanel projectId={projectId} />
               </>
             )}
           </>

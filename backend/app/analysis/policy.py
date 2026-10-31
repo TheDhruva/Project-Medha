@@ -191,6 +191,7 @@ def run_policy_checks(root: Path) -> TaskResult:
     """Run bounded read-only policy checks over the repository tree."""
     findings: list[dict] = []
     files_scanned = 0
+    total_code_files_observed = 0
     truncated = False
     endpoint_files: list[str] = []
     auth_evidence: bool = False
@@ -236,11 +237,7 @@ def run_policy_checks(root: Path) -> TaskResult:
             dirnames[:] = []
         if files_scanned >= _MAX_FILES:
             truncated = True
-            break
         for fn in sorted(filenames):
-            if files_scanned >= _MAX_FILES:
-                truncated = True
-                break
             path = Path(dirpath) / fn
             rel = _rel(path, root)
             low = rel.lower()
@@ -249,6 +246,10 @@ def run_policy_checks(root: Path) -> TaskResult:
             applicable = [r for r in _RULES if low.endswith(r.suffixes)]
             code_file = low.endswith(_CODE_SUFFIXES)
             if not applicable and not code_file:
+                continue
+            total_code_files_observed += 1
+            if files_scanned >= _MAX_FILES:
+                truncated = True
                 continue
             text = _read(path)
             if not text:
@@ -322,6 +323,7 @@ def run_policy_checks(root: Path) -> TaskResult:
         evidence={
             "checks": [r.rule_id for r in _RULES] + ["CFG-001", "AUTH-001"],
             "files_scanned": files_scanned,
+            "total_files_observed": total_code_files_observed,
             "truncated": truncated,
             "endpoint_files": endpoint_files[:20],
             "auth_boundary_detected": auth_evidence or not endpoint_files,
@@ -333,6 +335,6 @@ def run_policy_checks(root: Path) -> TaskResult:
         },
         coverage=(
             f"policy checks over {files_scanned} file(s)"
-            + (" (truncated at safety cap)" if truncated else "")
+            + (f" (capped at {_MAX_FILES} files; {total_code_files_observed} eligible files observed)" if truncated else "")
         ),
     )

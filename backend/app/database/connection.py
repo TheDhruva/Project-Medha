@@ -15,7 +15,7 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _SCHEMA_PG_PATH = Path(__file__).with_name("schema_pg.sql")
 
 # Bump when schema.sql or migration steps change. Tracked via PRAGMA user_version.
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 
 _ARTIFACT_COLUMNS = (
     "result_json",
@@ -94,6 +94,24 @@ _NEW_TABLES_SQL = (
         ON deployments (status)""",
     """CREATE INDEX IF NOT EXISTS idx_proposals_deployment
         ON proposals (deployment_id)""",
+)
+
+# v13: server-issued guest sessions (no account). Mirrors schema.sql /
+# schema_pg.sql so upgrades of pre-v13 databases create the table in place.
+_GUEST_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS guest_sessions (
+        session_id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+        last_cleanup_at TEXT,
+        cleanup_error TEXT
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_guest_sessions_due
+        ON guest_sessions (status, expires_at)""",
 )
 
 
@@ -582,6 +600,12 @@ def _ensure_v12_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE deployments ADD COLUMN pr_number INTEGER")
 
 
+def _ensure_v13_tables(conn: sqlite3.Connection) -> None:
+    """Guest sessions (v13). Idempotent; safe on pre-v13 databases."""
+    for statement in _GUEST_TABLES_SQL:
+        conn.execute(statement)
+
+
 def _ensure_perf_indexes(conn: sqlite3.Connection) -> None:
     """Indexes on columns added by later migrations (project_id on the
     deployments table). Runs AFTER _ensure_v6_columns so legacy databases
@@ -627,6 +651,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _ensure_deploy_target_column(conn)
     _ensure_commit_summary_columns(conn)
     _ensure_v12_columns(conn)
+    _ensure_v13_tables(conn)
     _ensure_perf_indexes(conn)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 

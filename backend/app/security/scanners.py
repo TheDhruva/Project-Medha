@@ -16,6 +16,7 @@ Design rules (Phase D):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -26,6 +27,7 @@ from typing import Any, Callable
 from app.ai.redact import redact_text
 
 DEFAULT_TIMEOUT_S = 120.0
+SEMGREP_DEFAULT_CONFIG = "auto"
 
 # statuses
 CLEAN = "clean"
@@ -142,9 +144,9 @@ _SCANNERS: dict[str, _Spec] = {
     "semgrep": _Spec(
         "semgrep",
         # A config is mandatory for modern semgrep; without it the CLI exits
-        # before scanning. "auto" resolves the maintained registry ruleset.
+        # before scanning. Defaults to "auto" or SEMGREP_CONFIG / MEDHA_SEMGREP_CONFIG if set.
         lambda exe, target: [
-            exe, "scan", "--config", "auto", "--json", "--quiet", target,
+            exe, "scan", "--config", os.environ.get("MEDHA_SEMGREP_CONFIG") or os.environ.get("SEMGREP_CONFIG") or SEMGREP_DEFAULT_CONFIG, "--json", "--quiet", target,
         ],
         _norm_semgrep,
     ),
@@ -217,15 +219,22 @@ def run_scanner(
         )
 
     duration = round(time.perf_counter() - t0, 3)
+    err_tail = ""
+    if proc.stderr:
+        err_tail = redact_text(proc.stderr.strip()[-300:])
+
     try:
         parsed = json.loads(proc.stdout or "")
         findings = spec.normalize(parsed)
     except (ValueError, TypeError) as exc:
+        msg = f"unparseable output: {exc}"
+        if err_tail:
+            msg += f" (stderr: {err_tail})"
         return ScannerResult(
             scanner=name,
             status=FAILED,
             exit_code=proc.returncode,
-            message=f"unparseable output: {exc}",
+            message=msg,
             duration_s=duration,
         )
 
@@ -244,11 +253,14 @@ def run_scanner(
             duration_s=duration,
         )
     if proc.returncode != 0:
+        msg = f"exit {proc.returncode} without parsable findings"
+        if err_tail:
+            msg += f" (stderr: {err_tail})"
         return ScannerResult(
             scanner=name,
             status=FAILED,
             exit_code=proc.returncode,
-            message=f"exit {proc.returncode} without parsable findings",
+            message=msg,
             duration_s=duration,
         )
     return ScannerResult(

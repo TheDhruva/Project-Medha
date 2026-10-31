@@ -9,8 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.api.change_impact import router as change_intel_router
 from app.api.assessment import router as assessment_router
+from app.api.remediation import router as remediation_router
 from app.api.deploy import router as deploy_router
 from app.api.evaluation import router as evaluation_router
+from app.api.guest import router as guest_router
 from app.api.health import router as health_router
 from app.api.history import router as history_router
 from app.api.ai import router as ai_router
@@ -88,7 +90,19 @@ async def lifespan(_app: FastAPI):
         start_worker()
     except Exception:  # noqa: BLE001 - worker must never block startup
         logger.exception("Job worker failed to start")
+    try:
+        from app.core.guest_sessions import start_guest_reaper
+
+        start_guest_reaper()
+    except Exception:  # noqa: BLE001 - reaper must never block startup
+        logger.exception("Guest-session reaper failed to start")
     yield
+    try:
+        from app.core.guest_sessions import stop_guest_reaper
+
+        stop_guest_reaper()
+    except Exception:  # noqa: BLE001 - shutdown must not raise
+        logger.exception("Guest-session reaper failed to stop")
     try:
         from app.jobs.worker import stop_worker
 
@@ -174,10 +188,12 @@ def create_app() -> FastAPI:
     application.include_router(history_router)
     application.include_router(deploy_router)
     application.include_router(evaluation_router)
+    application.include_router(guest_router)
     application.include_router(change_intel_router)
     application.include_router(ai_router)
     application.include_router(projects_router)
     application.include_router(assessment_router)
+    application.include_router(remediation_router)
     application.include_router(scores_router)
     application.include_router(webhooks_router)
     return application

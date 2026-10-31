@@ -111,7 +111,7 @@ export function DeploymentDetailsPopover({
   const healthTone: Tone = hydrating ? "neutral" : deploy.tone;
 
   return (
-    <div ref={wrapRef} className="relative w-full">
+    <div ref={wrapRef} className="relative inline-flex">
       <button
         ref={buttonRef}
         type="button"
@@ -119,7 +119,7 @@ export function DeploymentDetailsPopover({
         aria-expanded={open}
         aria-controls="deployment-details-popover"
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 text-[13.5px] font-semibold text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+        className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-medha-border bg-medha-surface px-3 text-[13px] font-medium text-medha-secondary transition hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
         data-testid="deployment-details-trigger"
       >
         <Activity className="h-3.5 w-3.5" aria-hidden />

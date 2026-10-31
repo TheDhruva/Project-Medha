@@ -140,6 +140,8 @@ export const DEPLOYMENT_BLOCKED_CODES = new Set([
   "DEPLOYMENT_UNSUPPORTED",
   "NO_TARGET_CANDIDATES",
   "PLAN_REQUIRES_REVIEW",
+  "DOCKER_DAEMON_UNAVAILABLE",
+  "REAL_BUILDER_UNAVAILABLE",
 ]);
 
 /** Blocked codes meaning "this repository has no suitable deployment target"

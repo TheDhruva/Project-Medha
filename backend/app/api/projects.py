@@ -144,6 +144,50 @@ class ProjectRunBody(BaseModel):
     retry_of: str | None = Field(default=None, max_length=64)
 
 
+class ProjectValidateBody(BaseModel):
+    repository: str = Field(..., min_length=1, max_length=300)
+
+
+@router.post("/projects/validate-repository")
+async def validate_repository(body: ProjectValidateBody, subject: str = RequireSubject):
+    try:
+        owner, name, repository, canonical = parse_github_repo_ref(body.repository)
+    except ProjectRefError as exc:
+        return _error(400, exc.code, exc.message)
+    from app.services import git_service
+    from app.services.github_app import prepare_private_access
+    import asyncio
+
+    git_auth_env = None
+    try:
+        git_auth_env = await asyncio.to_thread(prepare_private_access, canonical)
+    except Exception:
+        git_auth_env = None
+
+    try:
+        default_branch, branches = await asyncio.to_thread(
+            git_service.ls_remote_branches_and_default, canonical, env=git_auth_env or None
+        )
+    except git_service.GitAcquireError as exc:
+        status_code = 404 if exc.category == "not_found" else 401 if exc.category == "auth_required" else 400
+        return _error(status_code, exc.code, exc.message)
+    except Exception as exc:
+        return _error(502, "NETWORK_ERROR", f"Could not contact repository: {str(exc)}")
+
+    if not branches and not default_branch:
+        return _error(404, "REPO_NOT_FOUND", f"Repository '{repository}' not found or inaccessible.")
+
+    return JSONResponse({
+        "repository": repository,
+        "owner": owner,
+        "name": name,
+        "canonical_url": canonical,
+        "accessible": True,
+        "default_branch": default_branch or (branches[0] if branches else "main"),
+        "branches": branches if branches else ([default_branch] if default_branch else ["main"]),
+    })
+
+
 @router.post("/projects", status_code=201, dependencies=[Depends(require_mutation_token)])
 async def create_project(body: ProjectCreateBody, subject: str = RequireSubject):
     try:
@@ -161,6 +205,18 @@ async def create_project(body: ProjectCreateBody, subject: str = RequireSubject)
     existing = projects.find_by_owner_repo(subject, repository)
     if existing is not None:
         return JSONResponse(existing.to_api(), status_code=200)
+
+    from app.core.config import get_settings
+    settings = get_settings()
+    active_projects = projects.list_for_owner(subject)
+    if len(active_projects) >= settings.max_active_projects:
+        return _error(
+            429,
+            "PROJECT_LIMIT_EXCEEDED",
+            f"Beta limit reached ({settings.max_active_projects} projects). Disconnect or remove an existing project to connect a new one.",
+            details={"max_active_projects": settings.max_active_projects, "current_count": len(active_projects)},
+        )
+
     now = utc_now_iso()
     project = ProjectRecord(
         project_id=f"prj_{uuid4().hex[:16]}",
@@ -445,7 +501,7 @@ async def create_project_run(project_id: str, body: ProjectRunBody, subject: str
         target_port=body.target_port,
         intent=body.intent or f"Project analysis ({project.repository}@{target_revision[:8] if target_revision else project.branch})",
         base_revision=base_revision,
-        target_revision=target_revision,
+        target_revision=target_revision or (project.branch if project.branch else None),
         status=DeploymentStatus.STARTED,
         current_stage=None,
         explain_simple="Project analysis accepted. Real pipeline starting.",

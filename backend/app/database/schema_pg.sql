@@ -268,3 +268,24 @@ CREATE INDEX IF NOT EXISTS idx_findings_project_status
     ON findings (project_id, status);
 CREATE INDEX IF NOT EXISTS idx_findings_deployment
     ON findings (deployment_id);
+
+-- Server-issued guest sessions (no account). Only the SHA-256 of the bearer
+-- token is stored, so a database leak never yields a usable token. Subject is
+-- derived ("guest:" || session_id) and used as owner_sub, so guest isolation
+-- reuses the existing ownership scoping rather than a parallel auth path.
+-- status: active -> expired (reaper queue) -> cleaned (terminal success)
+--         or failed (terminal after max cleanup attempts).
+CREATE TABLE IF NOT EXISTS guest_sessions (
+    session_id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+    last_cleanup_at TEXT,
+    cleanup_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_guest_sessions_due
+    ON guest_sessions (status, expires_at);

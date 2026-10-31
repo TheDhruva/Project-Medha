@@ -48,6 +48,9 @@ async def health() -> dict:
             "Production is using the SQLite fallback (MEDHA_DATABASE_URL unset). "
             "History will not survive redeploys."
         )
+    from app.services.github_app import get_github_app_config
+    app_config = get_github_app_config()
+
     return {
         "status": "ok" if db_ok else "degraded",
         "service": "medha-backend",
@@ -55,7 +58,79 @@ async def health() -> dict:
         "database_mode": backend,
         "phase": "0-12",
         "note": "College prototype — local only",
+        "live_delivery_enabled": bool(settings.live_delivery_enabled),
+        "beta_enabled": bool(settings.beta_enabled),
+        "github_app_configured": bool(app_config.configured),
     }
+
+
+@router.get("/api/readiness")
+async def readiness() -> JSONResponse:
+    """Operational readiness probe distinguishing liveness from subsystem readiness."""
+    import asyncio
+    from app.services.workspace import workspaces_root
+    from app.services.github_app import get_github_app_config
+
+    settings = get_settings()
+    db_ok = await asyncio.to_thread(ping_db)
+
+    # Check workspace storage
+    storage_ok = False
+    storage_detail = ""
+    try:
+        root = workspaces_root()
+        root.mkdir(parents=True, exist_ok=True)
+        probe_file = root / ".readiness_probe"
+        probe_file.write_text("probe", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        storage_ok = True
+        storage_detail = f"Writable workspace storage at {root.name}"
+    except Exception as exc:
+        storage_ok = False
+        storage_detail = f"Storage inaccessible: {exc}"
+
+    # Check GitHub App configuration for live delivery
+    app_config = get_github_app_config()
+    live_gate_ready = bool(settings.live_delivery_enabled and app_config.configured)
+
+    # Docker status
+    docker_ready = False
+    try:
+        from app.execution import docker_ops
+        docker_ready = docker_ops.docker_daemon_running()
+    except Exception:
+        docker_ready = False
+
+    is_ready = db_ok and storage_ok
+    status_code = 200 if is_ready else 503
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ready" if is_ready else "not_ready",
+            "environment": settings.medha_env or "development",
+            "beta_enabled": bool(settings.beta_enabled),
+            "subsystems": {
+                "database": {
+                    "ready": db_ok,
+                    "engine": "postgres" if settings.use_postgres else "sqlite",
+                },
+                "workspace_storage": {
+                    "ready": storage_ok,
+                    "detail": storage_detail,
+                },
+                "live_delivery": {
+                    "enabled": bool(settings.live_delivery_enabled),
+                    "github_app_configured": bool(app_config.configured),
+                    "ready_for_remote_delivery": live_gate_ready,
+                },
+                "docker_builder": {
+                    "ready": docker_ready,
+                    "execution_mode": settings.executor_mode or "auto",
+                },
+            },
+        },
+    )
 
 
 # Presence-only configuration diagnostics: reports whether required values

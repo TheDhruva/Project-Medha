@@ -23,6 +23,7 @@ const LiveSystemTrace = dynamic(
   { ssr: false, loading: () => null },
 );
 import { WhatMedhaIsDoing } from "@/components/explainability/WhatMedhaIsDoing";
+import { HumanProgressView } from "@/components/run/HumanProgressView";
 import { ViewModeToggle } from "@/components/explainability/ViewModeToggle";
 import { AppShell } from "@/components/layout/AppShell";
 import { MedhaFace, faceStateFromRun } from "@/components/medha/MedhaFace";
@@ -483,7 +484,7 @@ function CegPreview({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; gr
 /* --------------------------------- story --------------------------------- */
 
 function RunStory({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; graphsHref: string | null }) {
-  const { viewMode } = useDeployment();
+  const { viewMode, setViewMode } = useDeployment();
   const technical = viewMode === "technical";
   const evidenceRef = useRef<HTMLDivElement>(null);
   const recoveryRef = useRef<HTMLDivElement>(null);
@@ -508,75 +509,72 @@ function RunStory({ snapshot, graphsHref }: { snapshot: DeploymentSnapshot; grap
   const showChangeDetail = technical || changeExpanded;
 
   return (
-    <div className="space-y-3">
-      <DecisionCard
+    <div className="space-y-4">
+      {/* 1. Human-Readable Progress & Outcome (Default Primary View) */}
+      <HumanProgressView
         snapshot={snapshot}
-        onViewEvidence={() => scrollTo(evidenceRef)}
-        onViewRecovery={() => scrollTo(recoveryRef)}
+        onToggleTechnical={() => setViewMode(technical ? "simple" : "technical")}
+        isTechnicalOpen={technical}
       />
-      <SummaryRow snapshot={snapshot} />
-      <Pipeline />
-      <DiagnosisCard snapshot={snapshot} />
 
-      {hasChangeIntel && changeIntel ? (
-        <SectionShell eyebrow="What changed" title="What changed">
-          <p className="text-sm text-medha-secondary">
-            {fileCount} file{fileCount === 1 ? "" : "s"} changed · risk {changeIntel.risk.level}
-          </p>
-          <ul className="mt-1.5 space-y-0.5">
-            {changeIntel.changeset.files.slice(0, 4).map((f) => (
-              <li key={f.path} className="medha-mono truncate text-xs text-medha-text">
-                {f.path}{" "}
-                <span className="text-medha-tertiary">
-                  +{f.added_lines}/−{f.deleted_lines}
-                </span>
-              </li>
-            ))}
-          </ul>
-          {!changeOpen ? (
-            <button
-              type="button"
-              onClick={() => setChangeExpanded((v) => !v)}
-              aria-expanded={changeExpanded}
-              className="mt-2 text-sm font-medium text-medha-accent hover:underline"
-            >
-              {changeExpanded ? "Hide change impact ↑" : "View change impact →"}
-            </button>
+      {/* 2. Deep Diagnostic Views (Revealed when Technical Mode is toggled) */}
+      {technical ? (
+        <div className="space-y-4 pt-3 border-t border-medha-border">
+          <DecisionCard
+            snapshot={snapshot}
+            onViewEvidence={() => scrollTo(evidenceRef)}
+            onViewRecovery={() => scrollTo(recoveryRef)}
+          />
+          <SummaryRow snapshot={snapshot} />
+          <Pipeline />
+          <DiagnosisCard snapshot={snapshot} />
+
+          {hasChangeIntel && changeIntel ? (
+            <SectionShell eyebrow="What changed" title="What changed">
+              <p className="text-sm text-medha-secondary">
+                {fileCount} file{fileCount === 1 ? "" : "s"} changed · risk {changeIntel.risk.level}
+              </p>
+              <ul className="mt-1.5 space-y-0.5">
+                {changeIntel.changeset.files.slice(0, 4).map((f) => (
+                  <li key={f.path} className="medha-mono truncate text-xs text-medha-text">
+                    {f.path}{" "}
+                    <span className="text-medha-tertiary">
+                      +{f.added_lines}/−{f.deleted_lines}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {showChangeDetail ? (
+                <div className="mt-2">
+                  <ChangeImpactPanel analysis={changeIntel} />
+                </div>
+              ) : null}
+            </SectionShell>
           ) : null}
-          {showChangeDetail ? (
-            <div className="mt-2">
-              <ChangeImpactPanel analysis={changeIntel} />
+
+          {hasNegotiation ? <ConstraintNegotiation /> : null}
+
+          {hasVerification ? (
+            <div ref={evidenceRef} className="scroll-mt-20">
+              <VerificationPanel />
             </div>
           ) : null}
-        </SectionShell>
-      ) : null}
 
-      {hasNegotiation ? <ConstraintNegotiation /> : null}
+          {hasGraph || hasRollback || failedNodes.length > 0 ? (
+            <div ref={recoveryRef} className="scroll-mt-20">
+              <CegPreview snapshot={snapshot} graphsHref={graphsHref} />
+            </div>
+          ) : null}
 
-      {hasVerification ? (
-        <div ref={evidenceRef} className="scroll-mt-20">
-          <VerificationPanel />
-        </div>
-      ) : null}
-
-      {hasGraph || hasRollback || failedNodes.length > 0 || technical ? (
-        <div ref={recoveryRef} className="scroll-mt-20">
-          <CegPreview snapshot={snapshot} graphsHref={graphsHref} />
-        </div>
-      ) : null}
-
-      {technical ? (
-        <>
           <WhatMedhaIsDoing showToggle={false} />
           <RuntimeLogsPanel
             executionMode={snapshot.executionMode}
             runtimeLogs={snapshot.runtimeLogs}
           />
-        </>
+          <AgentActivity />
+          <LiveSystemTrace />
+        </div>
       ) : null}
-
-      <AgentActivity />
-      <LiveSystemTrace />
     </div>
   );
 }
@@ -803,6 +801,11 @@ function RunContextBar({ deploymentId, projectId }: { deploymentId: string; proj
           )}
           {running ? (
             <p className="text-[12px] text-medha-tertiary">Live run in progress — status updates via SSE.</p>
+          ) : null}
+          {failed && project ? (
+            <p className="max-w-[240px] text-right text-[12px] leading-4 text-medha-tertiary">
+              Retrying an unchanged commit reuses analysis already completed for it.
+            </p>
           ) : null}
           {startError ? (
             <p role="alert" className="max-w-[240px] text-right text-[12.5px] leading-5 text-medha-text">{startError}</p>

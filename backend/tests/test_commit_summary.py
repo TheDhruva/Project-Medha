@@ -240,3 +240,96 @@ def test_pipeline_records_analyzed_commit(tmp_path: Path, monkeypatch):
     assert any(f["path"] == "package.json" for f in row["files"])
     assert row["deployment_id"] == "dep_pipe1"
     assert row["branch"] == "main"
+
+
+def test_history_since_pages_backward_to_older_commits(tmp_path: Path):
+    """`since` is the client's OLDEST loaded commit: return strictly older rows."""
+    from app.database.connection import init_db
+    from app.database.repositories import CommitRepository
+
+    db = tmp_path / "since.db"
+    init_db(db)
+    repo = CommitRepository(db_path=db)
+    for day in (1, 2, 3):
+        repo.upsert(
+            project_id="prj_since", sha=str(day) * 40, parents=[], author="A",
+            committed_at=f"2026-01-0{day}T00:00:00Z", message=f"c{day}",
+            branch="main", recorded_at="2026-01-04T00:00:00Z",
+        )
+
+    older = repo.history(project_id="prj_since", since="2026-01-02T00:00:00Z")
+    assert [r["sha"] for r in older] == ["1" * 40]
+
+    none_older = repo.history(project_id="prj_since", since="2026-01-01T00:00:00Z")
+    assert none_older == []
+
+
+def test_history_api_branch_filtering(client, monkeypatch):
+    import app.api.history as history_api
+    from app.core.events import utc_now_iso
+    from app.database.repositories import CommitRepository, ProjectRepository
+    from app.models.deployment import ProjectRecord
+
+    now = utc_now_iso()
+    project = ProjectRecord(
+        project_id="prj_branch1", owner_sub="local-operator", name="demo-branches",
+        provider="github", repo_owner="o", repo_name="r", repository="o/r",
+        canonical_url="https://github.com/o/r.git", branch="main",
+        visibility="unverified", connection_status="pending",
+        created_at=now, updated_at=now,
+    )
+    ProjectRepository().create(project)
+    cr = CommitRepository()
+    cr.upsert(
+        project_id="prj_branch1", sha="1" * 40, parents=[],
+        author="Dev", committed_at="2026-02-01T00:00:00Z",
+        message="commit on main", branch="main", recorded_at=now,
+    )
+    cr.upsert(
+        project_id="prj_branch1", sha="2" * 40, parents=[],
+        author="Dev", committed_at="2026-02-02T00:00:00Z",
+        message="commit on feature", branch="feature", recorded_at=now,
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not re-acquire")
+
+    monkeypatch.setattr(history_api, "acquire_repository", _boom)
+
+    # All branches (default / no branch filter)
+    r_all = client.get("/api/projects/prj_branch1/history")
+    assert r_all.status_code == 200
+    b_all = r_all.json()
+    assert len(b_all["commits"]) == 2
+    assert "main" in b_all["branches"]
+    assert "feature" in b_all["branches"]
+
+    # Filter by main
+    r_main = client.get("/api/projects/prj_branch1/history", params={"branch": "main"})
+    assert r_main.status_code == 200
+    b_main = r_main.json()
+    assert len(b_main["commits"]) == 1
+    assert b_main["commits"][0]["sha"] == "1" * 40
+
+    # Filter by feature
+    r_feat = client.get("/api/projects/prj_branch1/history", params={"branch": "feature"})
+    assert r_feat.status_code == 200
+    b_feat = r_feat.json()
+    assert len(b_feat["commits"]) == 1
+    assert b_feat["commits"][0]["sha"] == "2" * 40
+
+
+def test_safe_rmtree_recovers_windows_readonly_pack_files(tmp_path):
+    import os, stat
+    from app.services.workspace import safe_rmtree
+
+    ws = tmp_path / 'locked_ws'
+    ws.mkdir()
+    pack_dir = ws / '.git' / 'objects' / 'pack'
+    pack_dir.mkdir(parents=True)
+    idx_file = pack_dir / 'pack-123.idx'
+    idx_file.write_text('pack index content')
+    os.chmod(idx_file, stat.S_IREAD)
+
+    safe_rmtree(ws)
+    assert not ws.exists()

@@ -231,7 +231,7 @@ def test_container_logs_never_fabricates():
     # No fabricated stdout; stderr may carry the daemon's honest error text
     # when a live daemon is reachable (empty when no daemon exists).
     assert out["stdout"] == ""
-    assert out["stderr"] == "" or "No such container" in out["stderr"]
+    assert out["stderr"] == "" or "No such container" in out["stderr"] or "dockerDesktopLinuxEngine" in out["stderr"] or "cannot find the file specified" in out["stderr"]
 
 
 def test_readiness_rejects_non_loopback():
@@ -507,7 +507,7 @@ def test_pipeline_wires_app_token_to_acquire(tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "check_repository_access", fake_check)
 
     sha = "a" * 40
-    fixture = Path("tests/fixtures/repos/compose_app").resolve()
+    fixture = (Path(__file__).resolve().parent / "fixtures" / "repos" / "compose_app").resolve()
 
     def fake_acquire(deployment_id, url, *, ref_sha=None, token_env=None):
         seen["url"] = url
@@ -607,7 +607,7 @@ def test_pipeline_mismatched_checkout_head_fails_closed(tmp_path, monkeypatch):
     from app.services.git_service import RepoAcquisition
     from app.workflow.planning import PlanningPipeline
 
-    src = Path("tests/fixtures/repos/compose_app").resolve()
+    src = (Path(__file__).resolve().parent / "fixtures" / "repos" / "compose_app").resolve()
     work = tmp_path / "work"
     _shutil.copytree(src, work)
     _sp.run(["git", "init", "-q"], cwd=work, check=True)

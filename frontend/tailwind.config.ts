@@ -39,9 +39,9 @@ const config: Config = {
         },
       },
       fontFamily: {
-        display: ["Space Grotesk", "system-ui", "sans-serif"],
-        sans: ["IBM Plex Sans", "system-ui", "sans-serif"],
-        mono: ["IBM Plex Mono", "ui-monospace", "monospace"],
+        display: ["Geist", "Space Grotesk", "system-ui", "sans-serif"],
+        sans: ["Geist", "IBM Plex Sans", "system-ui", "sans-serif"],
+        mono: ["Geist Mono", "IBM Plex Mono", "ui-monospace", "monospace"],
       },
       borderRadius: {
         medha: "var(--medha-radius)",

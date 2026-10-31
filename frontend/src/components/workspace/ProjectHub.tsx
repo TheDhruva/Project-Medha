@@ -30,6 +30,7 @@ import {
   formatActivityCompact,
   isRunningStatus,
   projectCardStatus,
+  runOutcome,
   sortProjects,
   useProjects,
   type ProjectCardStatus,
@@ -37,16 +38,13 @@ import {
   type ProjectSummary,
 } from "@/lib/projects/projects";
 
-/* Uses the shared MEDHA design tokens: text, secondary, tertiary, accent,
-   success, warning, danger, and their soft variants. */
-
 const SORT_OPTIONS: { id: ProjectSort; label: string }[] = [
   { id: "recent", label: "Recently active" },
   { id: "name", label: "Name" },
   { id: "status", label: "Status" },
 ];
 
-type DisplayTone = "danger" | "warning" | "info" | "neutral";
+type DisplayTone = "danger" | "warning" | "info" | "neutral" | "success";
 
 function projectStatusDisplay(project: ProjectSummary): {
   label: string;
@@ -54,16 +52,16 @@ function projectStatusDisplay(project: ProjectSummary): {
 } {
   const latest = project.latest;
   if (latest && isRunningStatus(latest.status)) {
-    return { label: "Running", tone: "info" };
+    return { label: latest.status === "queued" ? "Queued" : "Running", tone: "info" };
   }
   if (latest?.status === "failed") {
     return { label: "Failed", tone: "danger" };
   }
   if (latest?.status === "awaiting_approval") {
-    return { label: "Awaiting approval", tone: "warning" };
+    return { label: "Needs attention", tone: "warning" };
   }
   if (latest?.status === "partial_recovery") {
-    return { label: "Partial recovery", tone: "warning" };
+    return { label: "Needs attention", tone: "warning" };
   }
   if (latest?.status === "cancelled") {
     return { label: "Cancelled", tone: "warning" };
@@ -83,8 +81,30 @@ function projectStatusDisplay(project: ProjectSummary): {
   if (project.attention.length > 0) {
     return { label: "Needs attention", tone: "warning" };
   }
-  // Completion is not health: keep this state neutral unless evidence says otherwise.
   return { label: "Completed", tone: "neutral" };
+}
+
+function projectDeploymentDisplay(project: ProjectSummary): {
+  label: string;
+  tone: "success" | "warning" | "danger" | "neutral";
+} {
+  if (!project.latest || project.totalRuns === 0) {
+    return { label: "Not deployed", tone: "neutral" };
+  }
+  const outcome = runOutcome(project.latest);
+  if (!outcome.deployment) {
+    return { label: "Not deployed", tone: "neutral" };
+  }
+  if (outcome.deployment.tone === "success") {
+    return { label: "Healthy", tone: "success" };
+  }
+  if (outcome.deployment.tone === "error") {
+    return { label: "Unhealthy", tone: "danger" };
+  }
+  if (outcome.deployment.tone === "warning") {
+    return { label: outcome.deployment.label, tone: "warning" };
+  }
+  return { label: outcome.deployment.label, tone: "neutral" };
 }
 
 const BADGE_TONE: Record<DisplayTone, string> = {
@@ -92,6 +112,14 @@ const BADGE_TONE: Record<DisplayTone, string> = {
   warning: "border-medha-warning/30 bg-medha-warning-soft text-medha-warning",
   info: "border-medha-accent/25 bg-medha-accent-soft text-medha-accent-hover",
   neutral: "border-medha-border bg-medha-surface-muted text-medha-secondary",
+  success: "border-medha-success/30 bg-medha-success-soft text-medha-success",
+};
+
+const DEPLOYMENT_TONE: Record<"success" | "warning" | "danger" | "neutral", string> = {
+  success: "text-medha-success font-medium",
+  warning: "text-medha-warning font-medium",
+  danger: "text-medha-danger font-medium",
+  neutral: "text-medha-secondary",
 };
 
 function StatusBadge({
@@ -101,7 +129,7 @@ function StatusBadge({
 }) {
   return (
     <span
-      className={`inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11.5px] font-semibold whitespace-nowrap ${BADGE_TONE[display.tone]}`}
+      className={`inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ${BADGE_TONE[display.tone]}`}
     >
       <span
         aria-hidden
@@ -155,10 +183,8 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
   }
 
   const itemCls =
-    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-medha-secondary hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-medha-accent disabled:cursor-not-allowed disabled:opacity-50";
+    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-medha-accent disabled:cursor-not-allowed disabled:opacity-50";
   const busy = actions.acting != null && actions.acting.startsWith(`${project.id}:`);
-  // Legacy URL groups are read-only compatibility rows: only actions that
-  // genuinely work are shown (never a dead menu item).
   const canonical = !project.legacy && project.projectId != null;
   const connected = canonical && project.connectionStatus === "connected";
 
@@ -174,7 +200,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
           e.stopPropagation();
           setOpen((v) => !v);
         }}
-        className="rounded-md p-1.5 text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+        className="rounded-md p-1 text-medha-tertiary hover:bg-medha-surface-muted hover:text-medha-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
       >
         <MoreHorizontal className="h-4 w-4" aria-hidden />
       </button>
@@ -245,7 +271,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
           ) : null}
           <button type="button" role="menuitem" className={itemCls} onClick={() => void copyUrl()}>
             {copied ? (
-              <Check className="h-3.5 w-3.5 text-medha-success-ink" aria-hidden />
+              <Check className="h-3.5 w-3.5 text-medha-success" aria-hidden />
             ) : (
               <Copy className="h-3.5 w-3.5" aria-hidden />
             )}
@@ -288,6 +314,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
 
 function ProjectCard({ project, actions }: { project: ProjectSummary; actions: CardActions }) {
   const display = projectStatusDisplay(project);
+  const deployment = projectDeploymentDisplay(project);
   const identity =
     project.repoOwner && project.repoName
       ? `${project.repoOwner}/${project.repoName}`
@@ -302,61 +329,79 @@ function ProjectCard({ project, actions }: { project: ProjectSummary; actions: C
   return (
     <article
       aria-label={project.name}
-      className="group relative flex h-full flex-col rounded-lg border border-medha-border bg-white p-4 shadow-[0_1px_2px_rgba(17,24,39,0.06)] transition-colors hover:border-medha-border-strong focus-within:border-medha-accent focus-within:ring-2 focus-within:ring-medha-accent/20 lg:aspect-square lg:h-auto lg:self-start"
+      className="group relative flex flex-col justify-between rounded-xl border border-medha-border bg-white p-4 shadow-sm transition hover:border-medha-border-strong hover:shadow-md focus-within:border-medha-accent focus-within:ring-2 focus-within:ring-medha-accent/20"
     >
-      <div className="flex items-start justify-between gap-2">
-        <span
-          aria-hidden
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-medha-accent-soft text-medha-accent"
-        >
-          <FolderGit2 className="h-4 w-4" />
-        </span>
-        <div className="relative z-20">
-          <CardMenu project={project} actions={actions} />
+      <div>
+        {/* Header row: Project title and quick actions / status */}
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-[16px] font-semibold tracking-tight text-medha-text">
+              <Link
+                href={base}
+                title={project.name}
+                className="outline-none after:absolute after:inset-0 after:z-[1] after:rounded-xl after:content-[''] hover:text-medha-accent"
+              >
+                <span className="truncate block">{project.name}</span>
+              </Link>
+            </h2>
+            <p className="mt-0.5 truncate text-[12px] font-mono text-medha-secondary" title={identity}>
+              {identity}
+            </p>
+          </div>
+
+          <div className="relative z-20 flex items-center gap-1.5 shrink-0">
+            <StatusBadge display={display} />
+            <CardMenu project={project} actions={actions} />
+          </div>
+        </div>
+
+        {/* Operational details: Branch & Deployment Health */}
+        <div className="mt-3.5 space-y-1.5 border-t border-medha-border/60 pt-3 text-[12.5px]">
+          <div className="flex items-center gap-1.5 text-medha-secondary">
+            <span className="text-medha-tertiary">Branch:</span>
+            {project.branch ? (
+              <span className="inline-flex items-center gap-1 font-mono text-medha-text">
+                <GitBranch className="h-3 w-3 shrink-0 text-medha-tertiary" aria-hidden />
+                {project.branch}
+              </span>
+            ) : (
+              <span className="text-medha-tertiary italic">Default</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 text-medha-secondary">
+            <span className="text-medha-tertiary">Deployment:</span>
+            <span className={DEPLOYMENT_TONE[deployment.tone]}>
+              {deployment.label}
+            </span>
+          </div>
+
+          {project.summary ? (
+            <p className="line-clamp-2 text-[12px] leading-relaxed text-medha-tertiary pt-0.5">
+              {project.summary}
+            </p>
+          ) : null}
         </div>
       </div>
 
-      <h2 className="mt-3 min-w-0 text-[17px] font-semibold leading-snug tracking-tight text-medha-text">
-        <Link
-          href={base}
-          title={project.name}
-          className="block outline-none after:absolute after:inset-0 after:z-[1] after:rounded-lg after:content-['']"
-        >
-          <span className="line-clamp-2">{project.name}</span>
-        </Link>
-      </h2>
-      <p className="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-medha-secondary">
-        <span className="min-w-0 truncate font-mono" title={identity}>
-          {identity}
+      {/* Footer row: Last activity */}
+      <div className="mt-4 flex items-center justify-between border-t border-medha-border/60 pt-2.5 text-[11.5px] text-medha-tertiary">
+        <span>
+          {project.totalRuns === 0
+            ? "No runs"
+            : `${project.totalRuns} ${project.totalRuns === 1 ? "run" : "runs"}`}
         </span>
-        {project.branch ? (
-          <span
-            className="inline-flex min-w-0 max-w-[45%] shrink-0 items-center gap-1 text-medha-tertiary"
-            title={`Branch ${project.branch}`}
-          >
-            <GitBranch className="h-3 w-3 shrink-0" aria-hidden />
-            <span className="truncate font-mono">{project.branch}</span>
-          </span>
-        ) : null}
-      </p>
-
-      {project.summary ? (
-        <p className="mt-3 line-clamp-2 text-[13px] leading-5 text-medha-secondary">
-          {project.summary}
-        </p>
-      ) : null}
-
-      <div className="mt-auto flex min-w-0 items-center justify-between gap-2 pt-3">
-        <StatusBadge display={display} />
         {activity ? (
           <time
             dateTime={project.lastActivity ?? undefined}
             title={activityTitle}
-            className="min-w-0 truncate text-[11.5px] tabular-nums text-medha-tertiary"
+            className="tabular-nums"
           >
             {activity}
           </time>
-        ) : null}
+        ) : (
+          <span>No recent activity</span>
+        )}
       </div>
     </article>
   );
@@ -372,18 +417,21 @@ function SkeletonGrid() {
       {[0, 1, 2, 3, 4, 5].map((i) => (
         <div
           key={i}
-          className="flex h-full flex-col rounded-lg border border-medha-border bg-white p-4 lg:aspect-square lg:h-auto lg:self-start"
+          className="flex h-48 flex-col justify-between rounded-xl border border-medha-border bg-white p-4"
         >
-          <div className="flex items-start justify-between">
-            <div className="h-8 w-8 rounded-md bg-medha-surface-muted" />
-            <div className="h-6 w-6 rounded-md bg-medha-surface-muted" />
+          <div>
+            <div className="flex items-start justify-between">
+              <div className="h-5 w-32 rounded bg-medha-surface-muted" />
+              <div className="h-5 w-16 rounded-full bg-medha-surface-muted" />
+            </div>
+            <div className="mt-2 h-3 w-24 rounded bg-medha-surface-muted" />
+            <div className="mt-4 space-y-2 border-t border-medha-border/60 pt-3">
+              <div className="h-3.5 w-28 rounded bg-medha-surface-muted" />
+              <div className="h-3.5 w-36 rounded bg-medha-surface-muted" />
+            </div>
           </div>
-          <div className="mt-3 h-4 w-3/4 rounded bg-medha-surface-muted" />
-          <div className="mt-2 h-3 w-1/2 rounded bg-medha-surface-muted" />
-          <div className="mt-3 h-3 w-full rounded bg-medha-surface-muted" />
-          <div className="mt-1 h-3 w-2/3 rounded bg-medha-surface-muted" />
-          <div className="mt-auto flex items-center justify-between gap-2 pt-3">
-            <div className="h-5 w-24 rounded-full bg-medha-surface-muted" />
+          <div className="flex items-center justify-between border-t border-medha-border/60 pt-2.5">
+            <div className="h-3 w-14 rounded bg-medha-surface-muted" />
             <div className="h-3 w-20 rounded bg-medha-surface-muted" />
           </div>
         </div>
@@ -521,7 +569,6 @@ export function ProjectHub() {
       },
       acting,
     }),
-    // reanalyze/refresh are stable enough per render; acting drives busy UI.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [acting],
   );
@@ -532,20 +579,19 @@ export function ProjectHub() {
 
   return (
     <AppShell>
-      {/* Full-bleed bright workspace inside AppShell's padded main. */}
       <div className="-m-4 min-h-[calc(100svh-3.5rem)] bg-medha-canvas p-4 sm:-m-6 sm:p-6 lg:-m-8 lg:p-8">
         <div className="mx-auto w-full max-w-[1400px]">
           {/* Header */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
-              <h1 className="text-[22px] font-semibold leading-tight tracking-tight text-medha-text">
-                Project Hub
+              <h1 className="text-[24px] font-semibold tracking-tight text-medha-text">
+                Projects
               </h1>
             </div>
             <button
               type="button"
               onClick={() => setConnecting(true)}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-medha-accent px-3.5 py-2 text-sm font-semibold text-white shadow-[0_1px_2px_rgba(37,99,235,0.4)] transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-medha-accent px-3.5 py-2 text-[13px] font-semibold text-white shadow-sm transition hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
             >
               <Plus className="h-4 w-4" aria-hidden /> New project
             </button>
@@ -553,7 +599,7 @@ export function ProjectHub() {
 
           {/* Compact toolbar: search, status filter menu, and sorting. */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <div className="relative w-full sm:w-[360px]">
+            <div className="relative min-w-[240px] flex-1 sm:max-w-xs">
               <Search
                 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-medha-tertiary"
                 aria-hidden
@@ -568,7 +614,7 @@ export function ProjectHub() {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search projects..."
                 autoComplete="off"
-                className="w-full rounded-lg border border-medha-border bg-white py-2 pl-9 pr-8 text-sm text-medha-text shadow-[0_1px_2px_rgba(17,24,39,0.05)] placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent/25"
+                className="w-full rounded-lg border border-medha-border bg-white py-1.5 pl-9 pr-8 text-[13px] text-medha-text shadow-sm placeholder:text-medha-tertiary focus:border-medha-accent focus:outline-none focus:ring-1 focus:ring-medha-accent"
               />
               {query ? (
                 <button
@@ -591,13 +637,13 @@ export function ProjectHub() {
                   aria-expanded={filterOpen}
                   aria-controls="projects-filter-popover"
                   onClick={() => setFilterOpen((v) => !v)}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent ${
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent ${
                     statusFilter !== "all"
                       ? "border-medha-accent bg-medha-accent-soft text-medha-accent-hover"
                       : "border-medha-border bg-white text-medha-secondary hover:bg-medha-surface-muted"
                   }`}
                 >
-                  <Filter className="h-4 w-4" aria-hidden />
+                  <Filter className="h-3.5 w-3.5" aria-hidden />
                   Filter
                 </button>
 
@@ -606,7 +652,7 @@ export function ProjectHub() {
                     id="projects-filter-popover"
                     role="dialog"
                     aria-label="Filter projects"
-                    className="absolute left-0 top-full z-40 mt-2 w-60 max-w-[calc(100vw-2rem)] rounded-lg border border-medha-border bg-white p-4 shadow-[0_8px_24px_rgba(17,24,39,0.12)]"
+                    className="absolute left-0 top-full z-40 mt-1.5 w-60 max-w-[calc(100vw-2rem)] rounded-lg border border-medha-border bg-white p-3.5 shadow-lg"
                   >
                     <fieldset>
                       <legend className="medha-label">Status</legend>
@@ -620,7 +666,7 @@ export function ProjectHub() {
                         ].map((option) => (
                           <label
                             key={option.id}
-                            className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] text-medha-secondary hover:bg-medha-canvas focus-within:outline focus-within:outline-2 focus-within:outline-medha-accent"
+                            className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-medha-secondary hover:bg-medha-canvas focus-within:outline focus-within:outline-2 focus-within:outline-medha-accent"
                           >
                             <input
                               type="radio"
@@ -638,7 +684,7 @@ export function ProjectHub() {
                       </div>
                     </fieldset>
 
-                    <div className="mt-3 flex items-center justify-between border-t border-medha-border pt-3">
+                    <div className="mt-3 flex items-center justify-between border-t border-medha-border pt-2.5">
                       <button
                         type="button"
                         onClick={() => {
@@ -646,14 +692,14 @@ export function ProjectHub() {
                           setSort("recent");
                         }}
                         disabled={statusFilter === "all" && sort === "recent"}
-                        className="rounded-md px-2 py-1 text-[13px] font-medium text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                        className="rounded-md px-2 py-1 text-[12.5px] font-medium text-medha-secondary hover:bg-medha-surface-muted hover:text-medha-text disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         Reset
                       </button>
                       <button
                         type="button"
                         onClick={() => setFilterOpen(false)}
-                        className="rounded-md bg-medha-accent px-3 py-1.5 text-[13px] font-semibold text-white hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                        className="rounded-md bg-medha-accent px-3 py-1 text-[12.5px] font-semibold text-white hover:bg-medha-accent-hover"
                       >
                         Show {visible.length}
                       </button>
@@ -669,7 +715,7 @@ export function ProjectHub() {
                 id="projects-sort"
                 value={sort}
                 onChange={(e) => setSort(e.target.value as ProjectSort)}
-                className="w-[170px] truncate rounded-lg border border-medha-border bg-white px-3 py-2 text-sm text-medha-secondary focus:border-medha-accent focus:outline-none focus:ring-2 focus:ring-medha-accent/25"
+                className="w-[160px] truncate rounded-lg border border-medha-border bg-white px-2.5 py-1.5 text-[13px] text-medha-secondary focus:border-medha-accent focus:outline-none focus:ring-1 focus:ring-medha-accent"
               >
                 {SORT_OPTIONS.map((o) => (
                   <option key={o.id} value={o.id}>
@@ -680,7 +726,7 @@ export function ProjectHub() {
             </div>
           </div>
 
-          {/* Error banner (compact; preserves toolbar + cached grid) */}
+          {/* Error banner */}
           {failed ? (
             <div
               role="alert"
@@ -694,14 +740,14 @@ export function ProjectHub() {
               <button
                 type="button"
                 onClick={() => void refresh()}
-                className="shrink-0 rounded-md border border-medha-danger/30 bg-white px-3 py-1.5 text-[12.5px] font-semibold text-medha-danger hover:bg-medha-danger-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                className="shrink-0 rounded-md border border-medha-danger/30 bg-white px-3 py-1.5 text-[12.5px] font-semibold text-medha-danger hover:bg-medha-danger-soft"
               >
                 Retry
               </button>
             </div>
           ) : null}
 
-          {/* Action errors (mutations: re-analyze, disconnect, delete) */}
+          {/* Action errors */}
           {actionError ? (
             <div
               role="alert"
@@ -712,7 +758,7 @@ export function ProjectHub() {
                 type="button"
                 aria-label="Dismiss error"
                 onClick={() => setActionError(null)}
-                className="shrink-0 rounded-md p-1 text-medha-danger hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+                className="shrink-0 rounded-md p-1 text-medha-danger hover:bg-white"
               >
                 <X className="h-4 w-4" aria-hidden />
               </button>
@@ -724,7 +770,7 @@ export function ProjectHub() {
             {showSkeletons ? (
               <SkeletonGrid />
             ) : failed && !hasCache ? (
-              <div className="flex flex-col items-center rounded-lg border border-medha-border bg-white px-6 py-12 text-center">
+              <div className="flex flex-col items-center rounded-xl border border-medha-border bg-white px-6 py-12 text-center">
                 <span
                   aria-hidden
                   className="flex h-11 w-11 items-center justify-center rounded-lg bg-medha-surface-muted text-medha-secondary"
@@ -741,34 +787,33 @@ export function ProjectHub() {
                 <button
                   type="button"
                   onClick={() => void refresh()}
-                  className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                  className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white hover:bg-medha-accent-hover"
                 >
                   Retry
                 </button>
               </div>
             ) : counts.total === 0 ? (
-              <div className="flex flex-col items-center rounded-lg border border-medha-border bg-white px-6 py-12 text-center">
+              <div className="flex flex-col items-center rounded-xl border border-medha-border bg-white px-6 py-12 text-center">
                 <span
                   aria-hidden
                   className="flex h-11 w-11 items-center justify-center rounded-lg bg-medha-accent-soft text-medha-accent"
                 >
-                  <FolderKanban className="h-5 w-5" />
+                  <FolderGit2 className="h-5 w-5" />
                 </span>
                 <p className="mt-3 text-[15px] font-semibold text-medha-text">No projects yet</p>
                 <p className="mt-1 max-w-md text-sm leading-relaxed text-medha-secondary">
-                  Connect a GitHub repository to record its first analysis. Only
-                  verified, readable repositories appear here — nothing simulated.
+                  Connect a GitHub repository to begin automated analysis and verification.
                 </p>
                 <button
                   type="button"
                   onClick={() => setConnecting(true)}
-                  className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                  className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-medha-accent px-4 py-2 text-sm font-semibold text-white hover:bg-medha-accent-hover"
                 >
-                  <Plus className="h-4 w-4" aria-hidden /> New project
+                  <Plus className="h-4 w-4" aria-hidden /> Connect repository
                 </button>
               </div>
             ) : visible.length === 0 ? (
-              <div className="flex flex-col items-center rounded-lg border border-dashed border-medha-border bg-white px-6 py-12 text-center">
+              <div className="flex flex-col items-center rounded-xl border border-dashed border-medha-border bg-white px-6 py-12 text-center">
                 <span
                   aria-hidden
                   className="flex h-11 w-11 items-center justify-center rounded-lg bg-medha-surface-muted text-medha-secondary"
@@ -779,13 +824,12 @@ export function ProjectHub() {
                   No matching projects
                 </p>
                 <p className="mt-1 max-w-md text-sm leading-relaxed text-medha-secondary">
-                  The current search or filters produced no matches. Try a different
-                  term or clear the filters.
+                  The current search or filters produced no matches.
                 </p>
                 <button
                   type="button"
                   onClick={clearAll}
-                  className="mt-4 rounded-lg border border-medha-border bg-white px-4 py-2 text-sm font-semibold text-medha-secondary hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent"
+                  className="mt-4 rounded-lg border border-medha-border bg-white px-4 py-2 text-sm font-semibold text-medha-secondary hover:bg-medha-surface-muted"
                 >
                   Clear search and filters
                 </button>

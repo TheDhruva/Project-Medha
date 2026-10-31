@@ -108,6 +108,23 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=60, alias="MEDHA_RATE_LIMIT_PER_MINUTE")
     trusted_proxy: str = Field(default="", alias="MEDHA_TRUSTED_PROXY")
 
+    # --- Guest sessions (server-issued, no account) ---
+    # A guest session dies with the browser tab on the client (sessionStorage)
+    # and expires server-side after this TTL, at which point the reaper purges
+    # everything the guest owned.
+    guest_session_ttl_hours: int = Field(default=12, alias="MEDHA_GUEST_SESSION_TTL_HOURS")
+    guest_cleanup_interval_seconds: int = Field(
+        default=60, alias="MEDHA_GUEST_CLEANUP_INTERVAL_SECONDS"
+    )
+
+    # --- Operational beta & remediation safety controls ---
+    live_delivery_enabled: bool = Field(default=False, alias="MEDHA_LIVE_DELIVERY_ENABLED")
+    beta_enabled: bool = Field(default=True, alias="MEDHA_BETA_MODE_ENABLED")
+    max_active_projects: int = Field(default=25, alias="MEDHA_MAX_ACTIVE_PROJECTS")
+    repair_sandbox_timeout_seconds: float = Field(
+        default=120.0, alias="MEDHA_REPAIR_SANDBOX_TIMEOUT_SECONDS"
+    )
+
     # --- Isolated real-execution builder/runtime ---
     real_readiness_timeout_seconds: float = Field(
         default=90.0, alias="MEDHA_REAL_READINESS_TIMEOUT_SECONDS"

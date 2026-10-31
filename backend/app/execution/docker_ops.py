@@ -126,6 +126,7 @@ def probe_http_readiness(port: int, *, host: str = "127.0.0.1", timeout: float =
     Non-blocking by contract: returns a status dict (passed/unreachable) and
     never raises. Only loopback targets are probed in V1.
     """
+    import urllib.error
     import urllib.request
 
     if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -141,6 +142,11 @@ def probe_http_readiness(port: int, *, host: str = "127.0.0.1", timeout: float =
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             code = getattr(resp, "status", 200)
         return {"status": "passed" if code < 500 else "unreachable", "http_status": code}
+    except urllib.error.HTTPError as exc:
+        # urlopen raises for 4xx/5xx; the contract still evaluates the code:
+        # a responding service below 500 has passed the probe.
+        return {"status": "passed" if exc.code < 500 else "unreachable",
+                "http_status": exc.code}
     except Exception as exc:  # noqa: BLE001 - probe is advisory only
         return {"status": "unreachable", "reason": str(exc)[:200]}
 
@@ -523,6 +529,7 @@ def wait_http_readiness(
 ) -> dict[str, Any]:
     """Blocking readiness gate: poll until 2xx/3xx/4xx or timeout. Never raises."""
     import time as _time
+    import urllib.error
     import urllib.request
 
     if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -541,6 +548,14 @@ def wait_http_readiness(
                 return {"status": "ready", "http_status": code, "attempts": attempts,
                         "probe_url": url}
             last_error = f"http_{code}"
+        except urllib.error.HTTPError as exc:
+            # urlopen raises HTTPError for 4xx/5xx before the status is read;
+            # the contract still evaluates the code — a responding service
+            # below expect_below (e.g. 404 on a missing root route) is ready.
+            if exc.code < expect_below:
+                return {"status": "ready", "http_status": exc.code, "attempts": attempts,
+                        "probe_url": url}
+            last_error = f"http_{exc.code}"
         except Exception as exc:  # noqa: BLE001 - readiness polling
             last_error = str(exc)[:150]
         _time.sleep(interval)

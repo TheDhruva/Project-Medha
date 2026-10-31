@@ -46,11 +46,27 @@ const IGNORED_DIRS = new Set([
   "node_modules",
 ]);
 
-// Minimal .env parser (KEY=VALUE, optional quotes, `#` comments). Dependency
-// free on purpose: the dev runner must not add packages just to start.
+// Minimal .env parser (KEY=VALUE, optional quotes, `#` comments, multiline support).
+// Dependency free on purpose: the dev runner must not add packages just to start.
 function parseDotenv(text) {
   const out = {};
-  for (const rawLine of text.split(/\r?\n/)) {
+  const lines = text.split(/\r?\n/);
+  let currentKey = null;
+  let currentValue = null;
+  let quoteChar = null;
+
+  for (const rawLine of lines) {
+    if (currentKey !== null) {
+      currentValue += "\n" + rawLine;
+      if (rawLine.trim().endsWith(quoteChar)) {
+        out[currentKey] = currentValue.trim().slice(1, -1);
+        currentKey = null;
+        currentValue = null;
+        quoteChar = null;
+      }
+      continue;
+    }
+
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const eq = line.indexOf("=");
@@ -58,6 +74,17 @@ function parseDotenv(text) {
     const key = line.slice(0, eq).trim().replace(/^export\s+/, "");
     if (!key) continue;
     let value = line.slice(eq + 1).trim();
+
+    if (
+      (value.startsWith('"') && !value.endsWith('"')) ||
+      (value.startsWith("'") && !value.endsWith("'"))
+    ) {
+      quoteChar = value[0];
+      currentKey = key;
+      currentValue = value;
+      continue;
+    }
+
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))

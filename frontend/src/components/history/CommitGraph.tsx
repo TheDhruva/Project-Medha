@@ -14,6 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  authReady,
   fetchCommitDetail,
   fetchCommitHistory,
   type CommitDetail,
@@ -60,52 +61,6 @@ export function CommitGraph({ projectId }: { projectId: string }) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!canonical) {
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    fetchCommitHistory(projectId, { limit: PAGE_SIZE })
-      .then((res) => {
-        if (cancelled) return;
-        setCommits(res.commits.slice(0, MAX_NODES));
-        setPartial(res.partial || res.commits.length >= MAX_NODES);
-        setShallow(res.shallow);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "History unavailable.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, canonical]);
-
-  const loadMore = useCallback(async () => {
-    if (commits.length === 0 || loadingMore) return;
-    setLoadingMore(true);
-    try {
-      const oldest = commits[commits.length - 1];
-      const res = await fetchCommitHistory(projectId, {
-        limit: PAGE_SIZE,
-        since: oldest.committed_at ?? undefined,
-      });
-      const seen = new Set(commits.map((c) => c.sha));
-      const fresh = res.commits.filter((c) => !seen.has(c.sha)).slice(0, MAX_NODES - commits.length);
-      setCommits((prev) => [...prev, ...fresh]);
-      setPartial(res.partial);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Could not load more history.");
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [commits, loadingMore, projectId]);
-
   const select = useCallback(
     async (sha: string) => {
       setSelectedSha(sha);
@@ -123,6 +78,60 @@ export function CommitGraph({ projectId }: { projectId: string }) {
     },
     [projectId],
   );
+
+  useEffect(() => {
+    if (!canonical) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    authReady
+      .then(() => {
+        if (cancelled) return null;
+        return fetchCommitHistory(projectId, { limit: PAGE_SIZE });
+      })
+      .then((res) => {
+        if (cancelled || !res) return;
+        setCommits(res.commits.slice(0, MAX_NODES));
+        setPartial(res.partial || res.commits.length >= PAGE_SIZE);
+        setShallow(res.shallow);
+        if (res.commits.length > 0) {
+          select(res.commits[0].sha);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "History unavailable.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, canonical, select]);
+
+  const loadMore = useCallback(async () => {
+    if (commits.length === 0 || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const oldest = commits[commits.length - 1];
+      const res = await fetchCommitHistory(projectId, {
+        limit: PAGE_SIZE,
+        since: oldest.committed_at ?? undefined,
+      });
+      const seen = new Set(commits.map((c) => c.sha));
+      const fresh = res.commits.filter((c) => !seen.has(c.sha)).slice(0, MAX_NODES - commits.length);
+      setCommits((prev) => [...prev, ...fresh]);
+      // A full page back from the persisted store means older commits may remain.
+      setPartial(fresh.length > 0 && (res.partial || res.commits.length >= PAGE_SIZE));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not load more history.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [commits, loadingMore, projectId]);
 
   const { nodes, edges } = useMemo(() => {
     const bySha = new Map(commits.map((c) => [c.sha, c]));

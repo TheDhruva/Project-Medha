@@ -212,3 +212,32 @@ def test_run_uses_argv_list_without_shell(monkeypatch, target):
     assert isinstance(captured["argv"], list)
     assert captured["kwargs"].get("shell", False) is False
     assert captured["kwargs"].get("check") is False
+
+
+def test_semgrep_config_injectable_via_env(monkeypatch, target):
+    _which_found(monkeypatch)
+    captured: dict = {}
+
+    def spy(argv, **kwargs):
+        captured["argv"] = argv
+        return _Proc(0, json.dumps({"results": []}))
+
+    monkeypatch.setattr(scanners.subprocess, "run", spy)
+    monkeypatch.setenv("MEDHA_SEMGREP_CONFIG", "p/ci")
+    scanners.run_scanner("semgrep", target)
+    argv = captured["argv"]
+    assert "--config" in argv
+    assert argv[argv.index("--config") + 1] == "p/ci"
+
+
+def test_scanner_stderr_captured_and_redacted_on_failure(monkeypatch, target):
+    _which_found(monkeypatch)
+    # Stderr has error info and token-like string that must be redacted
+    err_text = "fatal error: failed to resolve ruleset with token sk-abcdef123456"
+    monkeypatch.setattr(
+        scanners.subprocess, "run", lambda *a, **k: _Proc(2, "[]", stderr=err_text)
+    )
+    res = scanners.run_scanner("semgrep", target)
+    assert res.status == scanners.FAILED
+    assert "stderr:" in res.message
+    assert "sk-abcdef123456" not in res.message

@@ -7,6 +7,7 @@ import type {
   RollbackSummary,
   ScenarioId,
 } from "@/lib/demo/types";
+import { getGuestToken } from "@/lib/guest/session";
 
 // Same-origin by default: the hosted service proxies /api/* and /health to
 // FastAPI through Next.js rewrites, so no absolute URL is needed. An explicit
@@ -23,11 +24,23 @@ export function getApiBaseUrl(): string {
  * components/auth/ClerkTokenSync). Every API request then carries
  * `Authorization: Bearer <Clerk session JWT>` so the FastAPI layer can
  * verify identity and enforce per-user ownership when MEDHA_AUTH_MODE=clerk.
- * Signed-out callers (guest demo) send no header; in the default off-mode
- * backend the header is ignored and behavior is unchanged.
+ * Signed-out callers fall back to a server-issued guest session token (see
+ * lib/guest/session), which the backend validates the same way — ownership
+ * is decided server-side, never by the client.
  * ------------------------------------------------------------------------ */
 
 let tokenGetter: (() => Promise<string | null>) | null = null;
+
+/** Best available credential: the Clerk session, else the guest session. */
+async function currentToken(): Promise<string | null> {
+  let token: string | null = null;
+  try {
+    token = tokenGetter ? await tokenGetter() : null;
+  } catch {
+    /* Token unavailable (signed out) — fall through to the guest session. */
+  }
+  return token || getGuestToken();
+}
 
 /* Resolved once the Clerk token getter has been registered (or immediately
  * when Clerk is not configured). useProjects/useProjectData await this before
@@ -59,10 +72,10 @@ export function registerAuthTokenGetter(fn: (() => Promise<string | null>) | nul
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   try {
-    const token = tokenGetter ? await tokenGetter() : null;
+    const token = await currentToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
   } catch {
-    /* Token unavailable (signed out) — proceed unauthenticated. */
+    /* No credential available — proceed unauthenticated. */
   }
   return globalThis.fetch(`${API_BASE}${path}`, { ...init, headers });
 }
@@ -275,10 +288,10 @@ export function subscribeDeploymentEvents(
   async function authHeader(): Promise<Headers> {
     const headers = new Headers({ Accept: "text/event-stream" });
     try {
-      const token = tokenGetter ? await tokenGetter() : null;
+      const token = await currentToken();
       if (token) headers.set("Authorization", `Bearer ${token}`);
     } catch {
-      /* Signed out — proceed without credentials. */
+      /* No credential — proceed without credentials. */
     }
     return headers;
   }
@@ -990,23 +1003,28 @@ export interface HistoryCommit {
   message: string | null;
   branch: string;
   github_url: string | null;
+  summary?: string | null;
 }
 
 export interface HistoryResponse {
   project_id: string;
   commits: HistoryCommit[];
+  branches?: string[];
   partial: boolean;
   truncated: boolean;
   shallow: boolean;
+  source?: "persisted" | "live";
 }
 
 export async function fetchCommitHistory(
   projectId: string,
-  params?: { limit?: number; since?: string },
+  params?: { limit?: number; since?: string; branch?: string; refresh?: boolean },
 ): Promise<HistoryResponse> {
   const query = new URLSearchParams();
   if (params?.limit != null) query.set("limit", String(params.limit));
   if (params?.since) query.set("since", params.since);
+  if (params?.branch) query.set("branch", params.branch);
+  if (params?.refresh) query.set("refresh", "1");
   const suffix = query.toString() ? `?${query.toString()}` : "";
   const response = await apiFetch(
     `/api/projects/${encodeURIComponent(projectId)}/history${suffix}`,
@@ -1025,6 +1043,8 @@ export interface CommitDetail {
   deleted: number;
   truncated: boolean;
   github_url: string | null;
+  summary?: string | null;
+  source?: string;
 }
 
 export async function fetchCommitDetail(
@@ -1182,6 +1202,32 @@ export interface ProjectsListResponse {
   total: number;
 }
 
+export interface ValidateRepositoryResponse {
+  repository: string;
+  owner: string;
+  name: string;
+  canonical_url: string;
+  accessible: boolean;
+  default_branch: string;
+  branches: string[];
+}
+
+export async function validateRepository(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<ValidateRepositoryResponse> {
+  const response = await apiFetch(`/api/projects/validate-repository`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repository }),
+    signal,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
 export async function fetchProjects(): Promise<ProjectsListResponse> {
   return cachedGet<ProjectsListResponse>(`/api/projects`);
 }
@@ -1190,7 +1236,7 @@ export async function createProject(input: {
   name?: string;
   repository: string;
   branch?: string;
-}): Promise<Project> {
+}): Promise<Project & { existed?: boolean }> {
   const response = await apiFetch(`/api/projects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1200,7 +1246,9 @@ export async function createProject(input: {
     throw await parseError(response);
   }
   clearApiCache("/api/projects");
-  return response.json();
+  // 200 = the repository was already connected (idempotent reconnect);
+  // 201 = a new project row was created.
+  return { ...(await response.json()), existed: response.status === 200 };
 }
 
 export async function fetchProject(projectId: string): Promise<Project> {
@@ -1511,6 +1559,173 @@ export async function fetchProjectFindings(
 ): Promise<ProjectFindingsResponse> {
   const response = await apiFetch(
     `/api/projects/${encodeURIComponent(projectId)}/findings${projectFindingsQuery(params)}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+/* --- Automated Remediation Types & Endpoints ----------------------------- */
+
+export interface RepairPlan {
+  finding_id: string;
+  rule_id: string;
+  file_path: string;
+  line: number | null;
+  title: string;
+  explanation: string;
+  remediation_strategy: "deterministic_ast" | "pattern_transform" | "ai_assisted" | "manual_required";
+  can_auto_fix: boolean;
+  risk_level: "low" | "medium" | "high";
+  original_snippet: string;
+  patched_snippet: string;
+  diff_unified: string;
+  diff_hash?: string;
+  message: string;
+}
+
+export interface RepairVerification {
+  verified: boolean;
+  finding_eliminated: boolean;
+  original_rule_retested: boolean;
+  new_findings_introduced: Array<Record<string, unknown>>;
+  verification_evidence: string[];
+  output: string;
+}
+
+export interface RepairDelivery {
+  delivered: boolean;
+  delivery_method: "github_pr" | "local_branch" | "uncommitted_preview";
+  branch_name: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  commit_sha: string | null;
+  message: string;
+  live_delivery_enabled?: boolean;
+}
+
+export interface RepairAuditTrail {
+  finding_id: string;
+  repair_id: string;
+  status: string;
+  diff_hash?: string;
+  approved: boolean;
+  approved_by?: string;
+  approved_at?: string;
+  approved_diff_hash?: string;
+  audit_events: Array<Record<string, unknown>>;
+}
+
+export interface RepairSessionRecord {
+  repair_id: string;
+  finding_id: string;
+  project_id: string;
+  repository: string;
+  target_sha: string;
+  rule_id: string;
+  file_path: string;
+  status: "planned" | "validating" | "verified" | "failed" | "approved" | "delivered";
+  plan: RepairPlan;
+  verification?: RepairVerification;
+  delivery?: RepairDelivery;
+  diff_hash?: string;
+  approved?: boolean;
+  approved_by?: string;
+  approved_at?: string;
+  approved_diff_hash?: string;
+  audit_events?: Array<Record<string, unknown>>;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchRepairPlan(
+  projectId: string,
+  findingId: string,
+): Promise<RepairPlan> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/findings/${encodeURIComponent(findingId)}/repair-plan`,
+    { method: "POST", cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export async function applyAndVerifyRepair(
+  projectId: string,
+  findingId: string,
+): Promise<{ verification: RepairVerification; branch_name: string; commit_sha: string }> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/findings/${encodeURIComponent(findingId)}/apply-and-verify`,
+    { method: "POST", cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export async function deliverRepair(
+  projectId: string,
+  findingId: string,
+  branchName?: string,
+  deliveryMethod: "github_pr" | "local_branch" | "auto" = "auto",
+): Promise<RepairDelivery> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/findings/${encodeURIComponent(findingId)}/deliver`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch_name: branchName || null, delivery_method: deliveryMethod }),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export async function approveRepair(
+  projectId: string,
+  findingId: string,
+): Promise<RepairSessionRecord> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/findings/${encodeURIComponent(findingId)}/approve`,
+    {
+      method: "POST",
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export async function fetchRepairAuditTrail(
+  projectId: string,
+  findingId: string,
+): Promise<RepairAuditTrail> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/findings/${encodeURIComponent(findingId)}/audit-trail`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.json();
+}
+
+export async function fetchRepairStatus(
+  projectId: string,
+  findingId: string,
+): Promise<RepairSessionRecord> {
+  const response = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/findings/${encodeURIComponent(findingId)}/repair`,
     { cache: "no-store" },
   );
   if (!response.ok) {

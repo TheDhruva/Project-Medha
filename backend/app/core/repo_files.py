@@ -68,47 +68,54 @@ class WalkResult:
 _GITIGNORE_PATTERN = re.compile(r"^[*?!\[]|^\.\/|^\.\.$", re.MULTILINE)
 
 
-def _gitignore_match(path: Path, gitignore_lines: list[str]) -> bool:
+def _gitignore_match(path: Path, gitignore_lines: list[str], root: Path | None = None) -> bool:
     """Return True if *path* matches any non-blank, non-comment gitignore line.
 
-    We walk each line as a glob/pattern against the relative path.  This is a
-    best-effort implementation — gitignore supports negation, recursive, etc —
-    enough for the common use-cases MEDHA already encounters: directory-name
-    patterns (`node_modules`), extension patterns (`*.pyc`), and path anchors
-    (`/build`).
+    Matches repository-relative paths against standard gitignore patterns:
+    - Anchored patterns (leading '/'): match against repository-root-relative path.
+    - Directory patterns (trailing '/'): match path components.
+    - Wildcard/extension patterns ('*.log', 'temp*'): match filename or path.
     """
-    rel = str(path)
+    if root is not None:
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            rel = str(path).replace("\\", "/")
+    else:
+        rel = str(path).replace("\\", "/")
+
+    filename = path.name
+    parts = rel.split("/")
+
     for line in gitignore_lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Convert to a fnmatch pattern:
-        #  - leading slash / anchors to root only
-        #  - ** matches anything including /
-        #  - * matches anything except /
-        #  - ? matches single char
-        #  - [abc] character class
-        pattern = line
-        # If line starts with /, make it match only against the rel path from root
-        anchored = pattern.startswith("/")
+
+        # Handle directory-specific pattern ending with '/'
+        is_dir_pattern = line.endswith("/")
+        pat = line.rstrip("/")
+
+        anchored = line.startswith("/")
+        pat = line.strip("/")
+
         if anchored:
-            pattern = pattern[1:]
-        # ** becomes a regex that matches everything including /
-        pattern = pattern.replace("**", r"(?:.*)")
-        # * becomes a regex that matches non-slash chars
-        #   (fnmatch already handles this per component, but we re-implement
-        #    to also handle glob chars consistently)
-        pattern = pattern.replace("*", "[^/]*")
-        # ? becomes a single-char regex
-        pattern = pattern.replace("?", ".")
-        # [abc] already regex-safe
-        try:
-            if fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(
-                rel.replace("/", os.sep), pattern
-            ):
+            # Anchored to repository root
+            if fnmatch.fnmatch(rel, pat) or (is_dir_pattern and (rel == pat or rel.startswith(f"{pat}/"))):
                 return True
-        except Exception:
-            pass
+        elif "/" in pat:
+            # Relative path with slash
+            if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, f"*/{pat}") or (is_dir_pattern and (rel == pat or f"/{pat}/" in f"/{rel}/")):
+                return True
+        else:
+            # Single-component pattern (e.g. *.log, build, target)
+            if is_dir_pattern:
+                if pat in parts:
+                    return True
+            else:
+                if fnmatch.fnmatch(filename, pat) or pat in parts:
+                    return True
+
     return False
 
 
@@ -212,7 +219,9 @@ def walk_files(root: Path, budget: WalkBudget | None = None) -> WalkResult:
 
             if child.is_dir():
                 # Directory skip logic
-                if _is_skip_dir(name, budget):
+                if _is_skip_dir(name, budget) or (
+                    gitignore_lines and _gitignore_match(child, gitignore_lines, root=root)
+                ):
                     skipped_reasons.setdefault("skip_dir", 0)
                     skipped_reasons["skip_dir"] += 1
                     # Still descend into depth-0 (root) but not children
@@ -223,6 +232,13 @@ def walk_files(root: Path, budget: WalkBudget | None = None) -> WalkResult:
                 continue
 
             # It's a file
+            # Enforce max_files budget
+            if budget.max_files is not None and len(files) >= budget.max_files:
+                skipped_reasons.setdefault("file_budget", 0)
+                skipped_reasons["file_budget"] += 1
+                total_files += 1
+                continue
+
             total_files += 1
 
             # Size check
@@ -235,7 +251,7 @@ def walk_files(root: Path, budget: WalkBudget | None = None) -> WalkResult:
 
             # Gitignore check
             rel = child.relative_to(root).as_posix()
-            if gitignore_lines and _gitignore_match(child, gitignore_lines):
+            if gitignore_lines and _gitignore_match(child, gitignore_lines, root=root):
                 gitignore_skipped += 1
                 skipped_reasons.setdefault("gitignore", 0)
                 skipped_reasons["gitignore"] += 1
@@ -280,13 +296,15 @@ def walk_files(root: Path, budget: WalkBudget | None = None) -> WalkResult:
 
     elapsed_s = time.time() - start
 
-    # Determine whether truncation occurred
+    # Determine whether truncation occurred:
+    # Only exhaustion of enumeration limits (file_budget, byte_budget, time_budget, depth)
+    # constitutes truncation of the repository walk. Benign content skips (per-file size cap)
+    # and directory/gitignore exclusions enumerate the paths or explicitly ignore them.
     truncated = (
         skipped_reasons.get("depth", 0) > 0
+        or skipped_reasons.get("file_budget", 0) > 0
         or skipped_reasons.get("byte_budget", 0) > 0
         or skipped_reasons.get("time_budget", 0) > 0
-        or skipped_reasons.get("gitignore", 0) > 0
-        or skipped_reasons.get("size", 0) > 0
     )
 
     respected_depth = budget.max_depth  # track for return
@@ -310,41 +328,27 @@ def walk_files(root: Path, budget: WalkBudget | None = None) -> WalkResult:
 def walk_language_index(root: Path, budget: WalkBudget | None = None) -> tuple[dict[str, int], WalkResult]:
     """Return language counts dict and WalkResult.
 
-    The counts dict maps *Language* enum values to file counts.
-    Unsupported extensions are recorded as ``"unsupported"`` key if there are any.
+    The counts dict maps language names (e.g. "python", "javascript", "html", "css")
+    to file counts. Unsupported extensions are recorded under the "unsupported" key
+    without double-counting.
     """
     if budget is None:
         budget = WalkBudget(
-            # For language-indexing we count every file we encounter regardless of
-            # extension, but cap total bytes so a 2GB binary dump doesn't kill us.
             max_total_bytes=100 * 1024 * 1024,
-            max_file_bytes=512 * 1024,  # skip files > 512 KB for language detection
+            max_file_bytes=512 * 1024,
         )
 
     result = walk_files(root, budget)
     counts: dict[str, int] = {}
-    unsupported: set[str] = set()
+    from app.analysis.inventory import _EXT_LANG
 
     for f in result.files:
         ext = Path(f.rel).suffix.lower()
-        from app.changeintel.models import Language
-
-        lang = Language.UNSUPPORTED
-        if ext in {".py", ".pyi"}:
-            lang = Language.PYTHON
-        elif ext in {".js", ".jsx", ".mjs", ".cjs"}:
-            lang = Language.JAVASCRIPT
-        elif ext in {".ts", ".tsx"}:
-            lang = Language.TYPESCRIPT
-        elif ext in {".json", ".yml", ".yaml"}:
-            lang = Language.JSON if ext == ".json" else Language.YAML
+        lang = _EXT_LANG.get(ext)
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
         else:
-            unsupported.add(ext)
-
-        counts[lang.value] = counts.get(lang.value, 0) + 1
-
-    if unsupported:
-        counts["unsupported"] = counts.get("unsupported", 0) + len(unsupported)
+            counts["unsupported"] = counts.get("unsupported", 0) + 1
 
     return counts, result
 

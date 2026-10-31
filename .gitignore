@@ -42,7 +42,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-
+.pem
 # IDE / OS
 .idea/
 .vscode/

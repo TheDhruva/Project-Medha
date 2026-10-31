@@ -97,6 +97,15 @@ def _languages(root: Path) -> TaskResult:
         key=lambda x: (-x["files"], x["language"]),
     ) if counts else []
     status = PARTIAL if truncated else SUCCEEDED
+    skipped_size = walk_result.skipped_reasons.get("size", 0)
+    skipped_bytes = walk_result.skipped_reasons.get("byte_budget", 0)
+    cov_parts = [f"scanned {walk_result.total_files} file(s)"]
+    if truncated:
+        cov_parts.append(f"capped at {_MAX_FILES} files / ~100MB")
+    if skipped_size:
+        cov_parts.append(f"{skipped_size} file(s) exceeded content size limit (paths recorded, content skipped)")
+    coverage_desc = "; ".join(cov_parts)
+
     return TaskResult(
         task="languages",
         status=status,
@@ -104,12 +113,10 @@ def _languages(root: Path) -> TaskResult:
             "languages": languages,
             "totals": {"files": walk_result.total_files, "bytes": walk_result.total_bytes},
             "truncated": truncated,
+            "skipped_reasons": walk_result.skipped_reasons,
             "unmapped_extensions": [],  # walker handles all extensions
         },
-        coverage=(
-            f"scanned {walk_result.total_files} file(s); capped at {_MAX_FILES} files / ~100MB"
-            if truncated else f"scanned {walk_result.total_files} file(s)"
-        ),
+        coverage=coverage_desc,
     )
 
 

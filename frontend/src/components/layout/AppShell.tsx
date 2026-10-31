@@ -34,7 +34,6 @@ function isPathOrChild(pathname: string, href: string): boolean {
    project-scoped destinations below, so both navigations are retained. */
 const WORKSPACE_ITEMS = [
   { href: "/projects", label: "Project Hub", icon: FolderKanban },
-  { href: "/runs", label: "Run History", icon: PlayCircle },
   { href: "/settings", label: "Workspace settings", icon: Settings },
 ];
 

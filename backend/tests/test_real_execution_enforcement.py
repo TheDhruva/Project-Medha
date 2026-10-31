@@ -79,6 +79,9 @@ def real_mode(monkeypatch):
     monkeypatch.setenv("MEDHA_EXECUTOR_MODE", "real")
     monkeypatch.setenv("MEDHA_DOCKER_EXECUTE", "true")
     monkeypatch.setenv("MEDHA_AUTH_MODE", "off")
+    from app.execution import docker_ops
+    monkeypatch.setattr(docker_ops, "docker_cli_available", lambda: True)
+    monkeypatch.setattr(docker_ops, "docker_daemon_running", lambda **k: True)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

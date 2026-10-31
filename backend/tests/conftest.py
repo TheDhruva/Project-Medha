@@ -32,6 +32,12 @@ def _explicit_test_execution(monkeypatch):
     # mode unless a test pins otherwise.
     monkeypatch.setenv("MEDHA_AUTH_MODE", "off")
     monkeypatch.setenv("MEDHA_API_TOKEN", "")
+    monkeypatch.setenv("GITHUB_APP_ID", "")
+    monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "")
+    # The guest reaper is a background thread: disable it in the suite and
+    # drive cleanup_expired_guest_sessions() explicitly where it is tested.
+    monkeypatch.setenv("MEDHA_GUEST_CLEANUP_INTERVAL_SECONDS", "0")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

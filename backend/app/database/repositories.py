@@ -554,6 +554,168 @@ class AccountRepository:
         return {key: row[key] for key in row.keys()}
 
 
+# Cleanup retry budget per session: after this many failed passes the session
+# parks in `failed` instead of retrying forever (observability over silence).
+_GUEST_CLEANUP_MAX_ATTEMPTS = 5
+
+# Order matters only when SQLite foreign keys are enforced: children first.
+# Each predicate scopes to one guest subject (or that guest's projects), so a
+# cleanup pass can never reach another owner's rows or shared resources.
+_GUEST_PURGE_STEPS = (
+    ("events", "deployment_id IN (SELECT deployment_id FROM deployments WHERE owner_sub = ?)"),
+    ("events", "deployment_id IN (SELECT deployment_id FROM jobs WHERE project_id IN (SELECT project_id FROM projects WHERE owner_sub = ?))"),
+    ("findings", "project_id IN (SELECT project_id FROM projects WHERE owner_sub = ?)"),
+    ("commits", "project_id IN (SELECT project_id FROM projects WHERE owner_sub = ?)"),
+    ("scores", "project_id IN (SELECT project_id FROM projects WHERE owner_sub = ?)"),
+    ("analysis_cache", "project_id IN (SELECT project_id FROM projects WHERE owner_sub = ?)"),
+    ("jobs", "project_id IN (SELECT project_id FROM projects WHERE owner_sub = ?)"),
+    ("pull_requests", "project_id IN (SELECT project_id FROM projects WHERE owner_sub = ?)"),
+    ("deployments", "owner_sub = ?"),
+    ("projects", "owner_sub = ?"),
+)
+
+
+class GuestSessionRepository:
+    """Server-issued guest sessions (no account).
+
+    Stores only the SHA-256 of the bearer token — a database leak never
+    yields a usable token. Lifecycle: active -> expired (reaper queue) ->
+    cleaned (terminal success), or failed (terminal after max attempts).
+    Cleanup is idempotent: a second purge of the same subject deletes 0 rows.
+    """
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path
+
+    @staticmethod
+    def _row(row: Any) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {key: row[key] for key in row.keys()}
+
+    def create(
+        self,
+        *,
+        session_id: str,
+        token_hash: str,
+        created_at: str,
+        expires_at: str,
+    ) -> None:
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO guest_sessions
+                    (session_id, token_hash, status, created_at, last_seen_at,
+                     expires_at, cleanup_attempts)
+                VALUES (?, ?, 'active', ?, ?, ?, 0)
+                """,
+                (session_id, token_hash, created_at, created_at, expires_at),
+            )
+            conn.commit()
+
+    def get_by_token_hash(self, token_hash: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM guest_sessions WHERE token_hash = ?", (token_hash,)
+            ).fetchone()
+        return self._row(row)
+
+    def get(self, session_id: str) -> dict[str, Any] | None:
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM guest_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return self._row(row)
+
+    def touch(self, session_id: str, *, seen_at: str) -> None:
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                "UPDATE guest_sessions SET last_seen_at = ? WHERE session_id = ?",
+                (seen_at, session_id),
+            )
+            conn.commit()
+
+    def mark_expired(self, session_id: str, *, at: str) -> None:
+        """Queue a session for cleanup. Never downgrades `cleaned`/`failed`."""
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                "UPDATE guest_sessions SET status = 'expired', last_cleanup_at = ? "
+                "WHERE session_id = ? AND status = 'active'",
+                (at, session_id),
+            )
+            conn.commit()
+
+    def record_cleanup_success(self, session_id: str, *, at: str) -> None:
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE guest_sessions
+                   SET status = 'cleaned', last_cleanup_at = ?,
+                       cleanup_error = NULL
+                 WHERE session_id = ?
+                """,
+                (at, session_id),
+            )
+            conn.commit()
+
+    def record_cleanup_failure(self, session_id: str, *, at: str, error: str) -> None:
+        """Increment the retry counter and park the session in `failed` once
+        the attempt budget is exhausted (never an infinite retry loop)."""
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE guest_sessions
+                   SET cleanup_attempts = cleanup_attempts + 1,
+                       last_cleanup_at = ?, cleanup_error = ?,
+                       status = CASE
+                           WHEN cleanup_attempts + 1 >= ? THEN 'failed'
+                           ELSE status
+                       END
+                 WHERE session_id = ?
+                """,
+                (at, error[:500], _GUEST_CLEANUP_MAX_ATTEMPTS, session_id),
+            )
+            conn.commit()
+
+    def list_due(self, *, now: str) -> list[dict[str, Any]]:
+        """Sessions due for cleanup: aged past their TTL, or already queued
+        (`expired`) and still inside the retry budget."""
+        with get_connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM guest_sessions
+                 WHERE (status = 'active' AND expires_at <= ?)
+                    OR (status = 'expired' AND cleanup_attempts < ?)
+                 ORDER BY expires_at
+                 LIMIT 100
+                """,
+                (now, _GUEST_CLEANUP_MAX_ATTEMPTS),
+            ).fetchall()
+        return [self._row(r) for r in rows]  # type: ignore[misc]
+
+    def deployment_ids_for_owner(self, owner_sub: str) -> list[str]:
+        with get_connection(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT deployment_id FROM deployments WHERE owner_sub = ?",
+                (owner_sub,),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def purge_guest_data(self, owner_sub: str) -> dict[str, int]:
+        """Delete every row this guest owns. Idempotent by construction."""
+        counts: dict[str, int] = {}
+        with get_connection(self.db_path) as conn:
+            for table, predicate in _GUEST_PURGE_STEPS:
+                cursor = conn.execute(
+                    f"DELETE FROM {table} WHERE {predicate}", (owner_sub,)
+                )
+                deleted = int(cursor.rowcount or 0)
+                if deleted:
+                    counts[table] = counts.get(table, 0) + deleted
+            conn.commit()
+        return counts
+
+
 class ProposalRepository:
     """Webhook deliveries (idempotent) + approval proposals."""
 
@@ -1330,20 +1492,30 @@ class CommitRepository:
             conn.commit()
 
     def history(self, *, project_id: str, since: str | None = None,
-                limit: int = 50) -> list[dict[str, Any]]:
+                limit: int = 50, branch: str | None = None) -> list[dict[str, Any]]:
         with get_connection(self.db_path) as conn:
+            clauses = ["project_id=?"]
+            params: list[Any] = [project_id]
+            if branch:
+                clauses.append("branch=?")
+                params.append(branch)
             if since:
-                rows = conn.execute(
-                    "SELECT * FROM commits WHERE project_id=? AND committed_at > ?"
-                    " ORDER BY committed_at DESC LIMIT ?",
-                    (project_id, since, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM commits WHERE project_id=? ORDER BY committed_at DESC LIMIT ?",
-                    (project_id, limit),
-                ).fetchall()
+                # `since` is the OLDEST commit the client already shows: page
+                # further back (strictly older), never forward into duplicates.
+                clauses.append("committed_at < ?")
+                params.append(since)
+            query = f"SELECT * FROM commits WHERE {' AND '.join(clauses)} ORDER BY committed_at DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(query, tuple(params)).fetchall()
         return [self._row_to_item(row) for row in rows]
+
+    def branches(self, *, project_id: str) -> list[str]:
+        with get_connection(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT branch FROM commits WHERE project_id=? AND branch IS NOT NULL AND branch != ''",
+                (project_id,),
+            ).fetchall()
+        return [row[0] for row in rows if row[0]]
 
     def get(self, *, project_id: str, sha: str) -> dict[str, Any] | None:
         with get_connection(self.db_path) as conn:

@@ -101,6 +101,13 @@ def post_commit_status(
             "detail": exc.message,
             "state": state,
         }
+    if status_code not in {200, 201}:
+        return {
+            "published": False,
+            "reason": f"HTTP_{status_code}",
+            "detail": _payload.get("message") or f"GitHub API returned HTTP {status_code}",
+            "state": state,
+        }
     return {"published": True, "state": state, "status_code": status_code,
             "context": context}
 

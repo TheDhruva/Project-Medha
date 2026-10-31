@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Clock3,
   Code2,
+  HelpCircle,
   MinusCircle,
   Rocket,
   ShieldCheck,
@@ -14,13 +15,14 @@ import {
   XCircle,
 } from "lucide-react";
 import { scoreTone, type ScorecardMetric, type ScorecardStatus } from "@/lib/projects/metrics";
+import { ScoreExplanationModal } from "@/components/workspace/ScoreExplanationModal";
 import { cn } from "@/lib/ui/cn";
 
 const TONE_CLASSES = {
-  success: { stroke: "stroke-medha-success", text: "text-medha-success-ink", fill: "fill-medha-success-ink" },
+  success: { stroke: "stroke-medha-success", text: "text-medha-success", fill: "fill-medha-success" },
   warning: { stroke: "stroke-medha-warning", text: "text-medha-warning", fill: "fill-medha-warning" },
   danger: { stroke: "stroke-medha-danger", text: "text-medha-danger", fill: "fill-medha-danger" },
-  neutral: { stroke: "stroke-medha-border-strong", text: "text-medha-tertiary", fill: "fill-medha-tertiary" },
+  neutral: { stroke: "stroke-medha-border-strong", text: "text-medha-secondary", fill: "fill-medha-secondary" },
 } as const;
 
 const ICONS = {
@@ -42,13 +44,13 @@ const STATUS_ICONS = {
 } as const;
 
 const STATUS_CLASSES: Record<ScorecardStatus, string> = {
-  healthy: "text-medha-success-ink",
+  healthy: "text-medha-success",
   warning: "text-medha-warning",
   critical: "text-medha-danger",
   partial: "text-medha-warning",
-  not_assessed: "text-medha-tertiary",
-  not_applicable: "text-medha-tertiary",
-  unavailable: "text-medha-tertiary",
+  not_assessed: "text-medha-secondary",
+  not_applicable: "text-medha-secondary",
+  unavailable: "text-medha-secondary",
   stale: "text-medha-warning",
 };
 
@@ -132,8 +134,8 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
         y="55"
         textAnchor="middle"
         className={cn(
-          "font-display text-[22px] font-semibold",
-          clamped == null ? "fill-medha-tertiary" : tone.fill,
+          "font-sans text-[26px] font-semibold",
+          clamped == null ? "fill-medha-secondary" : tone.fill,
         )}
       >
         {clamped == null ? "—" : clamped}
@@ -142,13 +144,20 @@ function Gauge({ value, label }: { value: number | null; label: string }) {
   );
 }
 
-export function MetricCard({ metric }: { metric: ScorecardMetric }) {
+export function MetricCard({
+  metric,
+  previousValue,
+}: {
+  metric: ScorecardMetric;
+  previousValue?: number | null;
+}) {
+  const [showExplanation, setShowExplanation] = useState(false);
   const assessed = formatMs(metric.assessedAt);
   const Icon = ICONS[metric.id] ?? Code2;
   const StatusIcon = STATUS_ICONS[metric.status];
   const toneText =
     metric.value == null || metric.stale
-      ? "text-medha-tertiary"
+      ? "text-medha-secondary"
       : TONE_CLASSES[scoreTone(metric.value)].text;
   const coverage = metric.coverage
     ? `Checks completed: ${metric.coverage.assessed}/${metric.coverage.applicable} checks`
@@ -172,58 +181,101 @@ export function MetricCard({ metric }: { metric: ScorecardMetric }) {
       : `${metric.value}/100`;
 
   return (
-    <Link
-      href={metric.href}
-      /* Compact card shows title, gauge, status and the findings action.
-         Coverage, timestamp and revision stay available to assistive tech
-         here and in full on the linked detail views. */
-      aria-label={`${metric.title}: ${
-        metric.value == null ? valueLabel.toLowerCase() : `${metric.value} of 100`
-      }, ${metric.statusLabel}. ${metric.evidence}${coverage ? `. ${coverage}` : ""}. ${revisionNote}`}
-      data-status={metric.status}
-      className={cn(
-        "group flex h-full flex-col rounded-lg border bg-medha-surface p-3.5 text-left transition hover:border-medha-accent/50 hover:bg-medha-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent",
-        metric.status === "not_assessed" && "border-dashed border-medha-border-strong",
-        metric.status === "not_applicable" && "border-dashed border-medha-border-strong",
-        metric.status === "unavailable" && "border-dashed border-medha-border-strong",
-        metric.status === "stale" && "border-medha-warning/40",
-        metric.status === "partial" && "border-medha-warning/40",
-        metric.status === "critical" && "border-medha-danger/30",
-        !["not_assessed", "not_applicable", "unavailable", "stale", "partial", "critical"].includes(metric.status) && "border-medha-border",
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <Icon className="mt-0.5 h-4 w-4 shrink-0 text-medha-secondary" aria-hidden />
-        <p className="min-w-0 flex-1 text-[14.5px] font-semibold leading-5 text-medha-text">{metric.title}</p>
-        {metric.isDemo ? (
-          <span className="shrink-0 rounded border border-medha-border bg-medha-surface-muted px-1.5 py-0.5 text-[11.5px] font-semibold text-medha-secondary">DEMO</span>
-        ) : null}
-      </div>
+    <>
+      <Link
+        href={metric.href}
+        /* Compact card shows title, gauge, status and the findings action.
+           Coverage, timestamp and revision stay available to assistive tech
+           here and in full on the linked detail views. */
+        aria-label={`${metric.title}: ${
+          metric.value == null ? valueLabel.toLowerCase() : `${metric.value} of 100`
+        }, ${metric.statusLabel}. ${metric.evidence}${coverage ? `. ${coverage}` : ""}. ${revisionNote}`}
+        data-status={metric.status}
+        className={cn(
+          "group flex h-full flex-col rounded-lg border bg-medha-surface p-4 text-left transition hover:border-medha-accent/40 hover:bg-[#FAFBFD] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-medha-accent relative",
+          metric.status === "not_assessed" && "border-dashed border-medha-border",
+          metric.status === "not_applicable" && "border-dashed border-medha-border",
+          metric.status === "unavailable" && "border-dashed border-medha-border",
+          metric.status === "stale" && "border-medha-warning/40",
+          metric.status === "partial" && "border-medha-warning/40",
+          metric.status === "critical" && "border-medha-danger/30",
+          !["not_assessed", "not_applicable", "unavailable", "stale", "partial", "critical"].includes(metric.status) && "border-medha-border",
+        )}
+      >
+        {/* 1. Concise title and explain trigger */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Icon className="h-4 w-4 shrink-0 text-medha-secondary" aria-hidden />
+            <h2 className="text-[14px] font-semibold text-medha-text truncate">{metric.title}</h2>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {metric.isDemo ? (
+              <span className="rounded border border-medha-border bg-medha-surface-muted px-1.5 py-0.5 text-[11px] font-semibold text-medha-secondary">
+                DEMO
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowExplanation(true);
+              }}
+              title={`Explain ${metric.title} score`}
+              aria-label={`Explain ${metric.title} score`}
+              className="rounded p-1 text-medha-secondary/70 hover:bg-medha-surface-muted hover:text-medha-accent transition-colors"
+            >
+              <HelpCircle className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
 
-      <div className="mt-1.5 flex items-center justify-center">
-        <Gauge value={metric.value} label={metric.title} />
-      </div>
+        {/* 2. Semicircular indicator */}
+        <div className="mt-3 flex items-center justify-center">
+          <Gauge value={metric.value} label={metric.title} />
+        </div>
 
-      <p className={cn("text-center text-[14px] font-semibold leading-5", toneText)}>
-        {valueLabel}
-      </p>
+        {/* 3. Numerical score */}
+        <div className="mt-1 text-center">
+          <p className={cn("text-[14px] font-semibold", toneText)}>
+            {valueLabel}
+          </p>
+        </div>
 
-      {/* Status and action share one bottom row; status truncates so the
-          findings link never overflows at narrow widths. */}
-      <div className="mt-auto flex items-center justify-between gap-2 border-t border-medha-border pt-2.5">
-        <span
-          className={cn(
-            "flex min-w-0 items-center gap-1.5 text-[12.5px] font-semibold leading-5",
-            STATUS_CLASSES[metric.status],
-          )}
-        >
-          <StatusIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          <span className="truncate">{metric.statusLabel}</span>
-        </span>
-        <span className="shrink-0 text-[12.5px] font-semibold text-medha-accent">
-          View findings <span aria-hidden>→</span>
-        </span>
-      </div>
-    </Link>
+        {/* 4 & 5. Assessment status & Action to view findings / explain */}
+        <div className="mt-auto pt-3 border-t border-medha-border flex flex-col gap-1.5">
+          <div
+            className={cn(
+              "flex items-center gap-1.5 text-[12.5px] font-medium leading-tight",
+              STATUS_CLASSES[metric.status],
+            )}
+          >
+            <StatusIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span className="truncate">{metric.statusLabel}</span>
+          </div>
+          <div className="flex items-center justify-between text-[12.5px] font-medium text-medha-accent transition-colors group-hover:text-medha-accent-hover">
+            <span
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowExplanation(true);
+              }}
+              className="hover:underline cursor-pointer"
+            >
+              Explain score
+            </span>
+            <span>View findings →</span>
+          </div>
+        </div>
+      </Link>
+
+      {showExplanation ? (
+        <ScoreExplanationModal
+          metric={metric}
+          onClose={() => setShowExplanation(false)}
+          previousValue={previousValue}
+        />
+      ) : null}
+    </>
   );
 }

@@ -109,7 +109,7 @@ describe("VerificationView", () => {
 
     // Internal IDs stay in routing/values, never in visible labels.
     expect(document.body.textContent).not.toMatch(/dep_/);
-    const select = screen.getByRole("combobox");
+    const select = screen.getByRole("combobox", { name: "Run" });
     const options = within(select).getAllByRole("option");
     expect(options).toHaveLength(2);
     for (const option of options) {

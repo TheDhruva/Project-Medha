@@ -31,6 +31,47 @@ def deployment_workspace(deployment_id: str) -> Path:
     return path
 
 
+import os, stat
+
+def safe_rmtree(path: Path | str) -> None:
+    p = Path(path)
+    if not os.path.lexists(str(p)):
+        return
+
+    def _make_writable(fn, s, exc):
+        try:
+            os.chmod(s, stat.S_IWRITE)
+        except OSError:
+            pass
+        try:
+            fn(s)
+        except OSError:
+            pass
+
+    for attempt in range(3):
+        try:
+            if hasattr(shutil, "rmtree") and "onexc" in shutil.rmtree.__code__.co_varnames:
+                shutil.rmtree(p, onexc=_make_writable)
+            else:
+                shutil.rmtree(p, onerror=_make_writable)
+            if not os.path.lexists(str(p)):
+                return
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(0.05)
+
+    if os.name == "nt" and os.path.lexists(str(p)):
+        try:
+            import subprocess
+            subprocess.run(
+                ["cmd.exe", "/c", "rd", "/s", "/q", str(p.resolve())],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
 def cleanup_workspace(deployment_id: str) -> None:
     path = workspaces_root() / deployment_id
     # Resolve and confine: never delete outside the workspaces root
@@ -43,7 +84,7 @@ def cleanup_workspace(deployment_id: str) -> None:
     if resolved == root or root not in resolved.parents:
         return
     if path.exists() or path.is_symlink():
-        shutil.rmtree(path, ignore_errors=True)
+        safe_rmtree(path)
 
 
 def prune_stale_workspaces(*, max_age_hours: float = 24) -> int:

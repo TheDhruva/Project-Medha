@@ -1,59 +1,56 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap");
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  /* ——— Bright Swiss DevOps Workspace ———
-     Slate/graphite on white with a developer-blue accent, shared by the
-     workspace shell and the project dashboard (and consistent with the
-     landing palette). Variable names are unchanged so every existing
-     `medha-*` utility resolves to the unified palette without layout
-     changes. Text shades all meet WCAG AA on white surfaces. */
-  --medha-bg: #F8FAFC;
-  --medha-bg-warm: #F1F5F9;
+  /* ——— Swiss Minimalist DevOps Workspace ———
+     Neutral palette with developer-tool precision:
+     App background #F8F9FB, Surface #FFFFFF, Primary text #17191F,
+     Secondary text #686D78, Borders #E5E7EB, Primary accent #635BFF,
+     Accent hover #5145E5, Success #16803D, Warning #B76E00,
+     Critical/Danger #D92D3A, Info #2878C8. */
+  --medha-bg: #F8F9FB;
+  --medha-bg-warm: #F3F4F6;
   --medha-sidebar: #FFFFFF;
-  --medha-canvas: #F8FAFC;
+  --medha-canvas: #F8F9FB;
   --medha-surface: #FFFFFF;
-  --medha-surface-muted: #F1F5F9;
-  --medha-surface-soft: #F8FAFC;
-  --medha-surface-raised: #F1F5F9;
-  --medha-border: #D7E0EA;
-  --medha-border-strong: #B7C4D3;
-  --medha-text: #172033;
-  /* Secondary carries real descriptions; tertiary is metadata only.
-     Both clear WCAG AA on white, canvas, and muted surfaces. */
-  --medha-text-secondary: #475569;
-  --medha-text-tertiary: #5B6779;
-  --medha-accent: #1D4ED8;
-  --medha-accent-hover: #1E40AF;
-  --medha-accent-soft: #EFF6FF;
+  --medha-surface-muted: #F3F4F6;
+  --medha-surface-soft: #F8F9FB;
+  --medha-surface-raised: #FFFFFF;
+  --medha-border: #E5E7EB;
+  --medha-border-strong: #D1D5DB;
+  --medha-text: #17191F;
+  --medha-text-secondary: #686D78;
+  --medha-text-tertiary: #686D78;
+  --medha-accent: #635BFF;
+  --medha-accent-hover: #5145E5;
+  --medha-accent-soft: #F0EFFF;
   --medha-accent-ink: #FFFFFF;
-  --medha-run: #1D4ED8;
-  --medha-run-soft: #EFF6FF;
-  --medha-run-ink: #1E40AF;
-  --medha-success: #15803D;
-  /* Darker green for small text on tinted backgrounds (AA). */
-  --medha-success-ink: #166534;
+  --medha-run: #635BFF;
+  --medha-run-soft: #F0EFFF;
+  --medha-run-ink: #5145E5;
+  --medha-success: #16803D;
+  --medha-success-ink: #16803D;
   --medha-success-soft: #F0FDF4;
-  --medha-warning: #B45309;
+  --medha-warning: #B76E00;
   --medha-warning-soft: #FFFBEB;
-  --medha-danger: #B91C1C;
+  --medha-danger: #D92D3A;
   --medha-danger-soft: #FEF2F2;
-  --medha-info: #1D4ED8;
+  --medha-info: #2878C8;
   --medha-info-soft: #EFF6FF;
   /* Restrained elevation: thin borders do the work, shadows stay subtle. */
-  --medha-shadow: 0 1px 2px rgba(17, 24, 39, 0.06),
-    0 4px 16px rgba(17, 24, 39, 0.06);
+  --medha-shadow: 0 1px 2px rgba(17, 24, 39, 0.05),
+    0 4px 12px rgba(17, 24, 39, 0.05);
   /* Restrained neumorphism for hero panels only: light source top-left. */
-  --medha-neu: 4px 4px 12px rgba(17, 24, 39, 0.08),
+  --medha-neu: 4px 4px 12px rgba(17, 24, 39, 0.06),
     -3px -3px 10px rgba(255, 255, 255, 0.9);
   --medha-radius: 8px;
   --medha-radius-sm: 6px;
-  --medha-font-display: "Space Grotesk", system-ui, sans-serif;
-  --medha-font-sans: "IBM Plex Sans", system-ui, sans-serif;
-  --medha-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --medha-font-display: "Geist", "Space Grotesk", system-ui, sans-serif;
+  --medha-font-sans: "Geist", "IBM Plex Sans", system-ui, sans-serif;
+  --medha-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
 }
 
 * {
@@ -312,17 +309,19 @@ button.medha-ghost {
 .lp-border { border-color: var(--lp-border); }
 .lp-mono { font-family: var(--medha-font-mono); }
 
-.lp-label {
-  @apply text-[11px] font-medium uppercase tracking-[0.08em];
-  color: var(--lp-secondary);
-}
-
 .lp-btn {
   @apply inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] px-5 py-2.5 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2;
   min-height: 44px;
 }
 .lp-btn:focus-visible {
   outline-color: var(--lp-primary);
+}
+.lp-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.lp-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 .lp-btn-primary {
   background-color: var(--lp-primary);
@@ -338,6 +337,12 @@ button.medha-ghost {
 }
 .lp-btn-secondary:hover {
   background-color: var(--lp-surface-muted);
+}
+.lp-btn-start {
+  width: 248px;
+  max-width: 100%;
+  min-height: 54px;
+  font-size: 15px;
 }
 
 .lp-nav-link {
@@ -357,21 +362,10 @@ button.medha-ghost {
   border: 1px solid var(--lp-border);
   box-shadow: var(--lp-shadow);
 }
-.lp-stage {
-  background-color: var(--lp-surface-muted);
-  border: 1px solid var(--lp-border);
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-btn:active:not(:disabled) {
+    transform: none;
+  }
 }
-.lp-stage-featured {
-  background-color: var(--lp-primary-soft);
-  border: 1px solid var(--lp-primary);
-}
-.lp-eyebrow {
-  color: var(--lp-primary);
-}
-.lp-chip-featured {
-  background-color: var(--lp-primary);
-  color: #FFFFFF;
-}
-.lp-connector {
-  background-color: var(--lp-connector);
-}
+

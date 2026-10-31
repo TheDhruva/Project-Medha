@@ -88,6 +88,7 @@ const { projectData } = vi.hoisted(() => ({
     refresh: vi.fn(),
   },
 }));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
 }));
@@ -108,19 +109,37 @@ vi.mock("@/lib/api/client", async (importOriginal) => {
     fetchScores: vi.fn(() => new Promise(() => undefined)),
     fetchConfigStatus: vi.fn(() => new Promise(() => undefined)),
     fetchAssessmentSummary: vi.fn(() => new Promise(() => undefined)),
-  };
-});
-
-vi.mock("@/components/workspace/DashboardSections", async (importOriginal) => {
-  const original =
-    (await importOriginal()) as typeof import("@/components/workspace/DashboardSections");
-  return {
-    ...original,
-    DeployHealthCard: () => null,
-    EventsCard: () => null,
-    FindingsStrip: () => null,
-    LatestCommitCard: () => null,
-    RepoIntelCard: () => null,
+    fetchCommitHistory: vi.fn(() =>
+      Promise.resolve({
+        project_id: "prj_test",
+        commits: [
+          {
+            sha: "a".repeat(40),
+            parents: [],
+            author: "Author",
+            committed_at: "2026-10-20T10:00:00Z",
+            message: "Add feature",
+            branch: "main",
+            github_url: null,
+          },
+        ],
+        branches: ["main"],
+        partial: false,
+        truncated: false,
+        shallow: false,
+      }),
+    ),
+    fetchCommitDetail: vi.fn(() =>
+      Promise.resolve({
+        sha: "a".repeat(40),
+        files: [],
+        added: 0,
+        deleted: 0,
+        truncated: false,
+        github_url: null,
+        summary: "No diff",
+      }),
+    ),
   };
 });
 
@@ -131,92 +150,68 @@ afterEach(() => {
 });
 
 describe("ProjectBoard header", () => {
-  it("removes the header Settings button and places Deployment details below Run analysis", () => {
+  it("renders the project title, repository identity and branch without redundant summary", () => {
+    render(<ProjectBoard projectId="prj_test" />);
+
+    expect(screen.getByRole("heading", { level: 1, name: "Example App" })).toBeInTheDocument();
+    expect(screen.getByText("example/app")).toBeInTheDocument();
+    expect(screen.getAllByText("main").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText(/stale summary/i)).toBeNull();
+  });
+
+  it("renders deployment status and analysis status independently", () => {
+    render(<ProjectBoard projectId="prj_test" />);
+
+    const deployStatus = screen.getByTestId("deployment-status");
+    expect(within(deployStatus).getByText(/deployment completed/i)).toBeInTheDocument();
+
+    const analysisStatus = screen.getByTestId("analysis-status");
+    expect(within(analysisStatus).getByText(/analysis complete/i)).toBeInTheDocument();
+  });
+
+  it("provides Run analysis and Deployment details actions in the header", () => {
     render(<ProjectBoard projectId="prj_test" />);
 
     const actions = screen.getByTestId("project-actions");
-    expect(within(actions).queryByRole("link", { name: /^Settings$/ })).toBeNull();
-    expect(within(actions).queryByRole("button", { name: /^Settings$/ })).toBeNull();
+    expect(within(actions).getByRole("button", { name: "Run analysis" })).toBeInTheDocument();
+    expect(within(actions).getByRole("button", { name: "Deployment details" })).toBeInTheDocument();
 
-    const run = within(actions).getByRole("button", { name: "Run analysis" });
-    const details = within(actions).getByRole("button", { name: "Deployment details" });
-    expect(
-      run.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(details.parentElement?.parentElement).toHaveClass("flex-col");
-  });
-
-  it("removes the permanent run selector and metadata strip", () => {
-    render(<ProjectBoard projectId="prj_test" />);
-
-    expect(screen.queryByLabelText("Run")).toBeNull();
-    expect(screen.queryByText(/Open run/)).toBeNull();
-    expect(screen.queryByRole("dialog", { name: "Deployment details" })).toBeNull();
-  });
-
-  it("opens deployment details from the compact trigger without a duplicate tab row", () => {
-    render(<ProjectBoard projectId="prj_test" />);
-
-    // Destinations live in the sidebar only — no duplicated tab row.
-    expect(screen.queryByRole("navigation", { name: "Project sections" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Run History" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Deployment details" }));
+    // Opens deployment details popover on click
+    fireEvent.click(within(actions).getByRole("button", { name: "Deployment details" }));
     expect(screen.getByRole("dialog", { name: "Deployment details" })).toBeInTheDocument();
-  });
-
-  it("clears phase details when the selected run changes", () => {
-    const { rerender } = render(<ProjectBoard projectId="prj_test" />);
-    const list = screen.getByRole("list", { name: "Run Timeline phases" });
-    fireEvent.click(within(list).getAllByRole("button")[0]);
-
-    expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument();
-    projectData.selectedId = "dep_previous_1234567890";
-    rerender(<ProjectBoard projectId="prj_test" />);
-
-    expect(screen.getByText("Execution overview")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Back to overview" })).not.toBeInTheDocument();
-  });
-
-  it("clears phase details when the project changes", () => {
-    const { rerender } = render(<ProjectBoard projectId="prj_test" />);
-    const list = screen.getByRole("list", { name: "Run Timeline phases" });
-    fireEvent.click(within(list).getAllByRole("button")[0]);
-
-    expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument();
-    rerender(<ProjectBoard projectId="prj_other" />);
-
-    expect(screen.getByText("Execution overview")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Back to overview" })).not.toBeInTheDocument();
   });
 });
 
-describe("ProjectBoard simplified overview", () => {
-  it("shows the four scorecards and collapses technical detail by default", () => {
+describe("ProjectBoard Phase 3 redesigned overview", () => {
+  it("renders the full 5-level overview hierarchy and removes obsolete panels", async () => {
     render(<ProjectBoard projectId="prj_test" />);
 
-    // Section B: the four semicircular scorecards stay primary.
+    // 1. Four semicircular engineering scorecards
     expect(screen.getByLabelText("Run scorecards")).toBeInTheDocument();
+    expect(screen.getByText("Code Quality")).toBeInTheDocument();
+    expect(screen.getByText("Security Posture")).toBeInTheDocument();
+    expect(screen.getByText("Verification")).toBeInTheDocument();
+    expect(screen.getByText("Deployment Readiness")).toBeInTheDocument();
 
-    // Section D: recent activity with a link out to the full run history.
-    const viewAll = screen.getByRole("link", { name: "View all activity →" });
-    expect(viewAll).toHaveAttribute("href", "/projects/prj_test/runs");
+    // 2. Compact engineering metrics
+    expect(screen.getByTestId("engineering-metrics")).toBeInTheDocument();
+    expect(screen.getByText("Commits Assessed")).toBeInTheDocument();
+    expect(screen.getByText("Open Findings")).toBeInTheDocument();
+    expect(screen.getByText("Latest Verification")).toBeInTheDocument();
+    expect(screen.getByText("Deployment Health")).toBeInTheDocument();
 
-    // Timeline/logs/repo-intel/deploy-health are moved into a collapsed
-    // "Technical details" disclosure, not dropped from the page.
-    const details = screen.getByText("Technical details").closest("details");
-    expect(details).toBeInTheDocument();
-    expect(details).not.toHaveAttribute("open");
-  });
+    // 3. Interactive Git commit graph
+    expect(screen.getByTestId("commit-graph")).toBeInTheDocument();
+    expect(screen.getByText("Commit History")).toBeInTheDocument();
 
-  it("keeps the technical timeline reachable after expanding details", () => {
-    render(<ProjectBoard projectId="prj_test" />);
-    const details = screen.getByText("Technical details").closest("details") as HTMLDetailsElement;
+    // 4. Recent activity is completely removed from the overview
+    expect(screen.queryByTestId("recent-activity")).toBeNull();
+    expect(screen.queryByText("Recent Activity")).toBeNull();
 
-    fireEvent.click(screen.getByText("Technical details"));
-    expect(details.open).toBe(true);
-    // The pipeline timeline is still rendered (and its phase list queryable).
-    expect(screen.getByRole("list", { name: "Run Timeline phases" })).toBeInTheDocument();
+    // Obsolete overview panels remain completely removed:
+    expect(screen.queryByText("Most important findings")).toBeNull();
+    expect(screen.queryByText("Recent runs")).toBeNull();
+    expect(screen.queryByText("Technical details")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Run Timeline phases" })).toBeNull();
   });
 });

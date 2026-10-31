@@ -270,3 +270,71 @@ def test_unsupported_repo_keeps_analysis_report(client, tmp_path):
     # The (possibly empty) analysis report is still persisted, never discarded.
     assert "repository_analysis" in final["result"]
     assert final["result"]["repository_analysis"]["schema"] == "repository-analysis/v1"
+
+
+# --- Regression scenarios for audit findings ----------------------------------
+
+
+def test_large_file_does_not_cause_false_truncation(tmp_path):
+    # A file larger than 256KB is enumerated, but its content is skipped.
+    # The repository walk itself is not truncated.
+    _write(tmp_path / "app.py", "print('hello')\n")
+    _write(tmp_path / "package-lock.json", "x" * (300 * 1024))  # 300KB
+    report = build_repository_inventory(tmp_path, commit_sha="a" * 40)
+    assert report["analysis_status"] == "completed"
+    lang_task = next(t for t in report["tasks"] if t["task"] == "languages")
+    assert lang_task["status"] == "succeeded"
+    assert "content size limit" in lang_task["coverage"]
+
+
+def test_gitignore_matching_and_no_false_truncation(tmp_path):
+    _write(tmp_path / ".gitignore", "*.log\nbuild/\n/anchored.txt\n")
+    _write(tmp_path / "app.py", "print('app')\n")
+    _write(tmp_path / "debug.log", "debug content\n")
+    _write(tmp_path / "anchored.txt", "anchored content\n")
+    _write(tmp_path / "subdir" / "anchored.txt", "not anchored at root\n")
+    _write(tmp_path / "build" / "bundle.js", "bundled code\n")
+
+    report = build_repository_inventory(tmp_path, commit_sha="b" * 40)
+    assert report["analysis_status"] == "completed"
+    lang_task = next(t for t in report["tasks"] if t["task"] == "languages")
+    assert lang_task["status"] == "succeeded"
+    assert lang_task["evidence"]["truncated"] is False
+
+    # Check walk_files directly to verify gitignore filtering
+    from app.core.repo_files import walk_files
+    w = walk_files(tmp_path)
+    found_rels = {f.rel for f in w.files}
+    assert "app.py" in found_rels
+    assert "subdir/anchored.txt" in found_rels
+    assert "debug.log" not in found_rels
+    assert "anchored.txt" not in found_rels
+    assert "build/bundle.js" not in found_rels
+    assert w.truncated is False
+
+
+def test_static_website_classified_with_html_and_css(tmp_path):
+    _write(tmp_path / "index.html", "<!DOCTYPE html><html><body>Hello</body></html>")
+    _write(tmp_path / "style.css", "body { color: red; }")
+
+    report = build_repository_inventory(tmp_path, commit_sha="c" * 40)
+    langs = {l["language"]: l["files"] for l in report["languages"]}
+    assert langs.get("html") == 1
+    assert langs.get("css") == 1
+    assert report["coverage"]["supported_runtime_present"] is True
+    assert "no files in the supported static/python/node families" not in report["coverage"]["gaps"]
+    # Verify discovery identifies static application
+    assert len(report["applications"]) == 1
+    assert "static" in report["applications"][0]["technologies"]
+
+
+def test_file_count_budget_enforced_and_marks_truncated(tmp_path):
+    from app.core.repo_files import WalkBudget, walk_files
+    for i in range(15):
+        _write(tmp_path / f"file_{i}.txt", f"content {i}\n")
+
+    budget = WalkBudget(max_files=10)
+    w = walk_files(tmp_path, budget)
+    assert len(w.files) == 10
+    assert w.truncated is True
+    assert w.skipped_reasons.get("file_budget") == 5

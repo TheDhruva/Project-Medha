@@ -746,3 +746,41 @@ No contradictory requirements found inside the MEDHA V1 contract set after cross
   frontend already renders `value: null` as "not assessed", so no UI contract
   changed.
 - **Status:** Accepted
+
+## ADR-047 - Guest sessions (server-verified, owner-scoped, self-cleaning)
+
+- **Context:** "Continue as Guest" was just a link to /projects: a signed-out
+  browser had no session, so in `MEDHA_AUTH_MODE=clerk` it got a 401 on every
+  call, and in `off` mode every visitor silently shared the `local-operator`
+  subject - no isolation, no lifecycle, and no way to delete anything a
+  visitor created.
+- **Decision:**
+  1. A guest session is one more *subject resolver* inside
+     `require_subject`, not a parallel auth system. The backend mints the
+     token, stores only its SHA-256 in a new `guest_sessions` table
+     (schema v13), and validates it on every request; the subject is
+     `guest:<session_id>` and is written to `owner_sub` exactly like a Clerk
+     `sub`, so isolation reuses the existing ownership scoping unchanged.
+  2. An invalid or expired `medha_guest_*` token fails closed (401) in every
+     auth mode rather than degrading to the shared local subject.
+  3. The client keeps the token in `sessionStorage`, so it survives
+     navigation and same-tab reload and dies with the tab. That is transport
+     persistence only - the server owns the session.
+  4. Cleanup is backend-owned and idempotent: a reaper thread (no Redis, no
+     extra process) expires aged sessions, removes Docker resources through
+     the existing label-checked `cleanup_deployment`, purges the owner-scoped
+     rows, and records `cleanup_attempts` / `last_cleanup_at` /
+     `cleanup_error`. Failures retry up to 5 times then park in `failed`.
+     `DELETE /api/guest-session` does the same immediately and is safe to
+     repeat.
+  5. Guest work is never merged into an account: signing in while a guest
+     token exists ends that session and purges its data.
+- **Why:** The cleanup promise shown in the UI ("Your data is deleted when
+  you leave MEDHA.") had to be true on the backend, and guest data had to be
+  isolated by the same mechanism that already isolates authenticated users.
+- **Consequences:** Schema bump to v13 (new table only, no column changes).
+  Two new settings (`MEDHA_GUEST_SESSION_TTL_HOURS`,
+  `MEDHA_GUEST_CLEANUP_INTERVAL_SECONDS`). In `off` mode a request carrying
+  no Bearer still resolves to `local-operator`, so existing behavior is
+  unchanged.
+- **Status:** Accepted

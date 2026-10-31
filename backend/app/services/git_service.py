@@ -8,6 +8,7 @@ else fails closed — MEDHA never silently analyzes a different commit.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from app.core.repo_url import (
     resolve_and_recheck,
     validate_repository_url,
 )
-from app.services.workspace import deployment_workspace, resolve_local_repo_path
+from app.services.workspace import deployment_workspace, resolve_local_repo_path, safe_rmtree
 
 logger = get_logger(__name__)
 
@@ -271,7 +272,7 @@ def _run_git(
     Failures carry the real exit code, elapsed time, and a sanitized stderr
     tail so callers can persist honest diagnostics.
     """
-    import os
+    # import os (moved to top)
 
     merged = {**os.environ, **_secure_git_env(env)}
     # Never let secret-bearing values reach argv/exceptions: scrub before use.
@@ -397,6 +398,76 @@ def ls_remote_default_branch(url: str) -> str | None:
     return None
 
 
+def ls_remote_branches_and_default(
+    url: str, *, timeout: int = _LSREMOTE_TIMEOUT_S, env: dict[str, str] | None = None
+) -> tuple[str | None, list[str]]:
+    """Detect remote default branch and list available branches without cloning (bounded).
+
+    Uses git ls-remote --symref url HEAD refs/heads/*.
+    Returns (default_branch, [branches]).
+    """
+    cleaned = validate_repository_url(url)
+    local_path = resolve_local_repo_path(cleaned)
+    if local_path is not None:
+        if not _git_available():
+            return "main", ["main"]
+        try:
+            out = _run_git(["-C", str(local_path), "branch", "--list"], timeout=timeout, env=env)
+            branches = []
+            default_branch = None
+            for line in out.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                is_current = stripped.startswith("*")
+                name = stripped.lstrip("* ").strip()
+                if name:
+                    branches.append(name)
+                    if is_current:
+                        default_branch = name
+            return default_branch or (branches[0] if branches else "main"), branches or ["main"]
+        except Exception:
+            return "main", ["main"]
+
+    _enforce_connection_boundary(cleaned)
+    if not _git_available():
+        raise GitAcquireError("GIT_UNAVAILABLE", "Git executable is not available on this host.")
+
+    out = _run_git(
+        ["ls-remote", "--symref", cleaned, "HEAD", "refs/heads/*"],
+        timeout=timeout,
+        env=env,
+    )
+
+    default_branch: str | None = None
+    branches_set: set[str] = set()
+
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ref:"):
+            ref_part = stripped[len("ref:"):].strip().split()[0]
+            if ref_part.startswith("refs/heads/"):
+                candidate = ref_part[len("refs/heads/"):].strip()
+                if 0 < len(candidate) <= 120 and ".." not in candidate:
+                    default_branch = candidate
+        else:
+            parts = stripped.split()
+            if len(parts) >= 2 and _FULL_SHA_RE.match(parts[0]):
+                ref_name = parts[1].strip()
+                if ref_name.startswith("refs/heads/"):
+                    b_name = ref_name[len("refs/heads/"):].strip()
+                    if 0 < len(b_name) <= 120 and ".." not in b_name:
+                        branches_set.add(b_name)
+
+    if default_branch and default_branch not in branches_set:
+        branches_set.add(default_branch)
+
+    other_branches = sorted(b for b in branches_set if b != default_branch)
+    branches = ([default_branch] if default_branch else []) + other_branches
+
+    return default_branch, branches
+
+
 def local_rev_parse(local: Path, sha: str) -> str:
     """Assert a commit exists in a local repository; return normalized SHA."""
     wanted = _require_full_sha(sha)
@@ -443,7 +514,7 @@ def _export_local_archive(local: Path, sha: str, dest: Path) -> None:
     """Export one commit of a local repo to dest (zip + slip-guarded extract)."""
     wanted = local_rev_parse(local, sha)
     if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
+        safe_rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     try:
         completed = subprocess.run(
@@ -571,6 +642,7 @@ def _reject_unsafe_submodules(checkout: Path) -> None:
 def acquire_repository(
     deployment_id: str, repository_url: str, *, ref_sha: str | None = None,
     token_env: dict[str, str] | None = None,
+    depth: int = 50,
 ) -> RepoAcquisition:
     """
     Acquire a repository into the deployment workspace.
@@ -584,8 +656,8 @@ def acquire_repository(
     unchanged (workspace copy / branch-tip clone, ``checked_sha=None``).
     """
     dest = deployment_workspace(deployment_id) / "repo"
-    if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
+    if dest.exists() or os.path.lexists(str(dest)):
+        safe_rmtree(dest)
 
     try:
         repository_url = validate_repository_url(repository_url)
@@ -628,15 +700,16 @@ def acquire_repository(
     _enforce_connection_boundary(repository_url)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    import os
+    # import os (moved to top)
 
     from app.core.config import get_settings
 
     clone_env = {**os.environ, **_secure_git_env(token_env)}
     # Disable submodule auto-fetch at clone time; submodules are validated
     # explicitly below and never inherit credentials.
+    bounded_depth = max(50, min(int(depth), 200))
     clone_cmd = [
-        "git", "clone", "--depth", "1", "--single-branch",
+        "git", "clone", "--depth", str(bounded_depth), "--single-branch",
         "--no-recurse-submodules", "--config",
         "http.followRedirects=false",
         repository_url, str(dest),

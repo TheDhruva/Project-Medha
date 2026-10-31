@@ -152,3 +152,125 @@ def test_probe_http_readiness_passes_against_local_server():
         thread.join(timeout=5)
     assert result["status"] == "passed"
     assert result["http_status"] == 200
+
+
+# --- HTTP status regression coverage (readiness contract: below 500 = ready) ---
+
+
+def _serve(status: int):
+    """Local HTTP server answering every GET with *status*; returns (server, port)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, server.server_address[1]
+
+
+def test_probe_http_readiness_passes_on_404_missing_root_route():
+    # A service that answers 404 on / is responding, not unreachable.
+    server, port = _serve(404)
+    try:
+        result = probe_http_readiness(port, timeout=3.0)
+    finally:
+        server.shutdown()
+    assert result["status"] == "passed"
+    assert result["http_status"] == 404
+
+
+def test_wait_http_readiness_ready_immediately_on_404():
+    from app.execution.docker_ops import wait_http_readiness
+
+    server, port = _serve(404)
+    try:
+        result = wait_http_readiness(
+            port, path="/", timeout=5.0, grace=0.0, interval=0.5
+        )
+    finally:
+        server.shutdown()
+    # Must not burn the full readiness budget against a responding service.
+    assert result["status"] == "ready"
+    assert result["http_status"] == 404
+
+
+def test_wait_http_readiness_keeps_polling_on_5xx_then_times_out():
+    from app.execution.docker_ops import wait_http_readiness
+
+    server, port = _serve(503)
+    try:
+        result = wait_http_readiness(
+            port, path="/", timeout=2.0, grace=0.0, interval=0.5
+        )
+    finally:
+        server.shutdown()
+    # 5xx is not ready yet (may still be starting) but is classified as HTTP.
+    assert result["status"] == "timed_out"
+    assert result["reason"] == "http_503"
+
+
+def test_probe_http_readiness_reports_5xx_as_unreachable():
+    server, port = _serve(503)
+    try:
+        result = probe_http_readiness(port, timeout=3.0)
+    finally:
+        server.shutdown()
+    assert result["status"] == "unreachable"
+    assert result["http_status"] == 503
+
+
+def test_probe_and_wait_report_connection_refusal_distinctly():
+    import socket
+
+    from app.execution.docker_ops import wait_http_readiness
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # nothing is listening now
+    probe = probe_http_readiness(port, timeout=1.0)
+    assert probe["status"] == "unreachable"
+    waited = wait_http_readiness(
+        port, path="/", timeout=1.5, grace=0.0, interval=0.5
+    )
+    assert waited["status"] == "timed_out"
+    assert "refused" in waited["reason"].lower() or "10061" in waited["reason"]
+
+
+def test_wait_http_readiness_times_out_when_server_never_responds():
+    import socket
+    import threading
+
+    from app.execution.docker_ops import wait_http_readiness
+
+    # Accepts connections but never replies: probe must hit its own timeouts.
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    port = listener.getsockname()[1]
+    held: list[socket.socket] = []
+
+    def accept_forever():
+        while True:
+            try:
+                held.append(listener.accept()[0])
+            except OSError:
+                return
+
+    threading.Thread(target=accept_forever, daemon=True).start()
+    try:
+        waited = wait_http_readiness(
+            port, path="/", timeout=3.0, grace=0.0, interval=0.5
+        )
+    finally:
+        listener.close()
+    assert waited["status"] == "timed_out"
+    assert waited["reason"]  # a diagnostic, not a silent timeout

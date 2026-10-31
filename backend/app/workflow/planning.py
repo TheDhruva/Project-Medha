@@ -491,7 +491,7 @@ class PlanningPipeline:
                 require_git_for_remote=True,
                 is_remote=is_remote,
                 target_port=record.target_port,
-                require_docker_for_execute=bool(settings.docker_execute),
+                require_docker_for_execute=False,
             )
             await self._agent_done(
                 deployment_id, "preflight", preflight.summary, ok=preflight.ok)
@@ -1675,6 +1675,25 @@ class PlanningPipeline:
                 deleted=(diff or {}).get("deleted", 0) if diff else 0,
                 deployment_id=deployment_id,
             )
+            try:
+                if acquisition and getattr(acquisition, "path", None):
+                    h_entries, _ = await asyncio.to_thread(_hs.list_history, acquisition.path, limit=50)
+                    cr = CommitRepository(db_path=self.repo.db_path)
+                    for h_entry in h_entries:
+                        if h_entry.sha.lower() != entry.sha.lower():
+                            await asyncio.to_thread(
+                                cr.upsert,
+                                project_id=project_id,
+                                sha=h_entry.sha,
+                                parents=h_entry.parents,
+                                author=h_entry.author,
+                                committed_at=h_entry.committed_at,
+                                message=h_entry.message,
+                                branch=branch,
+                                recorded_at=utc_now_iso(),
+                            )
+            except Exception:
+                pass
         except Exception as exc:  # noqa: BLE001 - advisory only
             logger.warning(
                 "Commit summary unavailable deployment_id=%s: %s",
@@ -3172,6 +3191,46 @@ class PlanningPipeline:
             and (_settings.executor_mode or "auto").lower() in {"real", "docker"}
         )
         if _real_requested and acquisition is not None:
+            from app.execution.docker_ops import docker_cli_available, docker_daemon_running
+            if not (docker_cli_available() and docker_daemon_running()):
+                _docker_err_msg = (
+                    "What happened: MEDHA could not start the deployment environment because Docker is not running.\n\n"
+                    "Why it matters: MEDHA could not launch the application to test its running behavior. "
+                    "Repository checks, security scans, and code quality assessments have been completed and preserved.\n\n"
+                    "What you can do: Start Docker Desktop and retry deployment."
+                )
+                await self._fail(
+                    deployment_id,
+                    _docker_err_msg,
+                    technical="DOCKER_DAEMON_UNAVAILABLE",
+                    result={
+                        "kind": "failed",
+                        "title": "DOCKER_DAEMON_UNAVAILABLE",
+                        "final_status": "failed",
+                        "message": _docker_err_msg,
+                        "durationLabel": "analysis",
+                        "servicesLabel": "0 / 0 started",
+                        "verificationScore": critic.score if critic else None,
+                        "constraintsResolved": constraints_resolved,
+                        "rollbackScope": None,
+                        "phase": PHASE_LABEL,
+                        "is_demo": False,
+                        "code": "DOCKER_DAEMON_UNAVAILABLE",
+                        "execution_mode": _selected_execution_mode(_settings),
+                        "repository_intelligence": repository_intelligence,
+                        "blocked": True,
+                        "blocked_stage": "execute",
+                        "analysis_preserved": True,
+                        "verification_preserved": verification is not None,
+                        "repository_url": _sha_record.repository_url if _sha_record else None,
+                        "target_sha": resolved_sha,
+                        "requested_ref": requested_ref,
+                        "port_contract": port_contract_dict,
+                        "plan": canonical_plan,
+                        "plan_hash": plan_digest,
+                    },
+                )
+                return
             await self._run_real_execute(
                 deployment_id=deployment_id,
                 profile=profile,

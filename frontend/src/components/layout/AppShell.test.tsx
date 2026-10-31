@@ -101,14 +101,13 @@ beforeEach(() => {
 });
 
 describe("AppShell workspace sidebar", () => {
-  it("shows only Projects, Run History, and Workspace settings on the projects home", () => {
+  it("shows only Project Hub and Workspace settings on the projects home", () => {
     setRoute("/projects");
     renderShell();
 
     const links = within(nav("Workspace")).getAllByRole("link");
     expect(links.map((link) => link.textContent)).toEqual([
       "Project Hub",
-      "Run History",
       "Workspace settings",
     ]);
     expect(activeLabels()).toEqual(["Project Hub"]);
@@ -120,8 +119,7 @@ describe("AppShell workspace sidebar", () => {
   });
 
   it.each([
-    ["/runs/dep_1", "Run History"],
-    ["/runs/", "Run History"],
+    ["/settings", "Workspace settings"],
     ["/settings/team", "Workspace settings"],
   ])("marks %s as %s", (pathname, expected) => {
     setRoute(pathname);
@@ -167,7 +165,6 @@ describe("AppShell project sidebar", () => {
 
     const workspaceLinks = within(nav("Workspace")).getAllByRole("link");
     expect(workspaceLinks.map((link) => link.textContent)).toEqual([
-      "Run History",
       "Workspace settings",
     ]);
     expect(screen.queryByText("Project overview")).toBeNull();

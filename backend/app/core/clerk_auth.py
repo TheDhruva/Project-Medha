@@ -12,6 +12,11 @@ Modes (MEDHA_AUTH_MODE):
   valid `Authorization: Bearer <Clerk session token>`. Resources are scoped
   to the verified `sub` (owner_sub) in both SQLite and Postgres.
 
+Guest sessions (app.core.guest_sessions) are resolved ahead of both modes:
+a `medha_guest_*` bearer is validated against the guest_sessions table and
+resolves to "guest:<session_id>", which then flows through the same
+require_subject / owner_sub machinery as any other subject.
+
 Production never silently falls back: mode "clerk" without JWKS configuration
 fails closed (503); mode "off" keeps the pre-existing MEDHA_API_TOKEN
 fail-closed behavior for mutating routes.
@@ -147,22 +152,33 @@ def clear_jwks_cache() -> None:
 async def require_subject(request: Request) -> str:
     """Resolve the authorized subject or raise 401/503.
 
+    Guest sessions are resolved first and in every auth mode: they are
+    server-issued, server-verified, and carry their own subject namespace, so
+    they need no separate auth stack. A guest-prefixed token that is invalid
+    or expired fails closed (401) instead of degrading to LOCAL_SUBJECT.
+
     Clerk mode: verifies Bearer session, upserts the user row (audit trail),
     and returns the verified `sub`. Off mode: returns LOCAL_SUBJECT.
     """
+    scheme, _, raw_token = request.headers.get("authorization", "").partition(" ")
+    bearer = raw_token.strip() if scheme.lower() == "bearer" else ""
+    if bearer:
+        from app.core.guest_sessions import resolve_guest_subject
+
+        guest_subject = await resolve_guest_subject(bearer)
+        if guest_subject is not None:
+            return guest_subject
     if auth_mode() != "clerk":
         return LOCAL_SUBJECT
     if not clerk_configured():
         raise _unavailable()
-    authorization = request.headers.get("authorization", "")
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
+    if not bearer:
         raise _unauthorized()
     import asyncio
 
     # verify_clerk_token does sync JWKS HTTP (httpx.get, 10s timeout) and
     # RSA verify — must not block the event loop per request.
-    claims = await asyncio.to_thread(verify_clerk_token, token.strip())
+    claims = await asyncio.to_thread(verify_clerk_token, bearer)
     subject = str(claims["sub"])
     try:
         from app.core.events import utc_now_iso

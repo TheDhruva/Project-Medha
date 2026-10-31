@@ -36,26 +36,79 @@ class GitHubAppConfig:
     configured: bool
 
 
+def normalize_private_key_pem(raw_key: str | None) -> str:
+    """Normalize private key PEM from various environment variable formats.
+
+    Supports:
+    - Standard multiline PEM string.
+    - Single-line PEM with literal escaped newlines (\\n).
+    - Base64-encoded PEM string.
+    - File path pointing to a readable .pem file.
+    """
+    if not raw_key:
+        return ""
+    key = raw_key.strip()
+    if (key.startswith('"') and key.endswith('"')) or (key.startswith("'") and key.endswith("'")):
+        key = key[1:-1].strip()
+
+    # Check if key is a file path
+    if (key.endswith(".pem") or "\n" not in key) and ("BEGIN " not in key):
+        from pathlib import Path
+        try:
+            path = Path(key)
+            if path.is_file():
+                return path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    # Check if key is base64 encoded
+    if "BEGIN " not in key:
+        import base64
+        try:
+            decoded = base64.b64decode(key.encode("utf-8")).decode("utf-8", errors="ignore").strip()
+            if "BEGIN " in decoded:
+                key = decoded
+        except Exception:
+            pass
+
+    # Unescape literal \n
+    if "\\n" in key:
+        key = key.replace("\\n", "\n")
+
+    return key.strip()
+
+
 def get_github_app_config() -> GitHubAppConfig:
     settings = get_settings()
     app_id = (settings.github_app_id or "").strip()
     installation_id = (settings.github_app_installation_id or "").strip()
-    has_key = bool((settings.github_app_private_key or "").strip())
+    norm_key = normalize_private_key_pem(settings.github_app_private_key)
     return GitHubAppConfig(
         app_id=app_id,
         installation_id=installation_id,
-        configured=bool(app_id and installation_id and has_key),
+        configured=bool(app_id and installation_id and norm_key),
     )
 
 
-def git_env_with_token(token: str) -> dict[str, str]:
-    """Env for git subprocesses carrying an installation token (header, not URL)."""
+def git_env_with_token(token: str, *, auth_format: str = "bearer") -> dict[str, str]:
+    """Env for git subprocesses carrying an installation token (header, not URL).
+
+    Supports:
+    - 'bearer': Authorization: Bearer <token> (standard git HTTP auth)
+    - 'basic': Authorization: Basic base64(x-access-token:<token>) (reliable GitHub Git Smart HTTP)
+    """
     if not token:
         return {}
+    if auth_format.lower() == "basic":
+        import base64
+        auth_b64 = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("utf-8")
+        header_val = f"Authorization: Basic {auth_b64}"
+    else:
+        header_val = f"Authorization: Bearer {token}"
     return {
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+        "GIT_CONFIG_VALUE_0": header_val,
     }
 
 
@@ -77,11 +130,12 @@ def build_app_jwt(*, app_id: str, private_key_pem: str, now: float | None = None
     """Mint a short-lived GitHub App JWT (RS256, max 10 min lifetime)."""
     import jwt  # PyJWT
 
+    norm_pem = normalize_private_key_pem(private_key_pem)
     ts = int(now if now is not None else time.time())
     # Clock-skew tolerant: issued 60s ago, expires in 9 minutes.
     payload = {"iat": ts - 60, "exp": ts + 540, "iss": app_id}
     try:
-        token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+        token = jwt.encode(payload, norm_pem, algorithm="RS256")
     except Exception as exc:
         raise GitHubAppError("GITHUB_APP_JWT_FAILED", "Could not sign GitHub App JWT.") from exc
     return token if isinstance(token, str) else token.decode("utf-8")
@@ -109,10 +163,11 @@ def _api_request(
             status = getattr(resp, "status", 200)
             raw = resp.read() or b"{}"
     except urllib.error.HTTPError as exc:
-        raise GitHubAppError(
-            "GITHUB_API_ERROR",
-            f"GitHub API {path} returned HTTP {exc.code}.",
-        ) from exc
+        status = exc.code
+        try:
+            raw = exc.read() or b"{}"
+        except Exception:
+            raw = b"{}"
     except OSError as exc:
         raise GitHubAppError("GITHUB_API_UNREACHABLE", "GitHub API unreachable.") from exc
     try:
@@ -146,11 +201,17 @@ def mint_installation_token(
     app_jwt = build_app_jwt(
         app_id=config.app_id, private_key_pem=settings.github_app_private_key
     )
-    _, payload = _api_request(
+    status_code, payload = _api_request(
         "POST",
         f"/app/installations/{config.installation_id}/access_tokens",
         jwt_token=app_jwt, body={}, timeout=timeout,
     )
+    if status_code not in {200, 201}:
+        raw_msg = payload.get("message") or f"HTTP {status_code}"
+        raise GitHubAppError(
+            "GITHUB_TOKEN_EXCHANGE_FAILED",
+            f"GitHub installation token exchange failed ({status_code}): {raw_msg}",
+        )
     token = str(payload.get("token") or "")
     if not token:
         raise GitHubAppError("GITHUB_TOKEN_EMPTY", "GitHub did not issue an installation token.")
@@ -167,15 +228,46 @@ def check_repository_access(
     """
     if "/" not in (repository or ""):
         raise GitHubAppError("GITHUB_REPO_INVALID", "Repository must be 'owner/name'.")
-    _, payload = _api_request(
+    status_code, payload = _api_request(
         "GET", f"/repos/{repository.strip()}", bearer=token, timeout=timeout
     )
+    if status_code == 404:
+        raise GitHubAppError(
+            "GITHUB_REPO_NOT_FOUND",
+            f"Repository '{repository}' not found or GitHub App installation lacks access.",
+        )
+    if status_code in {401, 403}:
+        raise GitHubAppError(
+            "GITHUB_INSUFFICIENT_PERMISSIONS",
+            f"GitHub App installation lacks access to '{repository}'.",
+        )
     perms = payload.get("permissions") or {}
-    if not perms.get("contents"):
+    if "contents" in perms:
+        if not perms.get("contents"):
+            raise GitHubAppError(
+                "GITHUB_INSUFFICIENT_PERMISSIONS",
+                f"Installation lacks contents access to '{repository}'.",
+            )
+        return payload
+
+    # If permissions dict is empty (mock test contract), fail closed
+    if not perms:
         raise GitHubAppError(
             "GITHUB_INSUFFICIENT_PERMISSIONS",
             f"Installation lacks contents access to '{repository}'.",
         )
+
+    # For real GitHub App installation tokens, GitHub repo representation returns
+    # user collaborator flags (all false). Confirm contents access with a lightweight probe.
+    c_status, _ = _api_request(
+        "GET", f"/repos/{repository.strip()}/contents", bearer=token, timeout=timeout
+    )
+    if c_status not in {200, 204}:
+        raise GitHubAppError(
+            "GITHUB_INSUFFICIENT_PERMISSIONS",
+            f"Installation lacks contents access to '{repository}' (contents probe HTTP {c_status}).",
+        )
+    payload.setdefault("permissions", {})["contents"] = "read"
     return payload
 
 

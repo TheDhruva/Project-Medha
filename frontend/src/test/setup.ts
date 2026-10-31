@@ -3,6 +3,18 @@ import React from "react";
 import { vi } from "vitest";
 
 /**
+ * Polyfill ResizeObserver for DOM test environments (jsdom)
+ * required by graph libraries such as @xyflow/react.
+ */
+if (typeof window !== "undefined" && !window.ResizeObserver) {
+  window.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
+
+/**
  * Clerk is an external identity provider: unit tests must not depend on it.
  * Mock @clerk/nextjs so components render deterministically in the
  * signed-out state (Sign in / Sign up buttons visible, UserButton hidden).

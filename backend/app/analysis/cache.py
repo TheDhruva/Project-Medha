@@ -87,8 +87,9 @@ def store_inventory(cache_key: str | None, payload: dict[str, Any], *,
         return
     if payload.get("schema") != "repository-analysis/v1":
         return
-    if payload.get("analysis_status") == "failed":
-        # A failed analysis is not a reusable result.
+    if payload.get("analysis_status") in {"failed", "partial"}:
+        # A failed or partial analysis is not a reusable complete result.
+        # Transient scanner failures or incomplete walks must never be permanently cached.
         return
     try:
         AnalysisCacheRepository().put(

@@ -1,12 +1,14 @@
 "use client";
 
 import { Fragment, useEffect, useState } from "react";
+import { Wrench } from "lucide-react";
 import {
   fetchProjectFindings,
   type FindingView,
   type ProjectFindingsResponse,
 } from "@/lib/api/client";
 import { Badge } from "@/components/ui/primitives";
+import { RepairReviewModal } from "@/components/workspace/RepairReviewModal";
 
 /* Severity chip tone (shared with the assessment block): critical → red,
    high → amber, medium → blue, low/unrecognized → neutral grey. */
@@ -51,7 +53,13 @@ function shortSha(sha: string | null): string {
   return sha ? sha.slice(0, 7) : "—";
 }
 
-function FindingRow({ finding }: { finding: FindingView }) {
+function FindingRow({
+  finding,
+  onSelectForRepair,
+}: {
+  finding: FindingView;
+  onSelectForRepair: (finding: FindingView) => void;
+}) {
   const location = finding.path
     ? `${finding.path}${finding.line != null ? `:${finding.line}` : ""}`
     : null;
@@ -123,6 +131,24 @@ function FindingRow({ finding }: { finding: FindingView }) {
           {!finding.explanation && !finding.remediation && evidence.length === 0 && history.length === 0 ? (
             <p className="text-medha-tertiary">No further detail recorded for this finding.</p>
           ) : null}
+          <div className="mt-2.5 flex items-center justify-between border-t border-medha-border/60 pt-2">
+            <span className="text-[11.5px] text-medha-tertiary">
+              {finding.status === "resolved" ? "Issue verified and resolved." : "Automated remediation available"}
+            </span>
+            {finding.status !== "resolved" ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSelectForRepair(finding);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-md bg-medha-accent px-2.5 py-1 text-xs font-semibold text-white hover:bg-medha-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-medha-accent"
+              >
+                <Wrench className="h-3.5 w-3.5" />
+                <span>Fix Problem</span>
+              </button>
+            ) : null}
+          </div>
         </dl>
       </details>
     </li>
@@ -138,6 +164,7 @@ export function FindingsPanel({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  const [selectedFinding, setSelectedFinding] = useState<FindingView | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -242,10 +269,26 @@ export function FindingsPanel({ projectId }: { projectId: string }) {
       ) : (
         <ul className="mt-3 divide-y divide-medha-border border-t border-medha-border">
           {data.findings.map((finding) => (
-            <FindingRow key={finding.finding_id} finding={finding} />
+            <FindingRow
+              key={finding.finding_id}
+              finding={finding}
+              onSelectForRepair={(f) => setSelectedFinding(f)}
+            />
           ))}
         </ul>
       )}
+
+      {selectedFinding ? (
+        <RepairReviewModal
+          projectId={projectId}
+          finding={selectedFinding}
+          onClose={() => setSelectedFinding(null)}
+          onResolved={() => {
+            setReload((n) => n + 1);
+            setSelectedFinding(null);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
