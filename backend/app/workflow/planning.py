@@ -506,26 +506,78 @@ class PlanningPipeline:
             # Source identity: resolve the requested ref (branch/tag/SHA) to an
             # immutable commit SHA before anything else. Fail closed when the
             # ref cannot be resolved to exactly one commit.
+            from app.database.repositories import ProjectRepository
             from app.services.git_service import GitAcquireError as _GAE
-            from app.services.git_service import resolve_ref_to_sha
+            from app.services.git_service import ls_remote_sha, resolve_ref_to_sha
             from app.services.github_app import GitHubAppError as _GHE
             from app.services.github_app import prepare_private_access
 
-            # Private GitHub access: mint a short-lived installation token
-            # scoped to the requested repo (empty env = public/anonymous path).
-            # The token lives only in this run's memory — never persisted,
-            # logged, or embedded in URLs.
-            try:
-                git_auth_env = await asyncio.to_thread(
-                    prepare_private_access, record.repository_url
-                )
-            except _GHE as exc:
-                await self._fail(
-                    deployment_id,
-                    f"Private repository access failed: {exc.message}",
-                    technical=f"github.{exc.code}",
-                )
-                return
+            # Access credential resolution:
+            # - Public repositories do not require GitHub App installation tokens when
+            #   anonymous git access is verified.
+            # - Private repositories require authenticated access via GitHub App and
+            #   fail closed if authorization is unavailable or invalid.
+            git_auth_env: dict[str, str] = {}
+            proj = ProjectRepository().get(record.project_id) if record.project_id else None
+            is_confirmed_public = bool(proj and proj.visibility == "public")
+            is_confirmed_private = bool(proj and proj.visibility == "private")
+
+            if is_confirmed_public:
+                try:
+                    probe_sha = await asyncio.to_thread(
+                        ls_remote_sha, record.repository_url, "HEAD"
+                    )
+                    if probe_sha:
+                        git_auth_env = {}
+                    else:
+                        is_confirmed_public = False
+                except Exception:
+                    is_confirmed_public = False
+
+            if not is_confirmed_public:
+                try:
+                    git_auth_env = await asyncio.to_thread(
+                        prepare_private_access, record.repository_url
+                    )
+                except _GHE as exc:
+                    # If private authentication fails, only fall back to anonymous access
+                    # if the repository is demonstrably public via anonymous git probe,
+                    # AND it was not authoritatively verified as private.
+                    if not is_confirmed_private:
+                        try:
+                            probe_sha = await asyncio.to_thread(
+                                ls_remote_sha, record.repository_url, "HEAD"
+                            )
+                            if probe_sha:
+                                logger.info(
+                                    "Private access token unavailable (%s); falling back to verified anonymous public access for %s",
+                                    exc.code,
+                                    record.repository_url,
+                                )
+                                git_auth_env = {}
+                                if proj and proj.visibility != "public":
+                                    ProjectRepository().update(record.project_id, visibility="public")
+                            else:
+                                await self._fail(
+                                    deployment_id,
+                                    f"Private repository access failed: {exc.message}",
+                                    technical=f"github.{exc.code}",
+                                )
+                                return
+                        except Exception:
+                            await self._fail(
+                                deployment_id,
+                                f"Private repository access failed: {exc.message}",
+                                technical=f"github.{exc.code}",
+                            )
+                            return
+                    else:
+                        await self._fail(
+                            deployment_id,
+                            f"Private repository access failed: {exc.message}",
+                            technical=f"github.{exc.code}",
+                        )
+                        return
 
             requested_ref = record.target_revision
             resolved_sha: str | None = None

@@ -191,6 +191,66 @@ class DeploymentRepository:
         except (KeyError, TypeError, ValueError):
             return False
 
+    def has_active_runs_for_repo(self, repo_url: str, owner_sub: str) -> bool:
+        if not repo_url:
+            return False
+        repo_clean = repo_url.rstrip("/")
+        repo_with_git = repo_clean + ".git" if not repo_clean.endswith(".git") else repo_clean
+        repo_without_git = repo_clean[:-4] if repo_clean.endswith(".git") else repo_clean
+        with get_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM deployments"
+                " WHERE owner_sub = ?"
+                " AND (repository_url = ? OR repository_url = ? OR repository_url = ?)"
+                " AND status IN ('queued', 'started', 'running')",
+                (owner_sub, repo_url, repo_with_git, repo_without_git),
+            ).fetchone()
+        try:
+            return int(row["count"]) > 0
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def purge_repository_runs(self, repository_url: str, owner_sub: str) -> int:
+        """Purge orphan/legacy runs for a repository URL for owner_sub."""
+        if not repository_url:
+            return 0
+        repo_clean = repository_url.rstrip("/")
+        repo_with_git = repo_clean + ".git" if not repo_clean.endswith(".git") else repo_clean
+        repo_without_git = repo_clean[:-4] if repo_clean.endswith(".git") else repo_clean
+
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM events WHERE deployment_id IN ("
+                " SELECT deployment_id FROM deployments WHERE owner_sub = ?"
+                " AND (repository_url = ? OR repository_url = ? OR repository_url = ?)"
+                ")",
+                (owner_sub, repository_url, repo_with_git, repo_without_git),
+            )
+            conn.execute(
+                "DELETE FROM proposals WHERE deployment_id IN ("
+                " SELECT deployment_id FROM deployments WHERE owner_sub = ?"
+                " AND (repository_url = ? OR repository_url = ? OR repository_url = ?)"
+                ")",
+                (owner_sub, repository_url, repo_with_git, repo_without_git),
+            )
+            conn.execute(
+                "DELETE FROM scores WHERE run_id IN ("
+                " SELECT deployment_id FROM deployments WHERE owner_sub = ?"
+                " AND (repository_url = ? OR repository_url = ? OR repository_url = ?)"
+                ")",
+                (owner_sub, repository_url, repo_with_git, repo_without_git),
+            )
+            cursor = conn.execute(
+                "DELETE FROM deployments WHERE owner_sub = ?"
+                " AND (repository_url = ? OR repository_url = ? OR repository_url = ?)",
+                (owner_sub, repository_url, repo_with_git, repo_without_git),
+            )
+            conn.commit()
+            try:
+                return int(cursor.rowcount or 0)
+            except (TypeError, ValueError):
+                return 0
+
     def update_status(
         self,
         deployment_id: str,
@@ -1144,6 +1204,70 @@ class ProjectRepository:
         with get_connection(self.db_path) as conn:
             cursor = conn.execute(
                 "DELETE FROM projects WHERE project_id = ?", (project_id,)
+            )
+            conn.commit()
+            try:
+                return int(cursor.rowcount or 0) > 0
+            except (TypeError, ValueError):
+                return False
+
+    def purge_project(
+        self, project_id: str, owner_sub: str, canonical_url: str | None = None
+    ) -> bool:
+        """Purge a project and all associated runs, proposals, findings, etc.
+        Scoped strictly to owner_sub.
+        """
+        canon = canonical_url or ""
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                DELETE FROM events
+                 WHERE deployment_id IN (
+                     SELECT deployment_id FROM deployments
+                      WHERE (project_id = ? OR (repository_url = ? AND ? != ''))
+                        AND owner_sub = ?
+                 )
+                """,
+                (project_id, canon, canon, owner_sub),
+            )
+            conn.execute(
+                """
+                DELETE FROM events
+                 WHERE deployment_id IN (
+                     SELECT deployment_id FROM jobs
+                      WHERE project_id = ?
+                 )
+                """,
+                (project_id,),
+            )
+            conn.execute(
+                """
+                DELETE FROM proposals
+                 WHERE deployment_id IN (
+                     SELECT deployment_id FROM deployments
+                      WHERE (project_id = ? OR (repository_url = ? AND ? != ''))
+                        AND owner_sub = ?
+                 )
+                """,
+                (project_id, canon, canon, owner_sub),
+            )
+            conn.execute("DELETE FROM findings WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM commits WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM scores WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM analysis_cache WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM jobs WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM pull_requests WHERE project_id = ?", (project_id,))
+            conn.execute(
+                """
+                DELETE FROM deployments
+                 WHERE (project_id = ? OR (repository_url = ? AND ? != ''))
+                   AND owner_sub = ?
+                """,
+                (project_id, canon, canon, owner_sub),
+            )
+            cursor = conn.execute(
+                "DELETE FROM projects WHERE project_id = ? AND owner_sub = ?",
+                (project_id, owner_sub),
             )
             conn.commit()
             try:

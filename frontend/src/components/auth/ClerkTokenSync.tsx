@@ -17,9 +17,11 @@ import { endGuestSession, getGuestToken } from "@/lib/guest/session";
  * (its data is purged, not migrated) and the local token is dropped.
  */
 export function ClerkTokenSync() {
-  const { getToken, isSignedIn } = useAuth();
+  const { getToken, isSignedIn, isLoaded } = useAuth();
 
   useEffect(() => {
+    if (!isLoaded) return;
+
     registerAuthTokenGetter(async () => {
       if (!isSignedIn) return null;
       try {
@@ -29,12 +31,12 @@ export function ClerkTokenSync() {
       }
     });
     return () => registerAuthTokenGetter(null);
-  }, [getToken, isSignedIn]);
+  }, [getToken, isSignedIn, isLoaded]);
 
   useEffect(() => {
-    if (!isSignedIn || !getGuestToken()) return;
+    if (!isLoaded || !isSignedIn || !getGuestToken()) return;
     void endGuestSession();
-  }, [isSignedIn]);
+  }, [isLoaded, isSignedIn]);
 
   return null;
 }

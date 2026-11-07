@@ -169,7 +169,13 @@ async def validate_repository(body: ProjectValidateBody, subject: str = RequireS
             git_service.ls_remote_branches_and_default, canonical, env=git_auth_env or None
         )
     except git_service.GitAcquireError as exc:
-        status_code = 404 if exc.category == "not_found" else 401 if exc.category == "auth_required" else 400
+        status_code = (
+            404 if exc.category == "not_found"
+            else 401 if exc.category in {"auth", "auth_required"}
+            else 504 if exc.category == "timeout"
+            else 502 if exc.category == "network"
+            else 400
+        )
         return _error(status_code, exc.code, exc.message)
     except Exception as exc:
         return _error(502, "NETWORK_ERROR", f"Could not contact repository: {str(exc)}")
@@ -402,26 +408,58 @@ async def disconnect_project(project_id: str, subject: str = RequireSubject):
 
 
 @router.delete(
-    "/projects/{project_id}", dependencies=[Depends(require_mutation_token)]
+    "/projects/{project_id:path}", dependencies=[Depends(require_mutation_token)]
 )
 async def delete_project(project_id: str, subject: str = RequireSubject):
-    project = _owned_project(project_id, subject)
+    import urllib.parse
+    unquoted = urllib.parse.unquote(project_id)
+    project = _owned_project(project_id, subject) or _owned_project(unquoted, subject)
     if project is None:
-        return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
-    # Active runs keep their history rows; refusing deletion while a run is
-    # in flight avoids orphaning an executing pipeline. Disconnect instead,
-    # or retry once the run settles.
-    if repo.has_active_runs(project_id):
-        return _error(
-            409, "ACTIVE_RUNS",
-            "This project has a run still in flight; deletion is blocked "
-            "until it finishes. Disconnect the repository instead, or retry "
-            "after the run settles.",
-        )
-    projects.delete(project_id)
-    # Run/proposal history is preserved; without the mapping, future webhook
-    # events for this repository no longer route anywhere.
-    return JSONResponse({"deleted": project_id})
+        try:
+            _, _, _, canon = canonical_repo_identity(unquoted)
+            project = projects.find_by_owner_repo(subject, canon)
+        except Exception:
+            pass
+
+    if project is not None:
+        # Active runs keep their history rows; refusing deletion while a run is
+        # in flight avoids orphaning an executing pipeline. Disconnect instead,
+        # or retry once the run settles.
+        if repo.has_active_runs(project.project_id):
+            return _error(
+                409, "ACTIVE_RUNS",
+                "This project has a run still in flight; deletion is blocked "
+                "until it finishes. Disconnect the repository instead, or retry "
+                "after the run settles.",
+            )
+        projects.purge_project(project.project_id, subject, project.canonical_url)
+        return JSONResponse({"deleted": project.project_id})
+
+    # Legacy or orphan repository run cleanup
+    candidate_urls = [project_id, unquoted]
+    try:
+        ident = canonical_repo_identity(unquoted)
+        candidate_urls.extend([ident.canonical_url, ident.normalized_name])
+    except Exception:
+        pass
+
+    for url in candidate_urls:
+        if repo.has_active_runs_for_repo(url, subject):
+            return _error(
+                409, "ACTIVE_RUNS",
+                "This project has a run still in flight; deletion is blocked "
+                "until it finishes. Disconnect the repository instead, or retry "
+                "after the run settles.",
+            )
+
+    deleted_count = 0
+    for url in candidate_urls:
+        deleted_count += repo.purge_repository_runs(url, subject)
+
+    if deleted_count > 0:
+        return JSONResponse({"deleted": project_id})
+
+    return _error(404, "NOT_FOUND", f"Project '{project_id}' was not found.")
 
 
 @router.post(

@@ -539,7 +539,10 @@ def _python_spec(
         # uvicorn --factory invokes a create_app() factory; only the ASGI
         # server supports this flag (gunicorn WSGI factories stay out of V1).
         start_command.append("--factory")
-    start_command += [target, "--host", "0.0.0.0", "--port", str(target_port)]
+    if server == "uvicorn":
+        start_command += [target, "--host", "0.0.0.0", "--port", str(target_port)]
+    else:
+        start_command += [target, "--bind", f"0.0.0.0:{target_port}"]
     return RuntimeSpec(
         profile="python-asgi", profile_version=PROFILE_VERSIONS["python-asgi"],
         reason=f"python entrypoint {entry.path}",

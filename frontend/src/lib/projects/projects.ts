@@ -609,13 +609,22 @@ export function useProjects(limit = 200, pollIntervalMs = 8000) {
     setLoading(true);
     setError(null);
     try {
-      const [runsRes, projRes] = await Promise.all([
+      const [runsResult, projResult] = await Promise.allSettled([
         fetchRunsList({ limit, offset: 0 }),
-        fetchProjects().catch(() => ({ projects: [] as Project[], total: 0 })),
+        fetchProjects(),
       ]);
-      setRuns(runsRes.runs);
-      setProjects(projRes.projects ?? []);
-      setTotal(runsRes.total);
+
+      if (runsResult.status === "rejected" && projResult.status === "rejected") {
+        throw runsResult.reason;
+      }
+
+      if (runsResult.status === "fulfilled") {
+        setRuns(runsResult.value.runs);
+        setTotal(runsResult.value.total);
+      }
+      if (projResult.status === "fulfilled") {
+        setProjects(projResult.value.projects ?? []);
+      }
       setBackendReachable(true);
     } catch (err) {
       setBackendReachable(false);

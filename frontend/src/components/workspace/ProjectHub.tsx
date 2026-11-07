@@ -196,6 +196,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
         aria-label={`Actions for ${project.name}`}
         aria-haspopup="menu"
         aria-expanded={open}
+        onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
           setOpen((v) => !v);
@@ -209,6 +210,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
           role="menu"
           aria-label={`Actions for ${project.name}`}
           className="absolute right-0 top-full z-30 mt-1 w-52 rounded-lg border border-medha-border bg-white p-1 shadow-[0_8px_24px_rgba(17,24,39,0.12)]"
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
           onKeyDown={(e) => {
             if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -277,7 +279,7 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
             )}
             {copied ? "Copied URL" : "Copy repository URL"}
           </button>
-          {canonical ? <div role="separator" className="my-1 h-px bg-medha-border" /> : null}
+          <div role="separator" className="my-1 h-px bg-medha-border" />
           {canonical && project.connectionStatus !== "disconnected" ? (
             <button
               type="button"
@@ -292,20 +294,18 @@ function CardMenu({ project, actions }: { project: ProjectSummary; actions: Card
               Disconnect repository
             </button>
           ) : null}
-          {canonical ? (
-            <button
-              type="button"
-              role="menuitem"
-              className={`${itemCls} text-medha-danger hover:bg-medha-danger-soft`}
-              disabled={busy}
-              onClick={() => {
-                setOpen(false);
-                actions.onDelete(project);
-              }}
-            >
-              Delete project
-            </button>
-          ) : null}
+          <button
+            type="button"
+            role="menuitem"
+            className={`${itemCls} text-medha-danger hover:bg-medha-danger-soft`}
+            disabled={busy}
+            onClick={() => {
+              setOpen(false);
+              actions.onDelete(project);
+            }}
+          >
+            Delete project
+          </button>
         </div>
       ) : null}
     </div>
@@ -530,15 +530,18 @@ export function ProjectHub() {
 
   async function confirmAction() {
     if (!confirm) return;
-    const pid = confirm.project.projectId;
-    if (pid == null) return;
     const { kind, project } = confirm;
-    const id: string = pid;
+    const targetId = confirm.project.projectId || confirm.project.id || confirm.project.repositoryUrl;
+    if (!targetId) return;
     setActing(`${project.id}:${kind}`);
     setActionError(null);
     try {
-      if (kind === "disconnect") await disconnectProject(id);
-      else await deleteProject(id);
+      if (kind === "disconnect") {
+        if (!confirm.project.projectId) return;
+        await disconnectProject(confirm.project.projectId);
+      } else {
+        await deleteProject(targetId);
+      }
       setConfirm(null);
       await refresh();
     } catch (err) {
@@ -870,7 +873,7 @@ export function ProjectHub() {
                     </>
                   ) : (
                     <>
-                      Delete <span className="font-semibold text-medha-text">{confirm.project.name}</span> from this workspace? Recorded run history is preserved in the backend, but the connection mapping is removed.
+                      Delete <span className="font-semibold text-medha-text">{confirm.project.name}</span> from this workspace? All associated runs and analysis history will be permanently deleted.
                     </>
                   )}
                 </p>

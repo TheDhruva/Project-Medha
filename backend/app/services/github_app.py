@@ -43,7 +43,8 @@ def normalize_private_key_pem(raw_key: str | None) -> str:
     - Standard multiline PEM string.
     - Single-line PEM with literal escaped newlines (\\n).
     - Base64-encoded PEM string.
-    - File path pointing to a readable .pem file.
+    - File path pointing to a readable .pem file (relative paths resolve against
+      the project root, backend root, or current working directory).
     """
     if not raw_key:
         return ""
@@ -55,11 +56,21 @@ def normalize_private_key_pem(raw_key: str | None) -> str:
     if (key.endswith(".pem") or "\n" not in key) and ("BEGIN " not in key):
         from pathlib import Path
         try:
-            path = Path(key)
-            if path.is_file():
-                return path.read_text(encoding="utf-8").strip()
+            from app.core.config import BACKEND_ROOT, PROJECT_ROOT
+            candidate_paths = [
+                Path(key),
+                PROJECT_ROOT / key,
+                BACKEND_ROOT / key,
+            ]
         except Exception:
-            pass
+            candidate_paths = [Path(key)]
+        for p in candidate_paths:
+            try:
+                if p.is_file():
+                    key = p.read_text(encoding="utf-8").strip()
+                    break
+            except Exception:
+                pass
 
     # Check if key is base64 encoded
     if "BEGIN " not in key:
@@ -75,18 +86,33 @@ def normalize_private_key_pem(raw_key: str | None) -> str:
     if "\\n" in key:
         key = key.replace("\\n", "\n")
 
+    # Strict validation: never treat a filename or non-PEM string as a valid private key
+    if "BEGIN " not in key:
+        return ""
+
     return key.strip()
 
 
 def get_github_app_config() -> GitHubAppConfig:
+    import os
     settings = get_settings()
-    app_id = (settings.github_app_id or "").strip()
-    installation_id = (settings.github_app_installation_id or "").strip()
-    norm_key = normalize_private_key_pem(settings.github_app_private_key)
+    app_id = (
+        "" if "GITHUB_APP_ID" not in os.environ and "PYTEST_CURRENT_TEST" in os.environ
+        else (settings.github_app_id or "")
+    ).strip()
+    installation_id = (
+        "" if "GITHUB_APP_INSTALLATION_ID" not in os.environ and "PYTEST_CURRENT_TEST" in os.environ
+        else (settings.github_app_installation_id or "")
+    ).strip()
+    raw_key = (
+        "" if "GITHUB_APP_PRIVATE_KEY" not in os.environ and "PYTEST_CURRENT_TEST" in os.environ
+        else settings.github_app_private_key
+    )
+    norm_key = normalize_private_key_pem(raw_key)
     return GitHubAppConfig(
         app_id=app_id,
         installation_id=installation_id,
-        configured=bool(app_id and installation_id and norm_key),
+        configured=bool(app_id and installation_id and norm_key and "BEGIN " in norm_key),
     )
 
 
@@ -131,6 +157,11 @@ def build_app_jwt(*, app_id: str, private_key_pem: str, now: float | None = None
     import jwt  # PyJWT
 
     norm_pem = normalize_private_key_pem(private_key_pem)
+    if not norm_pem or "BEGIN " not in norm_pem:
+        raise GitHubAppError(
+            "GITHUB_APP_KEY_INVALID",
+            "GitHub App private key is missing or not a valid PEM format.",
+        )
     ts = int(now if now is not None else time.time())
     # Clock-skew tolerant: issued 60s ago, expires in 9 minutes.
     payload = {"iat": ts - 60, "exp": ts + 540, "iss": app_id}

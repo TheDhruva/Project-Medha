@@ -327,3 +327,76 @@ def test_validate_repository_not_found(api_client, monkeypatch):
     res = api_client.post("/api/projects/validate-repository", json={"repository": "octo/missing"})
     assert res.status_code == 404
     assert res.json()["error"]["code"] == "REPO_NOT_FOUND"
+
+
+def test_delete_purges_associated_runs(api_client):
+    from app.database.repositories import DeploymentRepository
+    from app.core.enums import DeployMode, DeploymentStatus
+    from app.core.events import utc_now_iso
+    from app.models.deployment import DeploymentRecord
+
+    created = api_client.post("/api/projects", json={"name": "PurgeTest", "repository": "octo/purgedemo"})
+    project_id = created.json()["project_id"]
+    now = utc_now_iso()
+    d_repo = DeploymentRepository()
+    d_repo.create(
+        DeploymentRecord(
+            deployment_id="dep_purge_1",
+            repository_url="https://github.com/octo/purgedemo.git",
+            mode=DeployMode.REAL,
+            scenario=None,
+            target_host="localhost",
+            target_port=8080,
+            intent="test",
+            base_revision=None,
+            target_revision=None,
+            status=DeploymentStatus.COMPLETED,
+            current_stage="DONE",
+            owner_sub="local-operator",
+            project_id=project_id,
+            created_at=now,
+            updated_at=now,
+            is_demo=False,
+        )
+    )
+    assert d_repo.get("dep_purge_1") is not None
+    res = api_client.delete(f"/api/projects/{project_id}")
+    assert res.status_code == 200
+    assert d_repo.get("dep_purge_1") is None
+
+
+def test_delete_legacy_repository_runs(api_client):
+    import urllib.parse
+    from app.database.repositories import DeploymentRepository
+    from app.core.enums import DeployMode, DeploymentStatus
+    from app.core.events import utc_now_iso
+    from app.models.deployment import DeploymentRecord
+
+    now = utc_now_iso()
+    d_repo = DeploymentRepository()
+    legacy_repo = "https://github.com/octo/legacyrepo.git"
+    d_repo.create(
+        DeploymentRecord(
+            deployment_id="dep_legacy_1",
+            repository_url=legacy_repo,
+            mode=DeployMode.REAL,
+            scenario=None,
+            target_host="localhost",
+            target_port=8080,
+            intent="test",
+            base_revision=None,
+            target_revision=None,
+            status=DeploymentStatus.COMPLETED,
+            current_stage="DONE",
+            owner_sub="local-operator",
+            project_id=None,
+            created_at=now,
+            updated_at=now,
+            is_demo=False,
+        )
+    )
+    assert d_repo.get("dep_legacy_1") is not None
+    encoded = urllib.parse.quote(legacy_repo, safe="")
+    res = api_client.delete(f"/api/projects/{encoded}")
+    assert res.status_code == 200
+    assert d_repo.get("dep_legacy_1") is None

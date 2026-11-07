@@ -63,7 +63,7 @@ if (typeof process === "object" && process.env && !process.env.NEXT_PUBLIC_CLERK
 
 export function registerAuthTokenGetter(fn: (() => Promise<string | null>) | null): void {
   tokenGetter = fn;
-  if (authReadySlot.resolve) {
+  if (fn !== null && authReadySlot.resolve) {
     authReadySlot.resolve();
     authReadySlot.resolve = null;
   }
@@ -77,7 +77,24 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
   } catch {
     /* No credential available — proceed unauthenticated. */
   }
-  return globalThis.fetch(`${API_BASE}${path}`, { ...init, headers });
+  let response = await globalThis.fetch(`${API_BASE}${path}`, { ...init, headers });
+
+  // If a request returns 401 Unauthorized and Clerk tokenGetter is configured,
+  // do a 1-time retry with a fresh token in case of token expiration or initial race.
+  if (response.status === 401 && tokenGetter) {
+    try {
+      const freshToken = await tokenGetter();
+      if (freshToken) {
+        const retryHeaders = new Headers(init?.headers);
+        retryHeaders.set("Authorization", `Bearer ${freshToken}`);
+        response = await globalThis.fetch(`${API_BASE}${path}`, { ...init, headers: retryHeaders });
+      }
+    } catch {
+      /* Proceed with original 401 response on retry failure */
+    }
+  }
+
+  return response;
 }
 
 export interface DeployApiRequest {
